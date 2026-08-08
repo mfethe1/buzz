@@ -78,11 +78,6 @@ impl PairKey {
         };
         Self { channel_id, lo, hi }
     }
-
-    /// The two pubkeys, lexicographically ordered.
-    pub fn members(&self) -> (&str, &str) {
-        (&self.lo, &self.hi)
-    }
 }
 
 /// The result of recording a turn.
@@ -368,7 +363,13 @@ mod tests {
     #[test]
     fn pair_key_is_order_independent() {
         assert_eq!(PairKey::new(ch(), A, B), PairKey::new(ch(), B, A));
-        assert_eq!(PairKey::new(ch(), B, A).members(), (A, B));
+        // Same key from either argument order, so both directions of an
+        // exchange hash to one budget.
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(PairKey::new(ch(), A, B));
+        set.insert(PairKey::new(ch(), B, A));
+        assert_eq!(set.len(), 1);
     }
 
     #[test]
