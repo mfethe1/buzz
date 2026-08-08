@@ -33,7 +33,7 @@
 //! # Caveat — the boundary is end-of-turn, not start-of-turn
 //!
 //! The metric's `timestamp` is *end-of-turn*
-//! (`crates/buzz-core/src/agent_turn_metric.rs:107`) and the payload carries no
+//! (`crates/buzz-core/src/agent_turn_metric.rs:111`) and the payload carries no
 //! start time. So a message that arrives **while a turn is running** falls
 //! inside that turn's window, even though it actually triggered the *next* one.
 //!
