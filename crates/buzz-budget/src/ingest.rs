@@ -39,17 +39,53 @@ pub struct TurnCharge {
 /// Why a `kind:44200` event could not be turned into a [`TurnCharge`].
 #[derive(Debug, thiserror::Error)]
 pub enum IngestError {
+    /// The event is not `kind:44200` — expected when filtering a mixed stream.
     #[error("event kind {0} is not the agent turn metric kind ({KIND_AGENT_TURN_METRIC})")]
     WrongKind(u16),
+    /// Decryption or NIP-AM validation failed. Also the case when the metric
+    /// was addressed to a different owner.
     #[error("could not decrypt or validate the turn metric: {0}")]
     Payload(String),
+    /// The payload omitted `channelId`, so the turn cannot be scoped.
     #[error("payload has no channelId")]
     MissingChannelId,
+    /// `channelId` was present but is not a UUID.
     #[error("payload channelId {0:?} is not a UUID")]
     BadChannelId(String),
+    /// `timestamp` was present but is not RFC 3339.
     #[error("payload timestamp {0:?} is not RFC 3339")]
     BadTimestamp(String),
+    /// The self-reported turn time is too far from the signed `created_at` to
+    /// be trusted. See [`MAX_TIMESTAMP_SKEW_SECS`].
+    #[error(
+        "payload timestamp {payload} is {skew_secs}s from the event's created_at {created_at} \
+         (max {MAX_TIMESTAMP_SKEW_SECS}s)"
+    )]
+    TimestampSkew {
+        /// The self-reported end-of-turn time from inside the payload.
+        payload: String,
+        /// The event's `created_at`, which is covered by the signature and
+        /// checkable by the relay.
+        created_at: String,
+        /// Absolute difference, in seconds.
+        skew_secs: i64,
+    },
 }
+
+/// How far the payload's self-reported `timestamp` may sit from the event's
+/// `created_at` before the metric is rejected.
+///
+/// This exists because the payload timestamp is **attacker-controlled by the
+/// very agent being budgeted**: it is chosen by the agent, sealed inside its own
+/// NIP-44 ciphertext, and `AgentTurnMetricPayload::validate` checks only the
+/// numerics. Without this check, one metric dated far in the future moves the
+/// ledger's eviction cutoff forward and wipes the pair's whole window — letting
+/// a runaway agent zero its own budget at will.
+///
+/// `created_at` is not a perfect oracle (it is also chosen by the signer), but
+/// it is covered by the signature and is the field a relay can and does police,
+/// so tying the two together removes the free-form forgery.
+pub const MAX_TIMESTAMP_SKEW_SECS: i64 = 300;
 
 /// Decrypt a `kind:44200` event with the owner's keys and extract what the
 /// budget needs.
@@ -72,6 +108,19 @@ pub fn charge_from_metric(owner_keys: &Keys, event: &Event) -> Result<TurnCharge
     let turn_end = DateTime::parse_from_rfc3339(&payload.timestamp)
         .map_err(|_| IngestError::BadTimestamp(payload.timestamp.clone()))?
         .with_timezone(&Utc);
+
+    // The payload timestamp is chosen by the agent being budgeted. Tie it to
+    // the signed `created_at` so it cannot be used to shift the ledger window.
+    let created_at = DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
+        .ok_or_else(|| IngestError::BadTimestamp(event.created_at.to_string()))?;
+    let skew_secs = (turn_end - created_at).num_seconds().abs();
+    if skew_secs > MAX_TIMESTAMP_SKEW_SECS {
+        return Err(IngestError::TimestampSkew {
+            payload: payload.timestamp.clone(),
+            created_at: created_at.to_rfc3339(),
+            skew_secs,
+        });
+    }
 
     Ok(TurnCharge {
         channel_id,
@@ -115,11 +164,27 @@ mod tests {
         }
     }
 
-    /// Build a real signed kind:44200 event the way an agent would.
+    /// Build a real signed kind:44200 event the way an agent would, with
+    /// `created_at` consistent with the payload's own timestamp.
     fn metric_event(agent: &Keys, owner: &Keys, p: &AgentTurnMetricPayload) -> Event {
+        let created = DateTime::parse_from_rfc3339(&p.timestamp)
+            .map(|t| t.timestamp() as u64)
+            .unwrap_or(1_700_000_000);
+        metric_event_at(agent, owner, p, created)
+    }
+
+    /// Same, but with `created_at` chosen independently — used to exercise the
+    /// skew check.
+    fn metric_event_at(
+        agent: &Keys,
+        owner: &Keys,
+        p: &AgentTurnMetricPayload,
+        created_at: u64,
+    ) -> Event {
         let content = encrypt_agent_turn_metric(agent, &owner.public_key(), p)
             .expect("payload should encrypt");
         EventBuilder::new(Kind::Custom(KIND_AGENT_TURN_METRIC as u16), content)
+            .custom_created_at(nostr::Timestamp::from(created_at))
             .sign_with_keys(agent)
             .expect("event should sign")
     }
@@ -214,6 +279,58 @@ mod tests {
             charge_from_metric(&owner, &ev),
             Err(IngestError::BadTimestamp(_))
         ));
+    }
+
+    /// Security regression: the payload timestamp is chosen by the agent being
+    /// budgeted. A far-future one used to move the ledger's eviction cutoff
+    /// forward and wipe the pair's whole window, letting a runaway zero its own
+    /// budget. It must be rejected against the signed `created_at`.
+    #[test]
+    fn a_far_future_payload_timestamp_is_rejected() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        // created_at says 2023; the payload claims 2099.
+        let ev = metric_event_at(
+            &agent,
+            &owner,
+            &payload(Some(1.0), Some(CHANNEL), "2099-01-01T00:00:00Z"),
+            1_700_000_000,
+        );
+        assert!(matches!(
+            charge_from_metric(&owner, &ev),
+            Err(IngestError::TimestampSkew { .. })
+        ));
+    }
+
+    /// A far-past timestamp is equally forged, and equally rejected.
+    #[test]
+    fn a_far_past_payload_timestamp_is_rejected() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let ev = metric_event_at(
+            &agent,
+            &owner,
+            &payload(Some(1.0), Some(CHANNEL), "1999-01-01T00:00:00Z"),
+            1_700_000_000,
+        );
+        assert!(matches!(
+            charge_from_metric(&owner, &ev),
+            Err(IngestError::TimestampSkew { .. })
+        ));
+    }
+
+    /// Ordinary clock jitter between the harness and the signer must not
+    /// reject a legitimate metric.
+    #[test]
+    fn small_clock_skew_is_tolerated() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let p = payload(Some(0.5), Some(CHANNEL), "2023-11-14T22:13:20Z");
+        let created = DateTime::parse_from_rfc3339(&p.timestamp)
+            .unwrap()
+            .timestamp() as u64;
+        let ev = metric_event_at(&agent, &owner, &p, created + 60);
+        assert!(charge_from_metric(&owner, &ev).is_ok());
     }
 
     /// OQ7.2 — a harness that reports no cost is ingestable, and invisible to

@@ -30,6 +30,24 @@
 //! - **nothing observed → `None`.** Heartbeat turns and turns whose trigger was
 //!   missed are *not charged*. See the caveat below.
 //!
+//! # Caveat — the boundary is end-of-turn, not start-of-turn
+//!
+//! The metric's `timestamp` is *end-of-turn*
+//! (`crates/buzz-core/src/agent_turn_metric.rs:107`) and the payload carries no
+//! start time. So a message that arrives **while a turn is running** falls
+//! inside that turn's window, even though it actually triggered the *next* one.
+//!
+//! The consequence is concrete: one owner message landing mid-turn attributes
+//! that turn to `Human` (free), and the turn it really triggered then finds
+//! nothing new and returns `None` (also free). **One human message can free two
+//! turns.** Per-agent cursors do not fix this — the boundary is wrong, not the
+//! bookkeeping.
+//!
+//! It errs toward under-charging, which is the same direction as every other
+//! approximation here, so it is safe rather than merely tolerable. The durable
+//! fix is a turn-start (or trigger) field on NIP-AM — a second argument for
+//! ticket #7 OQ7.5.
+//!
 //! # Caveat — this is best-effort, and it fails open
 //!
 //! A supervisor that starts mid-conversation, drops a relay subscription, or
@@ -66,9 +84,13 @@ struct Observed {
 #[derive(Debug, Default)]
 pub struct TriggerLog {
     seen: HashMap<Uuid, Vec<Observed>>,
+    /// Per-(channel, agent) high-water mark of what that agent has already
+    /// been attributed. Exclusive lower bound on the next lookup.
+    cursors: HashMap<(Uuid, String), DateTime<Utc>>,
 }
 
 impl TriggerLog {
+    /// Create an empty log.
     pub fn new() -> Self {
         Self::default()
     }
@@ -84,8 +106,15 @@ impl TriggerLog {
         });
     }
 
-    /// Attribute a turn that ended at `turn_end`, consuming the messages it
-    /// accounted for so the next turn cannot double-count them.
+    /// Attribute a turn that ended at `turn_end`.
+    ///
+    /// Consumption is tracked **per (channel, agent)**, not per channel. Each
+    /// agent carries its own cursor, so two agents sharing a channel each see
+    /// the batch that triggered them. Draining per channel — as this did
+    /// originally — meant whichever metric the supervisor happened to process
+    /// first ate the other agent's trigger, leaving the second turn attributed
+    /// to `None` and therefore uncharged. Relay reordering alone was enough to
+    /// silently disable the budget.
     ///
     /// Returns `None` when nothing was observed — a heartbeat turn, or an
     /// observation gap. `None` is not charged.
@@ -95,16 +124,26 @@ impl TriggerLog {
         agent_pubkey: &str,
         turn_end: DateTime<Utc>,
     ) -> Option<TurnOrigin> {
-        let entries = self.seen.get_mut(&channel_id)?;
+        let entries = self.seen.get(&channel_id)?;
+        let cursor = self
+            .cursors
+            .get(&(channel_id, agent_pubkey.to_string()))
+            .copied();
 
-        // Everything at or before turn_end belongs to this turn's batch.
-        let (batch, rest): (Vec<Observed>, Vec<Observed>) =
-            entries.drain(..).partition(|o| o.at <= turn_end);
-        *entries = rest;
+        // Candidates are the messages this agent has not already accounted for,
+        // up to the end of the turn. `cursor` is exclusive so a message cannot
+        // trigger the same agent twice.
+        let triggers: Vec<&Observed> = entries
+            .iter()
+            .filter(|o| o.at <= turn_end)
+            .filter(|o| cursor.is_none_or(|c| o.at > c))
+            .filter(|o| o.author != agent_pubkey)
+            .collect();
 
-        // The agent's own messages never trigger it. buzz-acp ignores self
-        // events already; this guards a supervisor that sees the raw stream.
-        let triggers: Vec<&Observed> = batch.iter().filter(|o| o.author != agent_pubkey).collect();
+        // Advance this agent's cursor whether or not anything was found, so a
+        // turn that saw nothing does not re-examine the same window forever.
+        self.cursors
+            .insert((channel_id, agent_pubkey.to_string()), turn_end);
 
         if triggers.is_empty() {
             return None;
@@ -127,6 +166,9 @@ impl TriggerLog {
             v.retain(|o| o.at > cutoff);
             !v.is_empty()
         });
+        // Cursors for channels with nothing left to attribute are dead weight.
+        self.cursors
+            .retain(|(ch, _), at| *at > cutoff && self.seen.contains_key(ch));
     }
 
     /// Number of channels currently holding un-consumed observations.
@@ -228,6 +270,43 @@ mod tests {
             log.origin_for_turn(ch(), AGENT, t0() + Duration::seconds(6)),
             None,
             "the same message must not trigger two turns"
+        );
+    }
+
+    /// Regression: consumption used to be per-channel, so with two agents in
+    /// one channel whichever metric arrived first ate the other's trigger and
+    /// the second turn went uncharged. Relay reordering alone disabled the
+    /// budget.
+    #[test]
+    fn two_agents_in_one_channel_each_see_their_own_trigger() {
+        let mut log = TriggerLog::new();
+        // Iris mentions both agents in one message.
+        log.observe(ch(), "iris", false, t0());
+
+        assert_eq!(
+            log.origin_for_turn(ch(), AGENT, t0() + Duration::seconds(5)),
+            Some(TurnOrigin::Agent("iris".into()))
+        );
+        assert_eq!(
+            log.origin_for_turn(ch(), "otto", t0() + Duration::seconds(6)),
+            Some(TurnOrigin::Agent("iris".into())),
+            "the second agent must still see the trigger that woke it"
+        );
+    }
+
+    /// Each agent's cursor advances independently.
+    #[test]
+    fn one_agents_cursor_does_not_advance_another() {
+        let mut log = TriggerLog::new();
+        log.observe(ch(), PEER, false, t0());
+        assert!(log
+            .origin_for_turn(ch(), AGENT, t0() + Duration::seconds(5))
+            .is_some());
+        // AGENT is now caught up, but a later message must reach it again.
+        log.observe(ch(), PEER, false, t0() + Duration::seconds(10));
+        assert_eq!(
+            log.origin_for_turn(ch(), AGENT, t0() + Duration::seconds(15)),
+            Some(TurnOrigin::Agent(PEER.into()))
         );
     }
 

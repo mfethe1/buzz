@@ -51,6 +51,7 @@ crates/
   buzz-dev-mcp        # Developer MCP server — shell + file-edit tools
   buzz-persona        # Agent persona packs
   buzz-workflow       # YAML-as-code workflow engine (evalexpr conditions)
+  buzz-budget         # Sliding-window cost accounting for agent-to-agent exchanges
   # Clients + interop
   buzz-pair-relay     # Ephemeral sidecar relay for NIP-AB device pairing
   buzz-pairing-cli    # CLI for NIP-AB device pairing interop testing
