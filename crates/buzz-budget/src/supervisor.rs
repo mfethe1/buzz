@@ -26,7 +26,7 @@
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
-use crate::{Ledger, TriggerLog, Verdict};
+use crate::{Ledger, TriggerLog, TurnCharge, Verdict};
 
 /// Owns a [`Ledger`] and a [`TriggerLog`] and keeps them in step.
 #[derive(Debug)]
@@ -61,8 +61,13 @@ impl Supervisor {
     /// Attribute and charge one completed turn.
     ///
     /// A turn with no observable trigger — a heartbeat, or an observation gap —
-    /// is **not charged**, and comes back as `Allow`. See
+    /// is **not charged**, and comes back as [`Verdict::Unbudgeted`]. See
     /// [`crate::origin`] for why that fails open rather than closed.
+    ///
+    /// Emits the trace events decision **D4** relies on: exhaustion at `warn`,
+    /// ordinary charges at `debug`. D4 justifies a self-healing window by the
+    /// **sawtooth it leaves in the logs** — "a diagnosable signature rather than
+    /// a silent drain" — which only exists if something is emitted.
     pub fn on_turn_completed(
         &mut self,
         channel_id: Uuid,
@@ -70,16 +75,67 @@ impl Supervisor {
         cost_usd: Option<f64>,
         turn_end: DateTime<Utc>,
     ) -> Verdict {
-        match self
+        let Some(origin) = self
             .triggers
             .origin_for_turn(channel_id, agent_pubkey, turn_end)
-        {
-            Some(origin) => {
-                self.ledger
-                    .record(channel_id, agent_pubkey, &origin, cost_usd, turn_end)
-            }
-            None => Verdict::Unbudgeted,
+        else {
+            return Verdict::Unbudgeted;
+        };
+
+        let verdict = self
+            .ledger
+            .record(channel_id, agent_pubkey, &origin, cost_usd, turn_end);
+
+        match &verdict {
+            Verdict::Exhausted {
+                spent_usd,
+                budget_usd,
+            } => tracing::warn!(
+                %channel_id,
+                agent = %agent_pubkey,
+                spent_usd,
+                budget_usd,
+                "agent-pair budget exhausted; exchange should be stopped"
+            ),
+            Verdict::Allow { spent_usd } => tracing::debug!(
+                %channel_id,
+                agent = %agent_pubkey,
+                spent_usd,
+                "agent-triggered turn charged"
+            ),
+            Verdict::Unbudgeted => {}
         }
+        verdict
+    }
+
+    /// Charge a turn decoded straight off the wire by
+    /// [`crate::charge_from_metric`].
+    ///
+    /// Prefer this over [`Self::on_turn_completed`] when the input came from a
+    /// `kind:44200` event: it is the only path that inspects
+    /// [`TurnCharge::delta_reliable`], which the metric sets to `false` when the
+    /// publisher lost its cumulative baseline and the per-turn cost is
+    /// therefore untrustworthy.
+    ///
+    /// The charge is still applied — ticket #7 **OQ7.1** has not decided a
+    /// fallback (its suggestion is "prefer `cumulative` where present", which
+    /// this type does not yet carry). It is logged at `warn` so the question can
+    /// be answered from real data instead of guessed at.
+    pub fn on_turn_charge(&mut self, charge: &TurnCharge) -> Verdict {
+        if !charge.delta_reliable {
+            tracing::warn!(
+                channel_id = %charge.channel_id,
+                agent = %charge.agent_pubkey,
+                cost_usd = ?charge.cost_usd,
+                "turn metric reported delta_reliable=false; charging it anyway (see #7 OQ7.1)"
+            );
+        }
+        self.on_turn_completed(
+            charge.channel_id,
+            &charge.agent_pubkey,
+            charge.cost_usd,
+            charge.turn_end,
+        )
     }
 
     /// Spend for a pair across the current window.
@@ -211,6 +267,43 @@ mod tests {
             assert!(!v.is_exhausted(), "unattributed turns must fail open");
         }
         assert_eq!(sup.tracked_pairs(), 0);
+    }
+
+    /// `on_turn_charge` must be equivalent to the plain path — the
+    /// `delta_reliable` inspection is additive, not a different policy.
+    #[test]
+    fn charging_from_a_wire_decoded_turn_matches_the_plain_path() {
+        use crate::TurnCharge;
+
+        let mut sup = Supervisor::new(5.0, 3600);
+        sup.observe_message(ch(), OTTO, false, t0());
+        let v = sup.on_turn_charge(&TurnCharge {
+            channel_id: ch(),
+            agent_pubkey: EVA.into(),
+            cost_usd: Some(6.0),
+            turn_end: t0() + Duration::seconds(1),
+            delta_reliable: true,
+        });
+        assert!(v.is_exhausted());
+        assert_eq!(sup.spent(ch(), EVA, OTTO, t0() + Duration::seconds(2)), 6.0);
+    }
+
+    /// An unreliable delta is still charged — OQ7.1 is unresolved, so the
+    /// behaviour must be explicit and tested rather than accidental.
+    #[test]
+    fn an_unreliable_delta_is_still_charged() {
+        use crate::TurnCharge;
+
+        let mut sup = Supervisor::new(5.0, 3600);
+        sup.observe_message(ch(), OTTO, false, t0());
+        sup.on_turn_charge(&TurnCharge {
+            channel_id: ch(),
+            agent_pubkey: EVA.into(),
+            cost_usd: Some(2.5),
+            turn_end: t0() + Duration::seconds(1),
+            delta_reliable: false,
+        });
+        assert_eq!(sup.spent(ch(), EVA, OTTO, t0() + Duration::seconds(2)), 2.5);
     }
 
     #[test]

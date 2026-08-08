@@ -943,6 +943,7 @@ dependencies = [
  "chrono",
  "nostr",
  "thiserror 2.0.18",
+ "tracing",
  "uuid",
 ]
 
