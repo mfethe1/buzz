@@ -1,0 +1,13 @@
+[package]
+name = "buzz-budget"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Sliding-window cost accounting for agent-to-agent exchanges"
+
+[dependencies]
+chrono    = { workspace = true }
+thiserror = { workspace = true }
+uuid      = { workspace = true }
