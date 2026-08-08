@@ -37,6 +37,8 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
+    /// Create a supervisor. See [`crate::DEFAULT_BUDGET_USD`] and
+    /// [`crate::DEFAULT_WINDOW_SECS`] for the values decision D3 settled on.
     pub fn new(budget_usd: f64, window_secs: i64) -> Self {
         Self {
             ledger: Ledger::new(budget_usd, window_secs),
@@ -76,7 +78,7 @@ impl Supervisor {
                 self.ledger
                     .record(channel_id, agent_pubkey, &origin, cost_usd, turn_end)
             }
-            None => Verdict::Allow { spent_usd: 0.0 },
+            None => Verdict::Unbudgeted,
         }
     }
 

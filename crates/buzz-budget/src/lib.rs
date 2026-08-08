@@ -22,6 +22,9 @@
 //! messages costs pennies and passes; 30 huge-context turns burn the budget and
 //! stop. Message count would penalise the first and permit the second.
 
+#![deny(unsafe_code)]
+#![warn(missing_docs)]
+
 use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
@@ -59,6 +62,7 @@ pub enum TurnOrigin {
 /// A→B and B→A are the same exchange and must share one budget.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PairKey {
+    /// Channel the exchange runs in. Budgets never cross channels.
     pub channel_id: Uuid,
     lo: String,
     hi: String,
@@ -84,12 +88,26 @@ impl PairKey {
 /// The result of recording a turn.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
-    /// Within budget. `spent` is the pair's total across the current window,
-    /// inclusive of the turn just recorded.
-    Allow { spent_usd: f64 },
+    /// Within budget. `spent_usd` is the pair's total across the current
+    /// window, inclusive of the turn just recorded.
+    Allow {
+        /// The pair's spend across the current window.
+        spent_usd: f64,
+    },
+    /// The turn was not charged, because it had no agent-pair to charge: a
+    /// human-triggered turn (**D5**), or one with no observable trigger.
+    ///
+    /// Distinct from `Allow` so a caller logging spend cannot mistake "not
+    /// budgeted" for "budgeted, and at zero" — the pair may be holding $4.90.
+    Unbudgeted,
     /// Budget exceeded for this pair in this channel. The caller decides what
     /// to do about it; this crate does not act.
-    Exhausted { spent_usd: f64, budget_usd: f64 },
+    Exhausted {
+        /// The pair's spend across the current window.
+        spent_usd: f64,
+        /// The budget it exceeded.
+        budget_usd: f64,
+    },
 }
 
 impl Verdict {
@@ -151,7 +169,7 @@ impl Ledger {
     ) -> Verdict {
         // D5: human-triggered turns are never charged and never blocked.
         let peer = match origin {
-            TurnOrigin::Human => return Verdict::Allow { spent_usd: 0.0 },
+            TurnOrigin::Human => return Verdict::Unbudgeted,
             TurnOrigin::Agent(peer) => peer,
         };
 
