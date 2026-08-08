@@ -27,8 +27,10 @@ use std::collections::HashMap;
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
+pub mod ingest;
 pub mod origin;
 pub mod supervisor;
+pub use ingest::{charge_from_metric, IngestError, TurnCharge};
 pub use origin::TriggerLog;
 pub use supervisor::Supervisor;
 

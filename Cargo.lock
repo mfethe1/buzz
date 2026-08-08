@@ -939,7 +939,9 @@ dependencies = [
 name = "buzz-budget"
 version = "0.1.0"
 dependencies = [
+ "buzz-core",
  "chrono",
+ "nostr",
  "thiserror 2.0.18",
  "uuid",
 ]

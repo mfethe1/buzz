@@ -8,6 +8,8 @@ repository.workspace = true
 description = "Sliding-window cost accounting for agent-to-agent exchanges"
 
 [dependencies]
+buzz-core = { workspace = true }
 chrono    = { workspace = true }
+nostr     = { workspace = true }
 thiserror = { workspace = true }
 uuid      = { workspace = true }
