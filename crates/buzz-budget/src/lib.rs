@@ -28,7 +28,9 @@ use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
 pub mod origin;
+pub mod supervisor;
 pub use origin::TriggerLog;
+pub use supervisor::Supervisor;
 
 /// Default budget from decision D3.
 pub const DEFAULT_BUDGET_USD: f64 = 5.0;
