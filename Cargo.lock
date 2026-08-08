@@ -936,6 +936,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-budget"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "chrono",
+ "nostr",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-cli"
 version = "0.1.0"
 dependencies = [
