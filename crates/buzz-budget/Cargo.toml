@@ -12,4 +12,5 @@ buzz-core = { workspace = true }
 chrono    = { workspace = true }
 nostr     = { workspace = true }
 thiserror = { workspace = true }
+tracing   = { workspace = true }
 uuid      = { workspace = true }
