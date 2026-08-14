@@ -1055,6 +1055,7 @@ mod tests {
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,
+            cli_login_env_conflicts: &[],
         }
     }
 
@@ -1247,6 +1248,7 @@ mod tests {
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,
+            cli_login_env_conflicts: &[],
         }
     }
 

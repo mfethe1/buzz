@@ -1272,3 +1272,148 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     };
     crate::managed_agents::ManagedAgentPairRuntime::starting(process)
 }
+
+// ── cli_login_env_conflicts_to_strip tests ──────────────────────────────
+//
+// A CLI-login harness (Claude Code, codex) authenticates from its own
+// credential store, but also honours a provider API key from the environment
+// and prefers it. Because `std::process::Command` inherits the desktop's env,
+// an `ANTHROPIC_API_KEY` exported in a shell profile would silently move a
+// Claude Code agent off the user's subscription and onto Console billing.
+
+fn conflict_env(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+}
+
+fn conflict_runtime(id: &str) -> &'static crate::managed_agents::discovery::KnownAcpRuntime {
+    crate::managed_agents::discovery::known_acp_runtime_exact(id).expect("known runtime")
+}
+
+#[test]
+fn claude_strips_both_ambient_anthropic_credentials() {
+    let stripped = super::cli_login_env_conflicts_to_strip(
+        Some(conflict_runtime("claude")),
+        &conflict_env(&[]),
+    );
+    assert_eq!(stripped, vec!["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]);
+}
+
+#[test]
+fn explicit_user_key_survives_as_the_opt_in_escape_hatch() {
+    // Setting the key on the agent (or the global/persona layer) is a
+    // deliberate choice to bill the API — it must still reach the harness.
+    let stripped = super::cli_login_env_conflicts_to_strip(
+        Some(conflict_runtime("claude")),
+        &conflict_env(&[("ANTHROPIC_API_KEY", "sk-ant-explicit")]),
+    );
+    assert_eq!(
+        stripped,
+        vec!["ANTHROPIC_AUTH_TOKEN"],
+        "only the key the user did not set should be stripped"
+    );
+}
+
+#[test]
+fn empty_user_value_is_treated_as_absent() {
+    // A cleared field in the UI must not defeat the strip and let the ambient
+    // value through — the same empty-is-missing rule the readiness checks use.
+    let stripped = super::cli_login_env_conflicts_to_strip(
+        Some(conflict_runtime("claude")),
+        &conflict_env(&[("ANTHROPIC_API_KEY", "")]),
+    );
+    assert_eq!(stripped, vec!["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]);
+}
+
+#[test]
+fn codex_strips_ambient_openai_key() {
+    // Mirrors the readiness rule: codex authenticates from its own credential
+    // store, NOT from OPENAI_API_KEY.
+    let stripped = super::cli_login_env_conflicts_to_strip(
+        Some(conflict_runtime("codex")),
+        &conflict_env(&[]),
+    );
+    assert_eq!(stripped, vec!["OPENAI_API_KEY"]);
+}
+
+#[test]
+fn env_configured_runtimes_strip_nothing() {
+    // goose and buzz-agent take provider credentials from the environment by
+    // design — stripping there would break every agent.
+    for id in ["goose", "buzz-agent"] {
+        let stripped = super::cli_login_env_conflicts_to_strip(
+            Some(conflict_runtime(id)),
+            &conflict_env(&[("ANTHROPIC_API_KEY", "sk-ant-test")]),
+        );
+        assert!(stripped.is_empty(), "{id} must not strip credentials");
+    }
+}
+
+#[test]
+fn unknown_custom_harness_strips_nothing() {
+    let stripped = super::cli_login_env_conflicts_to_strip(None, &conflict_env(&[]));
+    assert!(stripped.is_empty());
+}
+
+#[test]
+fn claude_spawn_command_marks_anthropic_key_for_removal() {
+    // End of the chain: the policy above has to actually reach the spawned
+    // `Command`. `env_remove` records an explicit removal that `get_envs()`
+    // reports as `(key, None)` — that is what stops the inherited value from
+    // being handed to the harness.
+    let mut command = std::process::Command::new("buzz-acp");
+    // Simulate the descriptor.env write that happens immediately before the
+    // strip in `spawn_agent_child`, with an unrelated key present.
+    command.env("BUZZ_ACP_MODEL", "opus");
+    super::strip_cli_login_env_conflicts(
+        &mut command,
+        super::known_acp_runtime("claude-agent-acp"),
+        &conflict_env(&[]),
+        "test-agent",
+    );
+
+    let envs: Vec<_> = command.get_envs().collect();
+    assert!(
+        envs.contains(&(std::ffi::OsStr::new("ANTHROPIC_API_KEY"), None)),
+        "ANTHROPIC_API_KEY must be explicitly removed, got {envs:?}"
+    );
+    assert!(
+        envs.contains(&(std::ffi::OsStr::new("ANTHROPIC_AUTH_TOKEN"), None)),
+        "ANTHROPIC_AUTH_TOKEN must be explicitly removed, got {envs:?}"
+    );
+    assert!(
+        envs.contains(&(
+            std::ffi::OsStr::new("BUZZ_ACP_MODEL"),
+            Some(std::ffi::OsStr::new("opus"))
+        )),
+        "unrelated env must be left alone, got {envs:?}"
+    );
+}
+
+#[test]
+fn claude_spawn_command_keeps_an_explicitly_configured_key() {
+    // The escape hatch has to survive the `Command` layer too: a user who set
+    // the key on the agent still gets API-key billing.
+    let mut command = std::process::Command::new("buzz-acp");
+    let user_env = conflict_env(&[("ANTHROPIC_API_KEY", "sk-ant-explicit")]);
+    for (key, value) in &user_env {
+        command.env(key, value);
+    }
+    super::strip_cli_login_env_conflicts(
+        &mut command,
+        super::known_acp_runtime("claude-agent-acp"),
+        &user_env,
+        "test-agent",
+    );
+
+    let envs: Vec<_> = command.get_envs().collect();
+    assert!(
+        envs.contains(&(
+            std::ffi::OsStr::new("ANTHROPIC_API_KEY"),
+            Some(std::ffi::OsStr::new("sk-ant-explicit"))
+        )),
+        "explicitly configured key must reach the harness, got {envs:?}"
+    );
+}

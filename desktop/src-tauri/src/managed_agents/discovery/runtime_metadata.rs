@@ -64,6 +64,24 @@ pub(crate) struct KnownAcpRuntime {
     /// CLI args for probing authentication status. `args[0]` is the binary name;
     /// the remainder are the subcommand. `None` for runtimes with no login step.
     pub auth_probe_args: Option<&'static [&'static str]>,
+    /// Ambient credential env vars that would *override* this runtime's own CLI
+    /// login when inherited from the desktop process.
+    ///
+    /// Runtimes with an `auth_probe_args` login step keep their credentials in a
+    /// CLI-managed store (`~/.claude/.credentials.json`, the codex credential
+    /// store). Those CLIs also honour a provider API key from the environment,
+    /// and the key wins — so an `ANTHROPIC_API_KEY` exported in the user's shell
+    /// profile silently redirects a Claude Code agent from the subscription the
+    /// user logged in with to pay-as-you-go API billing, with nothing in the
+    /// Buzz UI to indicate it. `std::process::Command` inherits the parent
+    /// environment, so Buzz passes the key along without ever being asked to.
+    ///
+    /// Listed keys are stripped from the spawn environment unless the user set
+    /// them explicitly in a Buzz env layer (see `strip_cli_login_env_conflicts`),
+    /// which stays available as the opt-in escape hatch for anyone who *wants*
+    /// API-key billing. Empty for runtimes that read their credentials from the
+    /// environment by design (goose, buzz-agent).
+    pub cli_login_env_conflicts: &'static [&'static str],
 }
 
 impl KnownAcpRuntime {

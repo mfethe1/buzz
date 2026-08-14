@@ -110,6 +110,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        // Goose reads provider credentials from the environment by design.
+        cli_login_env_conflicts: &[],
     },
     KnownAcpRuntime {
         id: "claude",
@@ -143,6 +145,9 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &[],
         login_hint: Some("Run the Claude CLI to complete authentication."),
         auth_probe_args: Some(&["claude", "auth", "status"]),
+        // Both keys make the Claude Code CLI bill the Anthropic Console instead
+        // of the subscription the user authenticated with.
+        cli_login_env_conflicts: &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
     },
     KnownAcpRuntime {
         id: "codex",
@@ -177,6 +182,9 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+        // Matches the readiness rule above: codex authenticates from its own
+        // credential store, NOT from `OPENAI_API_KEY`.
+        cli_login_env_conflicts: &["OPENAI_API_KEY"],
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -210,6 +218,9 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        // buzz-agent takes provider credentials from the environment by design —
+        // that IS its configuration surface (see `buzz_agent_requirements`).
+        cli_login_env_conflicts: &[],
     },
 ];
 

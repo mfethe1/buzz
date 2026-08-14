@@ -371,6 +371,68 @@ pub(crate) fn build_respond_to_env(
     build_respond_to_env_with_policy(record, owner_hex, super::owner_only())
 }
 
+/// Decide which ambient credential env vars to strip for a CLI-login runtime.
+///
+/// Pure half of [`strip_cli_login_env_conflicts`] so the policy is testable
+/// without spawning a process.
+///
+/// A key is stripped when the runtime declares it in `cli_login_env_conflicts`
+/// **and** no Buzz env layer set it. `user_env` is `descriptor.env` — the fully
+/// layered result (definition floor → global → persona → agent), so a key the
+/// user typed into any of those layers is preserved and still wins. That is the
+/// deliberate escape hatch: setting `ANTHROPIC_API_KEY` on the agent opts into
+/// API-key billing explicitly, while merely having it exported in a shell
+/// profile no longer does so silently.
+fn cli_login_env_conflicts_to_strip<'a>(
+    runtime: Option<&'a KnownAcpRuntime>,
+    user_env: &std::collections::BTreeMap<String, String>,
+) -> Vec<&'a str> {
+    let Some(runtime) = runtime else {
+        return Vec::new();
+    };
+    runtime
+        .cli_login_env_conflicts
+        .iter()
+        .copied()
+        // An empty value is not a credential — treat it as absent so a blank
+        // field in the UI does not defeat the strip. This matches the
+        // empty-string-is-missing rule the readiness checks already use.
+        .filter(|key| user_env.get(*key).is_none_or(|value| value.is_empty()))
+        .collect()
+}
+
+/// Remove ambient provider API keys that would override a CLI-login runtime's
+/// own credentials.
+///
+/// `std::process::Command` inherits the desktop process's environment, so an
+/// `ANTHROPIC_API_KEY` exported in the user's shell profile (or set as a Windows
+/// user env var) reaches a Claude Code agent and silently redirects it from the
+/// subscription the user logged in with to Anthropic Console billing. Buzz never
+/// asked for that key and shows no sign of using it. Strip it unless a Buzz env
+/// layer set it explicitly.
+///
+/// Must be called **after** `descriptor.env` is written to `command`: the strip
+/// has to clear the inherited value that `Command::env` would otherwise pass
+/// through, and it deliberately does not undo an explicit user value (those are
+/// filtered out by [`cli_login_env_conflicts_to_strip`]).
+fn strip_cli_login_env_conflicts(
+    command: &mut std::process::Command,
+    runtime: Option<&KnownAcpRuntime>,
+    user_env: &std::collections::BTreeMap<String, String>,
+    agent_name: &str,
+) {
+    for key in cli_login_env_conflicts_to_strip(runtime, user_env) {
+        // Only log when there is actually an ambient value being dropped, so a
+        // clean environment stays quiet in the agent log.
+        if std::env::var_os(key).is_some_and(|value| !value.is_empty()) {
+            eprintln!(
+                "buzz-desktop: agent {agent_name}: dropping inherited {key} so the harness uses its own CLI login; set {key} on the agent to opt back in"
+            );
+        }
+        command.env_remove(key);
+    }
+}
+
 pub(crate) fn configure_runtime_cli(
     command: &mut std::process::Command,
     runtime: Option<&KnownAcpRuntime>,
@@ -822,6 +884,7 @@ pub fn spawn_agent_child(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+    strip_cli_login_env_conflicts(&mut command, runtime_meta, &descriptor.env, &record.name);
     configure_runtime_cli(&mut command, runtime_meta);
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
