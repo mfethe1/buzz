@@ -502,6 +502,28 @@ export type AuthStatus =
   | { status: "not_applicable" }
   | { status: "unknown" };
 
+/**
+ * Which credential a CLI-login runtime will actually be charged against.
+ *
+ * `AuthStatus` answers "can this runtime start?"; this answers "whose money
+ * does it spend?". Both a subscription login and an ambient `ANTHROPIC_API_KEY`
+ * make the Claude CLI report `logged_in`, so a runtime can be perfectly
+ * authenticated while quietly billing per token instead of the plan the user
+ * signed in with.
+ *
+ * Absent whenever the CLI's output could not be classified — render nothing
+ * rather than a confident wrong claim about billing.
+ */
+export type AuthCredential =
+  /** A vendor plan login — usage is included in the subscription. */
+  | { kind: "subscription"; plan?: string; account?: string }
+  /**
+   * Per-token API billing. `source` names the environment variable the key came
+   * from when the CLI reports one; it is absent for a credential with no env
+   * var to point at (e.g. a direct Anthropic Console login).
+   */
+  | { kind: "api_key"; source?: string };
+
 export type AcpRuntimeCatalogEntry = {
   id: string;
   label: string;
@@ -530,6 +552,12 @@ export type AcpRuntimeCatalogEntry = {
   nodeRequired: boolean;
   /** Login/auth status for CLI-based runtimes. */
   authStatus: AuthStatus;
+  /**
+   * Which credential this runtime's CLI will actually charge. Null when the
+   * runtime has no login step, the probe did not run, or the output could not
+   * be classified.
+   */
+  authCredential: AuthCredential | null;
   /** Hint for completing authentication; null when not applicable or already logged in. */
   loginHint: string | null;
   /** "builtin" (compiled in), "preset" (PATH-probed, not editable), or "custom" (user JSON). Controls UI editability. */

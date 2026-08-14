@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use crate::managed_agents::{
     buzz_managed_command_path, buzz_managed_node_bin_dir, buzz_managed_npm_bin_dir,
-    AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
-    HarnessSource,
+    AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthCredential, AuthStatus,
+    CommandAvailabilityInfo, HarnessSource,
 };
 mod presets;
 mod runtime_metadata;
@@ -1016,7 +1016,16 @@ pub(crate) fn is_npm_global_install(cmd: &str) -> bool {
 /// background threads to prevent pipe-buffer deadlock. On timeout the child is
 /// killed and `Unknown` is returned; no orphaned threads or processes are left
 /// behind. Returns `Unknown` on timeout.
-fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
+///
+/// Returns the login status alongside the credential the CLI reports it will
+/// charge (see [`AuthCredential`]). The stdout drain already existed to avoid
+/// deadlock and previously discarded what it read — classifying it costs no
+/// extra subprocess, and it is the only way to tell a subscription login apart
+/// from an ambient API key, since both exit `0`.
+fn probe_auth_status(
+    binary_path: &Path,
+    probe_args: &[&str],
+) -> (AuthStatus, Option<AuthCredential>) {
     use crate::managed_agents::readiness::cli_probe;
 
     let augmented_path = cli_probe::augmented_path();
@@ -1034,7 +1043,7 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
 
     let mut child = match command.spawn() {
         Ok(c) => c,
-        Err(_) => return AuthStatus::Unknown,
+        Err(_) => return (AuthStatus::Unknown, None),
     };
 
     // Drain stdout/stderr on background threads to prevent pipe-buffer deadlock.
@@ -1046,6 +1055,7 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
         if let Some(mut pipe) = stdout_pipe {
             let _ = pipe.read_to_end(&mut buf);
         }
+        buf
     });
     let stderr_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -1077,7 +1087,7 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
             let _ = wait_thread.join();
             let _ = stdout_thread.join();
             let _ = stderr_thread.join();
-            return AuthStatus::Unknown;
+            return (AuthStatus::Unknown, None);
         }
         match rx.recv_timeout(Duration::from_millis(100).min(remaining)) {
             Ok(Ok(status)) => break status,
@@ -1085,28 +1095,41 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
                 let _ = wait_thread.join();
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
-                return AuthStatus::Unknown;
+                return (AuthStatus::Unknown, None);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
-                return AuthStatus::Unknown;
+                return (AuthStatus::Unknown, None);
             }
         }
     };
 
     let _ = wait_thread.join();
-    let _ = stdout_thread.join();
+    let stdout_bytes = stdout_thread.join().unwrap_or_default();
     let stderr_bytes = stderr_thread.join().unwrap_or_default();
 
-    match cli_probe::classify_probe_output(&stderr_bytes, exit_status.success()) {
+    let status = match cli_probe::classify_probe_output(&stderr_bytes, exit_status.success()) {
         cli_probe::ProbeOutcome::LoggedIn => AuthStatus::LoggedIn,
         cli_probe::ProbeOutcome::LoggedOut => AuthStatus::LoggedOut,
         cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => AuthStatus::ConfigInvalid {
             diagnostic: stderr_excerpt,
         },
-    }
+    };
+
+    // Only a logged-in CLI has a credential to report; a logged-out or broken
+    // one would have printed nothing useful to classify.
+    let credential = if status == AuthStatus::LoggedIn {
+        crate::managed_agents::readiness::auth_credential::parse_probe_stdout(
+            probe_args,
+            &stdout_bytes,
+        )
+    } else {
+        None
+    };
+
+    (status, credential)
 }
 
 pub fn command_availability(command: &str) -> CommandAvailabilityInfo {
@@ -1412,6 +1435,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             node_required,
             // Filled in by the auth-probe phase in full catalog discovery.
             auth_status: AuthStatus::Unknown,
+            auth_credential: None,
             login_hint: None,
             source: HarnessSource::Builtin,
             definition_env: Default::default(),
@@ -1458,7 +1482,10 @@ pub fn discover_acp_runtimes_from(
 
     // Phase 2: run auth probes in parallel for entries that need them.
     // Spawn one thread per probeable entry; total cost = max(probe latency).
-    let probe_handles: Vec<(usize, std::thread::JoinHandle<AuthStatus>)> = partials
+    let probe_handles: Vec<(
+        usize,
+        std::thread::JoinHandle<(AuthStatus, Option<AuthCredential>)>,
+    )> = partials
         .iter()
         .enumerate()
         .filter_map(|(idx, partial)| {
@@ -1480,7 +1507,7 @@ pub fn discover_acp_runtimes_from(
 
     // Collect probe results and patch entries.
     for (idx, handle) in probe_handles {
-        let status = handle.join().unwrap_or(AuthStatus::Unknown);
+        let (status, credential) = handle.join().unwrap_or((AuthStatus::Unknown, None));
         let partial = &mut partials[idx];
         partial.entry.login_hint =
             if matches!(status, AuthStatus::LoggedIn | AuthStatus::NotApplicable) {
@@ -1489,6 +1516,7 @@ pub fn discover_acp_runtimes_from(
                 partial.runtime.login_hint.map(str::to_string)
             };
         partial.entry.auth_status = status;
+        partial.entry.auth_credential = credential;
     }
 
     // Fill NotApplicable / Unknown for non-probed entries.
@@ -1574,6 +1602,7 @@ pub fn discover_acp_runtimes_from(
                 node_required: false,
                 // No auth probe for custom harnesses.
                 auth_status: AuthStatus::NotApplicable,
+                auth_credential: None,
                 login_hint: None,
                 source: HarnessSource::Custom,
                 definition_env: def.env.clone(), // preserve for edit round-trip

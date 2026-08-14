@@ -174,6 +174,7 @@ pub async fn save_custom_harness(
         underlying_cli_path: None,
         node_required: false,
         auth_status: AuthStatus::NotApplicable,
+        auth_credential: None,
         login_hint: None,
         source: HarnessSource::Custom,
         definition_env: definition.env,

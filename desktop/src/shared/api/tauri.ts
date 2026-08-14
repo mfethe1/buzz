@@ -36,6 +36,7 @@ import type {
   UpdateManagedAgentInput,
   AcpAvailabilityStatus,
   AcpRuntimeCatalogEntry,
+  AuthCredential,
   AuthStatus,
   CommandAvailability,
   InstallRuntimeResult,
@@ -193,6 +194,8 @@ export type RawAcpRuntimeCatalogEntry = {
   node_required: boolean;
   /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
   auth_status: AuthStatus;
+  /** Absent when the runtime has no login step or its probe output was unclassifiable. */
+  auth_credential?: AuthCredential;
   login_hint?: string;
   source: "builtin" | "preset" | "custom";
   /** Definition-level env vars for `source: custom` entries; absent for builtin/preset. */
@@ -738,6 +741,7 @@ export function fromRawAcpRuntimeCatalogEntry(
     underlyingCliPath: entry.underlying_cli_path,
     nodeRequired: entry.node_required,
     authStatus: entry.auth_status,
+    authCredential: entry.auth_credential ?? null,
     loginHint: entry.login_hint ?? null,
     source: entry.source,
     definitionEnv: entry.definition_env ?? {},

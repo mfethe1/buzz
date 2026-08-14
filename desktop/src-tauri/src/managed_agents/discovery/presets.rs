@@ -79,6 +79,7 @@ pub(super) fn preset_catalog_entry(
         underlying_cli_path,
         node_required: false,
         auth_status: AuthStatus::NotApplicable,
+        auth_credential: None,
         login_hint: None,
         source: HarnessSource::Preset,
         definition_env: Default::default(),

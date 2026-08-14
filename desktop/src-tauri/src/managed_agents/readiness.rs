@@ -51,6 +51,7 @@ use crate::managed_agents::{
     types::{AcpAvailabilityStatus, AgentDefinition, ManagedAgentRecord},
 };
 
+pub(crate) mod auth_credential;
 mod cli_login;
 pub(crate) mod cli_probe;
 

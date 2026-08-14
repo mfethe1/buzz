@@ -614,6 +614,42 @@ pub enum AuthStatus {
     Unknown,
 }
 
+/// Which credential a CLI-login runtime will actually be charged against.
+///
+/// [`AuthStatus`] answers "can this runtime start?"; this answers "whose money
+/// does it spend?" — a question the exit-code probe cannot reach. Both a
+/// subscription login and an ambient `ANTHROPIC_API_KEY` make `claude auth
+/// status` exit `0` with `loggedIn: true`, so a runtime can be perfectly
+/// `LoggedIn` while quietly billing per token instead of the plan the user
+/// signed in with. Parsed from probe stdout by
+/// [`readiness::auth_credential`](crate::managed_agents::readiness).
+///
+/// Serializes as a tagged union `{ kind: "...", … }` so the TypeScript side can
+/// switch exhaustively.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum AuthCredential {
+    /// A vendor plan login — usage is included in the subscription.
+    Subscription {
+        /// Plan tier as the CLI reports it (e.g. `"max"`, `"pro"`, `"ChatGPT"`).
+        /// `None` when the CLI confirms a plan login without naming the tier.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        plan: Option<String>,
+        /// Account identity (email, falling back to organization name).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
+    /// Per-token API billing rather than a plan.
+    ApiKey {
+        /// The environment variable the CLI took the key from (e.g.
+        /// `"ANTHROPIC_API_KEY"`), when it names one. `None` when the CLI
+        /// reports API billing without a named source — for example a direct
+        /// Anthropic Console login, where there is no env var to point at.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+    },
+}
+
 /// Origin of an ACP runtime catalog entry. Serializes as a lowercase string so the TypeScript consumer can switch on it without numeric comparisons.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -657,6 +693,12 @@ pub struct AcpRuntimeCatalogEntry {
     pub node_required: bool,
     /// Login/authentication status for CLI-based runtimes.
     pub auth_status: AuthStatus,
+    /// Which credential the runtime's CLI will actually charge, when its auth
+    /// probe reports enough to tell. Absent for runtimes with no login step,
+    /// when the probe did not run, or when the output could not be classified —
+    /// the UI shows nothing rather than a confident wrong answer about billing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_credential: Option<AuthCredential>,
     /// Hint for completing authentication, shown when `auth_status` is not `logged_in`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login_hint: Option<String>,

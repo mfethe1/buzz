@@ -1,5 +1,5 @@
 import * as React from "react";
-import { EllipsisVertical, ExternalLink } from "lucide-react";
+import { EllipsisVertical, ExternalLink, TriangleAlert } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import {
@@ -10,6 +10,7 @@ import {
   useManagedAgentsQuery,
   usePersonasQuery,
 } from "@/features/agents/hooks";
+import { authCredentialLabel } from "@/features/agents/lib/authCredentialLabel";
 import { useInstallOutputLine } from "@/features/agents/lib/useInstallOutputLine";
 import { RuntimeIcon } from "@/features/onboarding/ui/RuntimeIcon";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
@@ -288,6 +289,52 @@ function RuntimeStatusChip({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
 }
 
 /**
+ * Which credential this harness will actually be charged against.
+ *
+ * The status chip answers "can it run?" — it says Ready for a subscription
+ * login and for an `ANTHROPIC_API_KEY` picked up from the environment alike,
+ * because both make the CLI exit 0. This line answers the question the chip
+ * cannot: whose money. It renders nothing unless the CLI reported enough to
+ * classify, so a harness we can't read stays silent rather than guessing.
+ */
+function RuntimeCredentialLine({
+  runtime,
+}: {
+  runtime: AcpRuntimeCatalogEntry;
+}) {
+  const label = authCredentialLabel(runtime.authCredential);
+  if (!label) {
+    return null;
+  }
+
+  const isWarning = label.tone === "warning";
+  return (
+    <p
+      className={cn(
+        "mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 rounded-lg px-3 py-1.5 text-xs",
+        isWarning
+          ? "border border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+          : "text-muted-foreground",
+      )}
+      data-testid={`doctor-runtime-credential-${runtime.id}`}
+    >
+      {isWarning ? (
+        <TriangleAlert aria-hidden className="h-3.5 w-3.5 shrink-0" />
+      ) : null}
+      <span className="font-medium">{label.title}</span>
+      {label.detail ? (
+        <>
+          <span aria-hidden="true" className="opacity-50">
+            ·
+          </span>
+          <span className="min-w-0 break-all">{label.detail}</span>
+        </>
+      ) : null}
+    </p>
+  );
+}
+
+/**
  * One row in "Your runtimes".
  *
  * Carries the full operational surface for a ready (or one-click-ready)
@@ -457,6 +504,8 @@ export function HarnessRow({
             runtime={runtime}
           />
         </div>
+
+        <RuntimeCredentialLine runtime={runtime} />
 
         {runtime.authStatus.status === "config_invalid" ? (
           <p
