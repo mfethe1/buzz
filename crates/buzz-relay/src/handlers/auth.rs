@@ -252,6 +252,46 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             });
 
+            // One agent identity, one socket per community.
+            //
+            // The same agent nsec may be live on several of the owner's
+            // machines at once. Each copy authenticates, subscribes and
+            // answers the same message, because `buzz-acp`'s dedup is a
+            // process-local id set that cannot see its siblings. The relay is
+            // the only place all of them meet, so it is the only place the
+            // exclusion can be made.
+            //
+            // Claimed before the connection reaches `Authenticated`, so a
+            // refused machine never becomes a live agent socket at all. Only
+            // NIP-OA connections are subject to this — a human client holding
+            // several of their own sessions is untouched.
+            if state.config.single_agent_connection && nip_oa_owner.is_some() {
+                if let Err(holder) = state.conn_manager.try_claim_agent_slot(
+                    conn.tenant.community(),
+                    pubkey.as_bytes(),
+                    conn_id,
+                ) {
+                    warn!(
+                        conn_id = %conn_id,
+                        holder_conn_id = %holder,
+                        agent = %pubkey.to_hex(),
+                        "agent already connected in this community; refusing second socket"
+                    );
+                    metrics::counter!(
+                        "buzz_auth_failures_total",
+                        "reason" => "agent_already_connected"
+                    )
+                    .increment(1);
+                    *conn.auth_state.write().await = AuthState::Failed;
+                    conn.send(RelayMessage::ok(
+                        &event_id_hex,
+                        false,
+                        "restricted: agent already connected from another session",
+                    ));
+                    return;
+                }
+            }
+
             // Stash NIP-OA owner on the auth context only after the shared
             // backfill confirms the first-write-wins relationship.
             if let Some(owner) = nip_oa_owner {

@@ -185,6 +185,22 @@ pub struct ConnectionManager {
     /// after the drain snapshot self-signal, so no upgrade-vs-shutdown
     /// interleaving can produce a connection that misses the restart close.
     draining: AtomicBool,
+    /// Exclusive agent sockets: `(community, agent pubkey) → holding conn_id`.
+    ///
+    /// One user may run the same agent identity on several machines at once
+    /// (the same nsec imported onto a desktop, a laptop and two minis). Every
+    /// copy authenticates, subscribes and answers, so the user gets one reply
+    /// per machine and one bill per machine. `buzz-acp`'s own dedup is a
+    /// process-local id set and cannot see its siblings, so exclusion has to
+    /// happen somewhere all of them meet — here.
+    ///
+    /// Claimed via [`Self::try_claim_agent_slot`], whose `Entry` API gives a
+    /// genuine compare-and-set: a check-then-insert would let two harnesses
+    /// both observe a vacant slot and both proceed.
+    agent_slots: DashMap<(CommunityId, Vec<u8>), Uuid>,
+    /// Reverse index so [`Self::deregister`] releases in O(1) instead of
+    /// scanning every slot on each disconnect.
+    agent_slot_by_conn: DashMap<Uuid, (CommunityId, Vec<u8>)>,
 }
 
 impl ConnectionManager {
@@ -193,6 +209,8 @@ impl ConnectionManager {
         Self {
             connections: DashMap::new(),
             draining: AtomicBool::new(false),
+            agent_slots: DashMap::new(),
+            agent_slot_by_conn: DashMap::new(),
         }
     }
 
@@ -241,6 +259,74 @@ impl ConnectionManager {
     /// Removes a connection from the registry.
     pub fn deregister(&self, conn_id: Uuid) {
         self.connections.remove(&conn_id);
+        self.release_agent_slot(conn_id);
+    }
+
+    /// Claim the exclusive agent socket for `(community, pubkey)`.
+    ///
+    /// Returns `Ok(())` if this connection now holds the slot, or
+    /// `Err(holder)` naming the connection that already does.
+    ///
+    /// Re-claiming a slot this connection already holds succeeds, so a
+    /// duplicate AUTH on one socket is not self-denial.
+    ///
+    /// A slot whose holder is no longer registered is taken over rather than
+    /// refused. Releases run through [`Self::deregister`], but a slot that
+    /// outlived its connection by any other route would otherwise be poisoned
+    /// permanently — locking the user out of their own agent with no recovery
+    /// short of a relay restart. Taking over a dead holder is strictly safer
+    /// than trusting release to be exhaustive.
+    pub fn try_claim_agent_slot(
+        &self,
+        community_id: CommunityId,
+        pubkey_bytes: &[u8],
+        conn_id: Uuid,
+    ) -> Result<(), Uuid> {
+        use dashmap::mapref::entry::Entry;
+
+        let key = (community_id, pubkey_bytes.to_vec());
+        match self.agent_slots.entry(key.clone()) {
+            Entry::Occupied(mut occupied) => {
+                let holder = *occupied.get();
+                if holder == conn_id {
+                    return Ok(());
+                }
+                if self.connections.contains_key(&holder) {
+                    return Err(holder);
+                }
+                occupied.insert(conn_id);
+                self.agent_slot_by_conn.remove(&holder);
+                self.agent_slot_by_conn.insert(conn_id, key);
+                Ok(())
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(conn_id);
+                self.agent_slot_by_conn.insert(conn_id, key);
+                Ok(())
+            }
+        }
+    }
+
+    /// Release any agent slot held by `conn_id`, freeing it for the next
+    /// machine. The compare on the way out matters: a slot already taken over
+    /// by a live connection (see [`Self::try_claim_agent_slot`]) must not be
+    /// cleared by the dead holder's late teardown.
+    pub fn release_agent_slot(&self, conn_id: Uuid) {
+        if let Some((_, key)) = self.agent_slot_by_conn.remove(&conn_id) {
+            self.agent_slots
+                .remove_if(&key, |_, holder| *holder == conn_id);
+        }
+    }
+
+    /// Connection currently holding the agent socket for `(community, pubkey)`.
+    pub fn agent_slot_holder(
+        &self,
+        community_id: CommunityId,
+        pubkey_bytes: &[u8],
+    ) -> Option<Uuid> {
+        self.agent_slots
+            .get(&(community_id, pubkey_bytes.to_vec()))
+            .map(|entry| *entry.value())
     }
 
     /// Record the authenticated pubkey for a connection after NIP-42 succeeds.
@@ -1929,5 +2015,143 @@ mod tests {
             }
             other => panic!("expected a restart close frame, got {other:?}"),
         }
+    }
+
+    /// Registers a bare connection so slot tests can control liveness, which is
+    /// what decides whether an occupied slot is defended or taken over.
+    fn register_bare(mgr: &ConnectionManager, community: CommunityId) -> Uuid {
+        let conn_id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(8);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(8);
+        mgr.register(
+            conn_id,
+            tx,
+            ctrl_tx,
+            CancellationToken::new(),
+            community,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+        conn_id
+    }
+
+    fn community(byte: u8) -> CommunityId {
+        buzz_core::tenant::CommunityId::from_uuid(Uuid::from_bytes([byte; 16]))
+    }
+
+    #[tokio::test]
+    async fn second_machine_is_refused_while_the_first_holds_the_slot() {
+        // The whole point: one agent nsec live on two machines must not yield
+        // two answering sockets.
+        let mgr = ConnectionManager::new();
+        let c = community(1);
+        let agent = b"agent-pubkey-bytes";
+
+        let first = register_bare(&mgr, c);
+        let second = register_bare(&mgr, c);
+
+        assert!(mgr.try_claim_agent_slot(c, agent, first).is_ok());
+        assert_eq!(
+            mgr.try_claim_agent_slot(c, agent, second),
+            Err(first),
+            "the loser is told which connection holds the slot"
+        );
+        assert_eq!(mgr.agent_slot_holder(c, agent), Some(first));
+    }
+
+    #[tokio::test]
+    async fn releasing_the_slot_lets_the_next_machine_take_over() {
+        // Failover: the holder dies, another machine picks the agent up.
+        let mgr = ConnectionManager::new();
+        let c = community(2);
+        let agent = b"agent";
+
+        let first = register_bare(&mgr, c);
+        let second = register_bare(&mgr, c);
+        mgr.try_claim_agent_slot(c, agent, first).expect("claim");
+
+        mgr.deregister(first);
+
+        assert_eq!(mgr.agent_slot_holder(c, agent), None, "slot freed on drop");
+        assert!(mgr.try_claim_agent_slot(c, agent, second).is_ok());
+        assert_eq!(mgr.agent_slot_holder(c, agent), Some(second));
+    }
+
+    #[tokio::test]
+    async fn a_slot_held_by_a_dead_connection_is_taken_over_not_poisoned() {
+        // If a release is ever missed, the slot must not lock the user out of
+        // their own agent forever. Liveness, not bookkeeping, is the authority.
+        let mgr = ConnectionManager::new();
+        let c = community(3);
+        let agent = b"agent";
+
+        let ghost = Uuid::new_v4(); // never registered => not live
+        let live = register_bare(&mgr, c);
+
+        mgr.try_claim_agent_slot(c, agent, ghost).expect("claim");
+        assert!(
+            mgr.try_claim_agent_slot(c, agent, live).is_ok(),
+            "a live connection displaces a holder that no longer exists"
+        );
+        assert_eq!(mgr.agent_slot_holder(c, agent), Some(live));
+    }
+
+    #[tokio::test]
+    async fn a_late_teardown_does_not_clear_the_new_holder() {
+        // Ordering hazard: the dead holder's deregister can arrive *after* the
+        // takeover. It must not free a slot it no longer owns.
+        let mgr = ConnectionManager::new();
+        let c = community(4);
+        let agent = b"agent";
+
+        let ghost = Uuid::new_v4();
+        let live = register_bare(&mgr, c);
+        mgr.try_claim_agent_slot(c, agent, ghost).expect("claim");
+        mgr.try_claim_agent_slot(c, agent, live).expect("takeover");
+
+        mgr.deregister(ghost);
+
+        assert_eq!(
+            mgr.agent_slot_holder(c, agent),
+            Some(live),
+            "the live holder survives the previous holder's teardown"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_authenticating_on_one_socket_is_not_self_denial() {
+        let mgr = ConnectionManager::new();
+        let c = community(5);
+        let agent = b"agent";
+        let conn = register_bare(&mgr, c);
+
+        assert!(mgr.try_claim_agent_slot(c, agent, conn).is_ok());
+        assert!(
+            mgr.try_claim_agent_slot(c, agent, conn).is_ok(),
+            "the holder re-claiming its own slot succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_slot_is_scoped_per_community_and_per_agent() {
+        // One agent in two communities is a normal deployment, not a clash;
+        // and two different agents never contend with each other.
+        let mgr = ConnectionManager::new();
+        let (c1, c2) = (community(6), community(7));
+
+        let a = register_bare(&mgr, c1);
+        let b = register_bare(&mgr, c2);
+        let d = register_bare(&mgr, c1);
+
+        assert!(mgr.try_claim_agent_slot(c1, b"ada", a).is_ok());
+        assert!(
+            mgr.try_claim_agent_slot(c2, b"ada", b).is_ok(),
+            "same agent, different community"
+        );
+        assert!(
+            mgr.try_claim_agent_slot(c1, b"bob", d).is_ok(),
+            "different agent, same community"
+        );
     }
 }

@@ -128,6 +128,24 @@ pub struct Config {
     /// are permitted regardless of auth method (API token, NIP-42).
     pub require_relay_membership: bool,
 
+    /// When true, an agent identity may hold at most one authenticated socket
+    /// per community: a second machine authenticating as the same agent is
+    /// refused with `restricted: agent already connected`.
+    ///
+    /// This is the fix for running one agent identity across several machines.
+    /// Every copy otherwise authenticates, subscribes and answers the same
+    /// message, so the user gets one reply and one bill per machine.
+    ///
+    /// Defaults to **false**, because on a multi-tenant deployment this rule
+    /// changes behaviour for every tenant at once and deserves an explicit,
+    /// reviewed opt-in. Single-user and self-hosted relays should set
+    /// `BUZZ_SINGLE_AGENT_CONNECTION=1`.
+    ///
+    /// Only NIP-OA connections — those presenting an agent→owner auth tag —
+    /// are subject to the rule. Ordinary human clients are never affected, so
+    /// a user may keep as many of their own sessions open as they like.
+    pub single_agent_connection: bool,
+
     /// Whether this deployment can serve huddle (voice) audio.
     ///
     /// Huddle audio frames are relayed peer-to-peer *within a single pod*
@@ -530,6 +548,10 @@ impl Config {
             .unwrap_or(false);
 
         let require_relay_membership = std::env::var("BUZZ_REQUIRE_RELAY_MEMBERSHIP")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
+        let single_agent_connection = std::env::var("BUZZ_SINGLE_AGENT_CONNECTION")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
@@ -954,6 +976,7 @@ impl Config {
             metrics_port,
             pubkey_allowlist_enabled,
             require_relay_membership,
+            single_agent_connection,
             huddle_audio_available,
             mesh,
             mesh_demo_echo,
@@ -1017,6 +1040,11 @@ mod tests {
         assert!(
             !config.require_relay_membership,
             "require_relay_membership should default to false"
+        );
+        assert!(
+            !config.single_agent_connection,
+            "single_agent_connection defaults off: it changes behaviour for \
+             every tenant at once, so a multi-tenant relay must opt in"
         );
         assert!(
             config.relay_owner_pubkey.is_none(),
