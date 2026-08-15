@@ -11,7 +11,14 @@ export const meta = {
   ],
 }
 
-const REPO = 'E:/Projects/buzz/.claude/worktrees/claude-oauth-env'
+// Repo root must be supplied by the caller — args.repo. Hardcoding an absolute
+// path here made the script machine-specific and broke the moment the worktree
+// it named was removed. There is no filesystem API in a workflow script, so the
+// caller is the only place this can come from.
+const REPO = args && args.repo
+if (!REPO) {
+  throw new Error('agent-mesh-iterate: args.repo is required (absolute path to the repo root)')
+}
 const DOC = `${REPO}/docs/agent-identity-sync.md`
 const COMPANION = `${REPO}/docs/multi-machine-agent-coordination.md`
 

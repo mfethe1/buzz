@@ -114,6 +114,13 @@ relay:
   # clients all attach read auth.
   requireMediaGetAuth: true
   allowNipOaAuth: true
+  # Refuse a second authenticated connection for an agent pubkey already
+  # connected to the same community, so one agent identity running on several
+  # machines answers once. The claim is a per-process map, NOT shared through
+  # Redis, so it holds within a pod and not across them: with replicaCount > 1
+  # one machine per pod still connects. Leave false unless replicaCount is 1.
+  # See docs/agent-identity-sync.md.
+  singleAgentConnection: false
   pubkeyAllowlist: false
   corsOrigins: []
   # Huddle audio is safe only for single-pod relay deployments until an SFU

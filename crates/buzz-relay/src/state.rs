@@ -311,7 +311,7 @@ impl ConnectionManager {
     /// machine. The compare on the way out matters: a slot already taken over
     /// by a live connection (see [`Self::try_claim_agent_slot`]) must not be
     /// cleared by the dead holder's late teardown.
-    pub fn release_agent_slot(&self, conn_id: Uuid) {
+    fn release_agent_slot(&self, conn_id: Uuid) {
         if let Some((_, key)) = self.agent_slot_by_conn.remove(&conn_id) {
             self.agent_slots
                 .remove_if(&key, |_, holder| *holder == conn_id);

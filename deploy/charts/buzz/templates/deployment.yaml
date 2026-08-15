@@ -132,6 +132,7 @@ spec:
             - { name: BUZZ_REQUIRE_RELAY_MEMBERSHIP, value: {{ .Values.relay.requireRelayMembership | quote }} }
             - { name: BUZZ_REQUIRE_MEDIA_GET_AUTH, value: {{ .Values.relay.requireMediaGetAuth | quote }} }
             - { name: BUZZ_ALLOW_NIP_OA_AUTH,      value: {{ .Values.relay.allowNipOaAuth | quote }} }
+            - { name: BUZZ_SINGLE_AGENT_CONNECTION, value: {{ .Values.relay.singleAgentConnection | quote }} }
             - { name: BUZZ_PUBKEY_ALLOWLIST,       value: {{ .Values.relay.pubkeyAllowlist | quote }} }
             {{- if .Values.relay.corsOrigins }}
             - { name: BUZZ_CORS_ORIGINS, value: {{ join "," .Values.relay.corsOrigins | quote }} }
