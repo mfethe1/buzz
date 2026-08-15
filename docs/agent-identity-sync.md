@@ -346,12 +346,16 @@ rejected for exactly that reason. So it is organised by the axes instead.
 
 ### 9.1 The axes
 
-| Axis | Default | Set at |
-|------|---------|--------|
-| `BUZZ_SINGLE_AGENT_CONNECTION` | `false` | `crates/buzz-relay/src/config.rs:554-556` |
-| Pod count (`replicaCount`) | 1 | Helm `deploy/charts/buzz/values.yaml` |
-| `relay_observer` | `false` | `crates/buzz-relay/src/config.rs:474` |
-| `BUZZ_REQUIRE_RELAY_MEMBERSHIP` | `false` | `crates/buzz-relay/src/config.rs:549-551` |
+Note these are not all set in the same place: three are relay-side, one is a
+per-harness flag on `buzz-acp`. A deployment can satisfy a relay axis fleet-wide
+while each machine still differs on the harness axis.
+
+| Axis | Side | Default | Set at |
+|------|------|---------|--------|
+| `BUZZ_SINGLE_AGENT_CONNECTION` | relay | `false` | `crates/buzz-relay/src/config.rs:554-556` |
+| Pod count (`replicaCount`) | relay | 1 | Helm `deploy/charts/buzz/values.yaml` |
+| `BUZZ_REQUIRE_RELAY_MEMBERSHIP` | relay | `false` | `crates/buzz-relay/src/config.rs:549-551` |
+| `relay_observer` / `BUZZ_ACP_RELAY_OBSERVER` | harness | `false` | `crates/buzz-acp/src/config.rs:473-475` |
 
 **What is shared across pods and what is not** — this distinction decides most
 of what follows, and getting it backwards inverts several conclusions:
@@ -375,11 +379,13 @@ of what follows, and getting it backwards inverts several conclusions:
   key until its TTL; and on **multiple pods**, the pod losing a machine scans
   only its own `DashMap` (`state.rs:347-351`), finds nothing, and marks a fleet
   that is alive elsewhere offline. Single-pod: fine. Multi-pod: broken.
-- **Observer frames.** `seq` is process-local and restarts at 1 per process,
-  while the desktop merges per agent pubkey. Requires `relay_observer` (default
-  off), so this is live for desktop-managed spawn and remote deploy and inert
-  for a hand-run `buzz-acp`. Misordering is bounded to a sub-millisecond window;
-  the rate of ties has not been measured and should not be asserted.
+- **Observer frames.** `seq` is an `AtomicU64` initialised to 1 per process and
+  documented "Monotonic process-local sequence number"
+  (`crates/buzz-acp/src/observer.rs:42`, `:51`, `:60-61`), while the desktop
+  merges per agent pubkey. Requires `relay_observer` (default off), so this is
+  live for desktop-managed spawn and remote deploy and inert for a hand-run
+  `buzz-acp`. Misordering is bounded to a sub-millisecond window; the rate of
+  ties has not been measured and should not be asserted.
 - **Observer control frames** (`cancel_turn`, `switch_model`) are addressed by
   agent pubkey alone and reach every subscribed machine. Same `relay_observer`
   gate. The sharpest consequence is not duplicate work but a veto: one machine
@@ -390,14 +396,19 @@ of what follows, and getting it backwards inverts several conclusions:
 - **Rate limits.** Four pubkey-keyed budgets can bear on one agent, and they do
   **not** behave alike:
   - `WsEvents`, `Messages`, `ApiCalls` — Redis-backed, genuinely fleet-wide.
-    Four machines share one budget on any topology. Note `Messages` at 60–120/min
-    is the tighter fence, not `WsEvents` at 10/sec.
+    Four machines share one budget on any topology. Note `Messages` is the
+    tighter fence: 60/min human, 120/min standard-tier agent (≈1–2/sec) against
+    `WsEvents` at 10/sec (`crates/buzz-auth/src/rate_limit.rs`,
+    `default_human_msg`/`default_agent_std_msg`/`default_human_ws`).
   - `observer_rate_limiter` — 100 frames/sec per agent, process-local, so its
     effective headroom scales with pod count.
-  - Loss semantics differ and this matters more than the counts: a
-    `WsEvents`/`Messages` rejection is a NOTICE (`connection.rs:587-591`) that
-    arms a requeue and is recoverable, whereas an observer-limit rejection is an
-    `OK accepted=false` that is discarded permanently.
+  - Loss semantics differ, and this matters more than the counts. A
+    `rate-limited:` NOTICE makes the harness arm a backoff gate and call
+    `requeue_observer_in_flight` (`crates/buzz-acp/src/relay.rs:2206-2213`,
+    `:1215`) — recoverable. An observer-limit rejection arrives as
+    `OK accepted=false`, and the OK arm calls `acknowledge_observer_frame`
+    regardless of the `accepted` value (`relay.rs:2377`), which removes the
+    frame from `observer_in_flight` (`:1237-1245`) with no requeue — lost.
   - `agent_standard_api_calls_per_min` (default 600) is defined
     (`crates/buzz-auth/src/rate_limit.rs:101`) and env-overridable
     (`buzz-relay/src/config.rs:338-340`) but **has no read site** — configured
