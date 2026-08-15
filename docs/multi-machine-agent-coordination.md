@@ -4,6 +4,16 @@ Status: design, not implemented. Supersedes nothing; adds one event kind and one
 relay rule. Written for one person's four personal machines, and deliberately
 sized for that.
 
+> **Citation health.** The first draft of this document was machine-synthesised
+> and its `file:line` citations were not individually checked before commit. A
+> later audit found fabrications — a non-existent `NIP-PMA` / kind `30179`, and
+> a claim that the agent snapshot envelope carries the agent nsec (it does the
+> opposite; see "State B" below). Those are corrected. **The remaining citations
+> are still unaudited.** Verify any line you intend to act on: kind integers
+> against `crates/buzz-core/src/kind.rs`, NIP names against `ls docs/nips/`, and
+> every `path:line` by opening it. Treat the argument as the contribution and
+> the citations as leads.
+
 ---
 
 ## The problem
@@ -31,13 +41,35 @@ them — the user has to remember which Ada is which machine. And for any rule
 with `require_mention: false` (`filter.rs:122` — the default), all four match
 the same channel message and all four answer. Four replies, four bills.
 
-**State B — one identity, four copies.** The user exports the agent with the
-NIP-AE snapshot envelope (`managed_agents/agent_snapshot_envelope.rs:284`,
-which carries the nsec) and imports it on the other three. Now one pubkey is
-live on four machines. All four harnesses authenticate to the relay, all four
-subscribe, all four match, all four reply. buzz-acp's dedup is a process-local
-`seen_membership_ids` set (`crates/buzz-acp/src/lib.rs:2173`) and cannot see
-the other three processes.
+**State B — one identity, four copies.** One pubkey live on four machines. All
+four harnesses authenticate to the relay, all four subscribe, all four match,
+all four reply. buzz-acp's dedup is a process-local `seen_membership_ids` set
+(`crates/buzz-acp/src/lib.rs:2173`) and cannot see the other three processes.
+
+**State B is not reachable today, and that is the more important finding.** No
+shipped surface moves an agent identity between machines. The agent snapshot
+excludes secrets *by construction* — `private_key_nsec`, `auth_tag`, `env_vars`
+and `relay_url` are on an explicit never-serialized list
+(`managed_agents/agent_snapshot.rs:19-34`), enforced by
+`import_source_identity_fields_never_consumed`
+(`commands/personas/snapshot/tests.rs:795-830`). Import mints a fresh keypair
+and a fresh NIP-OA auth tag bound to it (`commands/personas/snapshot/import.rs:514-532`),
+so importing the same file twice yields two distinct agents. The NIP-AE
+envelope is encryption-at-rest for a *shareable card*, not an identity
+transport: `resolve_unlock_secret` (`agent_snapshot_envelope.rs:271-289`) reads
+the importing machine's own record to derive a NIP-44 decryption key, so the
+nsec is an unlock input, never envelope payload. And `buzz-cli` has no
+export/import equivalent. Definitions replicate over the relay
+(`personas/inbound.rs:369`); identities deliberately do not
+(`personas/inbound.rs:408` is a no-op).
+
+So a four-machine fleet is necessarily in **State A**, and the two states need
+different fixes. State B is a *collision* — two claimants to one identity — and
+is settled by exclusion at the relay. State A is *fragmentation* — four
+identities with one name — and exclusion cannot touch it, because there is no
+shared key to exclude on. Relay-side one-socket-per-pubkey is therefore a
+precondition for identity mobility rather than a fix for the fleet as it
+exists: it makes State B safe to allow, but nothing today allows it.
 
 Nothing arbitrates either state. An exhaustive search for a lock, lease, claim,
 or election in the agent path finds three `std::sync::Mutex` fields in
@@ -344,8 +376,10 @@ trips the storage-level tripwire in
 `crates/buzz-search/tests/fts_integration.rs::author_only_kinds_are_storage_level_unsearchable`
 and must be reconciled with the search allowlist — `migrations/0008_fresh_install_search_allowlist.sql:16`
 is a positive allowlist (safe automatically) but `schema/schema.sql:224` is still
-a denylist that has already drifted (30179 is in `AUTHOR_ONLY_KINDS` and absent
-there). Resolve that drift as part of Phase 2; it is not free.
+a denylist, so the two must be updated together. Verify the current contents of
+both before budgeting this; `AUTHOR_ONLY_KINDS` is only
+`[KIND_EVENT_REMINDER, KIND_PUSH_LEASE]` today
+(`crates/buzz-core/src/kind.rs:120`), so the reconciliation is small.
 
 **Reset.** The frontend fleet store is a module-level singleton and must register
 `resetFleetStore()` in `resetCommunityState()`
@@ -696,7 +730,7 @@ physically cannot force-push over its successor's branch. The orphan surfaces as
 ## New event kinds
 
 Only integers verified free in `crates/buzz-core/src/kind.rs` (used in-range
-today: 24134/24200/24242/24243/24810; 30174–30179; 43001–43006).
+today: 24134/24200/24242/24243/24810; 30174–30178; 43001–43006).
 
 | Int | Name | Class | Tags | Purpose | Phase |
 |---|---|---|---|---|---|
@@ -742,7 +776,7 @@ Kinds NOT added, and why:
 | Self-hosted relay behind MagicDNS, tailnet down | Same as above | Deployment mitigation only: run the relay on the always-on mini and expose a LAN address alongside MagicDNS. Do not build a P2P fallback control plane. | Total |
 | Stale machine has not seen a pin change and connects first | Not detected | The slot is still the arbiter — it wins and runs. Bounded, single-agent policy violation, self-healing when kind:30175 replication lands (already the shipped path). | One agent on the wrong machine until restart |
 | Community switch leaks the old fleet or keeps publishing | Manual/test | `resetFleetStore()` in `resetCommunityState()` **and** explicit Rust-side teardown of the publisher task — React remounting does not stop a tokio task. | Stale panel + writes to the wrong relay |
-| Adding 30180 to `AUTHOR_ONLY_KINDS` trips the FTS tripwire test | `crates/buzz-search/tests/fts_integration.rs` | Reconcile the `schema/schema.sql:224` denylist against `migrations/0008_fresh_install_search_allowlist.sql:16` (already drifted for 30179). Budget it; it is not free. | CI red until fixed |
+| Adding 30180 to `AUTHOR_ONLY_KINDS` trips the FTS tripwire test | `crates/buzz-search/tests/fts_integration.rs` | Reconcile the `schema/schema.sql:224` denylist against `migrations/0008_fresh_install_search_allowlist.sql:16`. Budget it; it is not free. | CI red until fixed |
 
 ---
 
@@ -822,8 +856,16 @@ No consumer named for any of them.
 
 ### Phase 1 — Stop the clash (ships alone, useful alone)
 
-**Goal.** Exactly one machine runs any given agent, chosen by boot order.
-Everything else in this document is placement *quality*; this is correctness.
+**Goal.** Exactly one machine runs any given agent *identity*, chosen by boot
+order. Everything else in this document is placement *quality*; this is
+correctness.
+
+**Scope, stated plainly.** This rule keys on the agent pubkey, so it fires only
+when two machines present the same key — State B. On a State A fleet (which is
+every fleet today, per the identity discussion above) it is correct but inert.
+It is worth shipping first anyway: it is the invariant that must already hold
+before identity mobility can be offered at all, and it is cheap. It is not, on
+its own, a fix for four machines answering under four different keys.
 
 **Touches.**
 - `crates/buzz-relay/src/handlers/auth.rs` (or wherever `set_authenticated_pubkey`
@@ -868,7 +910,7 @@ placement logic yet.
   `required_scope_for_kind` (`:345`), add to `is_global_only_kind` (`:529`).
 - `crates/buzz-db/src/lib.rs:5210` — add 30180 to `hard_delete_superseded`.
 - `schema/schema.sql:224` + the FTS tripwire test — reconcile the search
-  allowlist/denylist drift (30179 is already inconsistent).
+  allowlist and denylist so both carry the new kind.
 - `desktop/src-tauri/src/device/identity.rs` (new, not feature-gated) —
   `device.json` load-or-generate, self-coordinate clone guard, rotate + kind:5.
 - `desktop/src-tauri/src/device/facts.rs` (new) — os/arch from
@@ -957,14 +999,28 @@ into "sometimes zero machines answer".
 
 1. **State A or State B?** Do you want four sibling agents (one per machine,
    distinct pubkeys, distinct avatars) or one agent that moves between machines?
-   This design assumes **one identity** — which today means manually exporting
-   the agent with the NIP-AE snapshot envelope
-   (`managed_agents/agent_snapshot_envelope.rs`) and importing it on the other
-   three. Everything in Phase 1 works either way, but the clash is only fully
-   solved for the one-identity case. If you want this automated, NIP-PMA kind
-   30179 (`docs/nips/NIP-PMA.md`) is the designed answer and is currently inert —
-   relays MUST reject it — with an 8-step deployment order. Activating it is its
-   own project.
+   This design assumes **one identity** — and there is currently **no way to
+   produce that state**. As established above, the snapshot surface excludes
+   identity by construction and import always mints a fresh keypair, so a fleet
+   is necessarily in State A no matter what the operator does by hand. Choosing
+   "one identity" therefore selects a feature that does not exist yet, not a
+   configuration.
+
+   Making it exist means a deliberate identity-export path carrying
+   `private_key_nsec` + `auth_tag`. That is a security decision before it is an
+   engineering one: those two fields are on the never-serialized list on purpose,
+   an exported nsec is a bearer credential for an identity the relay bills and
+   trusts, and today's locked-envelope refusal semantics assume the importing
+   machine *already* holds the key. No existing NIP in `docs/nips/` covers
+   identity migration — the closest neighbours are NIP-AE (snapshot envelope,
+   which deliberately excludes identity) and NIP-OA (agent→owner delegation).
+   Designing one is its own project.
+
+   Until then Phase 1 is a *precondition*: it makes one-identity-many-machines
+   safe to allow, and is inert on a State A fleet because there is no shared
+   pubkey to exclude on. Anyone reading this doc as "Phase 1 stops my four
+   machines from double-answering" will be disappointed unless their agents
+   genuinely share a key.
 
 2. **Do you self-host the relay?** This is the only question that decides whether
    Tailscale earns anything. Self-hosted on a Mac mini → MagicDNS in
