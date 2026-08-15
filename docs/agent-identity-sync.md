@@ -336,21 +336,76 @@ is active.
 
 ---
 
-## 9. Work not yet scoped
+## 9. Surfaces that assume one pubkey means one process
 
-Surfaces that assume one pubkey means one process, each of which breaks under
-unification. **[unverified — reported by review, not personally traced]**:
+Every item here describes behaviour under a topology **that does not exist
+today** — one agent pubkey live on several machines at once. None of it can be
+stated as a flat fact, because each outcome depends on configuration that has
+not been decided. Four attempts to write this section as plain assertions were
+rejected for exactly that reason. So it is organised by the axes instead.
 
-- **Presence:** a single Redis key per pubkey with an unrefcounted `DEL` on the
-  kind:20001 offline path — one machine quitting marks the whole fleet offline.
-- **Observer frames:** a process-local `seq` starting at 1, merged desktop-side
-  per agent pubkey ordered by `(timestamp, seq)` — an unlabelled interleave of
-  four machines.
-- **Observer control frames** (`cancel_turn`, `switch_model`): addressed by agent
-  pubkey alone, so they fan out to all four.
-- **kind:10100 agent profile:** replaceable with no d-tag, so it cannot be
-  partitioned per machine.
-- **Rate limits** keyed on pubkey collapse N budgets into one.
+### 9.1 The axes
+
+| Axis | Default | Set at |
+|------|---------|--------|
+| `BUZZ_SINGLE_AGENT_CONNECTION` | `false` | `crates/buzz-relay/src/config.rs:554-556` |
+| Pod count (`replicaCount`) | 1 | Helm `deploy/charts/buzz/values.yaml` |
+| `relay_observer` | `false` | `crates/buzz-relay/src/config.rs:474` |
+| `BUZZ_REQUIRE_RELAY_MEMBERSHIP` | `false` | `crates/buzz-relay/src/config.rs:549-551` |
+
+**What is shared across pods and what is not** — this distinction decides most
+of what follows, and getting it backwards inverts several conclusions:
+
+- **Fleet-wide (Redis-backed):** `admission_rate_limiter`, an
+  `Arc<RedisRateLimiter>` doc-commented "Shared Redis-backed admission limits
+  for ordinary HTTP and WebSocket work" (`crates/buzz-relay/src/state.rs:669-670`).
+  It carries `LimitType::WsEvents`, `Messages`, and `ApiCalls`. These budgets
+  really do collapse across the whole fleet, on any number of pods.
+- **Process-local (DashMap, nothing published to Redis):** `connections`
+  (`state.rs:183`), `agent_slots` (`:200`), and `observer_rate_limiter`
+  (`:675`, keyed `(community_id, agent pubkey)`). Anything resting on these
+  holds within one pod and silently does not hold across pods.
+
+### 9.2 Behaviours
+
+- **Presence.** A single Redis key per pubkey. On clean TCP teardown
+  `connection.rs:272-283` clears it only when no connection for that pubkey
+  remains in the community, so a clean quit is refcounted and safe. Two gaps
+  remain: an *unclean* exit (pod loss, a socket that never closes) leaves the
+  key until its TTL; and on **multiple pods**, the pod losing a machine scans
+  only its own `DashMap` (`state.rs:347-351`), finds nothing, and marks a fleet
+  that is alive elsewhere offline. Single-pod: fine. Multi-pod: broken.
+- **Observer frames.** `seq` is process-local and restarts at 1 per process,
+  while the desktop merges per agent pubkey. Requires `relay_observer` (default
+  off), so this is live for desktop-managed spawn and remote deploy and inert
+  for a hand-run `buzz-acp`. Misordering is bounded to a sub-millisecond window;
+  the rate of ties has not been measured and should not be asserted.
+- **Observer control frames** (`cancel_turn`, `switch_model`) are addressed by
+  agent pubkey alone and reach every subscribed machine. Same `relay_observer`
+  gate. The sharpest consequence is not duplicate work but a veto: one machine
+  answering `unsupported_model` rejects the model pick for every channel.
+- **kind:10100 agent profile** is replaceable with no `d` tag, so it cannot be
+  partitioned per machine at all — four machines republishing contend on one
+  coordinate.
+- **Rate limits.** Four pubkey-keyed budgets can bear on one agent, and they do
+  **not** behave alike:
+  - `WsEvents`, `Messages`, `ApiCalls` — Redis-backed, genuinely fleet-wide.
+    Four machines share one budget on any topology. Note `Messages` at 60–120/min
+    is the tighter fence, not `WsEvents` at 10/sec.
+  - `observer_rate_limiter` — 100 frames/sec per agent, process-local, so its
+    effective headroom scales with pod count.
+  - Loss semantics differ and this matters more than the counts: a
+    `WsEvents`/`Messages` rejection is a NOTICE (`connection.rs:587-591`) that
+    arms a requeue and is recoverable, whereas an observer-limit rejection is an
+    `OK accepted=false` that is discarded permanently.
+  - `agent_standard_api_calls_per_min` (default 600) is defined
+    (`crates/buzz-auth/src/rate_limit.rs:101`) and env-overridable
+    (`buzz-relay/src/config.rs:338-340`) but **has no read site** — configured
+    and never enforced.
+  - Tier selection depends on an axis: with `BUZZ_REQUIRE_RELAY_MEMBERSHIP`
+    at its default `false`, a NIP-OA-tagged agent does reach the agent tier.
+    The human-tier charge applies when membership is required and the machine
+    is a direct member rather than a delegate.
 
 Also unscoped: mobile's position (should a phone ever hold agent identity —
 probably not, needs a stated answer); billing semantics; migration for fleets
