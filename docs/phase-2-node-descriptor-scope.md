@@ -2,7 +2,11 @@
 
 Status: scope, not implementation. Companion to
 [`multi-machine-agent-coordination.md`](multi-machine-agent-coordination.md)
-§ "Phase 2 — Know your machines". Its purpose is to make that phase's touch list
+§ "Phase 2 — Know your machines". **Read
+[`agent-identity-sync.md`](agent-identity-sync.md) first** — it is the v2 design
+for the identity half of this problem, it holds the reason kind 30179 is skipped
+(§2 below), and it independently corroborates the `hard_delete_superseded`
+anchor at `crates/buzz-db/src/lib.rs:4859` found here. Its purpose is to make that phase's touch list
 actionable: every anchor below was opened and checked on this branch, and the
 ones that were wrong are corrected here rather than in place.
 
@@ -39,19 +43,27 @@ remaining un-checked citation in that document with the same suspicion.
 
 ---
 
-## 2. Kind number: take 30179, not 30180
+## 2. Kind number: 30180 is correct — do not "reclaim" 30179
 
-The addressable agent namespace is contiguous: `30174` engram, `30175` persona,
-`30176` team, `30177` managed agent, `30178` team catalog. **`30179` is free**,
-and so is `30180`. The doc picks 30180 and leaves a one-value hole for no stated
-reason.
+**Corrected 2026-08-16.** An earlier revision of this scope recommended taking
+`30179` to keep the addressable agent block dense (`30174` engram, `30175`
+persona, `30176` team, `30177` managed agent, `30178` team catalog). That
+recommendation was wrong and is withdrawn.
 
-Recommendation: **`KIND_NODE_DESCRIPTOR = 30179`**, keeping the block dense. If
-30179 was skipped deliberately — it is the number the retracted `NIP-PMA`
-fabrication claimed — then 30180 is correct and this note should be resolved by
-saying so in the NIP, so the next reader does not re-open it.
+`docs/agent-identity-sync.md` — which this scope failed to read — records that
+**`30179` was the kind proposed by that document's rejected v1**, carrying the
+agent nsec NIP-44 self-encrypted through the relay. A 12-agent review returned
+`redesign` from two independent judges, on three verified findings (the lead one:
+v1 copied NIP-RS's envelope while dropping the hard-delete property that bounded
+its exposure, so revocation would have been cosmetic).
 
-*Decision required before any code lands.*
+So the "hole" at 30179 is deliberate: a burned number attached to a rejected
+key-transport design. Reusing it would collide with any implementation, notes, or
+review threads that still refer to 30179 as "the one that carries the nsec" —
+exactly the confusion a fresh number avoids.
+
+**`KIND_NODE_DESCRIPTOR = 30180`, as originally designed. No decision required.**
+The NIP should state why 30179 is skipped so this is not re-opened a third time.
 
 ---
 
@@ -201,7 +213,8 @@ shared invariant and may deserve to land alone.
 
 ## 5. Decisions needed before implementation
 
-1. **Kind number** — 30179 (dense) or 30180 (as designed). §2.
+1. ~~Kind number~~ — **settled**, 30180. See §2; 30179 is burned by the rejected
+   v1 of `docs/agent-identity-sync.md`.
 2. **`sysinfo`** — direct dependency for one field, or `Option<u64>` and drop it. §3.3.
 3. **Search paths** — patch `schema.sql`'s denylist only, or reconcile the two
    install paths to one policy in a separate PR. §3.5.
