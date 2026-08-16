@@ -304,6 +304,28 @@ export function useChannelUnreadState({
       currentPubkey,
     );
   }, [currentPubkey, getMessageReadAt, openThreadHeadId, threadMessages]);
+  // Whether the reader has ever read any part of the open thread: true when the
+  // frozen open-time snapshot holds a marker over at least one reply. The
+  // thread resume uses this to tell "never opened" (keep the tail pin — there
+  // is no position to return to) apart from "opened before but everything is
+  // unread" (resume to the oldest reply); `threadFirstUnreadReplyId` names the
+  // first reply in both cases, so it cannot separate them. It has to come off
+  // this snapshot rather than a second one built downstream: the marker advance
+  // races any later capture, and a downstream snapshot then reports history for
+  // a thread the reader has never opened. Frozen entries are appended, never
+  // rewritten, so the verdict is stable for the life of the open.
+  const threadHasReadHistory = React.useMemo(() => {
+    if (!openThreadHeadId) return false;
+    const snapshot = threadOpenReadSnapshotRef.current.get(openThreadHeadId);
+    if (!snapshot) return false;
+    for (const readAt of snapshot.values()) {
+      if (readAt !== null) return true;
+    }
+    return false;
+    // threadMessages is the recompute trigger: the snapshot is a ref, but it
+    // only gains entries when threadMessages does, and the render-time capture
+    // pass above has already run by the time this reads it.
+  }, [openThreadHeadId, threadMessages]);
   // Per-row subtree unread counts for the in-panel thread summary rows. Scoped
   // to the open thread's subtree and decided per-reply against the live
   // per-message read state (getMessageReadAt): each collapsed row's badge
@@ -507,6 +529,7 @@ export function useChannelUnreadState({
     markRevealedRepliesRead,
     openThreadHeadMessage,
     threadFirstUnreadReplyId,
+    threadHasReadHistory,
     threadMessages,
     threadReplyTargetMessage,
     threadReplyUnreadCounts,

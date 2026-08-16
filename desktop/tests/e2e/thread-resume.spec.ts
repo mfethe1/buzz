@@ -186,4 +186,58 @@ test.describe("thread resume at last read", () => {
       path: `${SHOT_DIR}/02-fully-read-thread-still-opens-at-newest.png`,
     });
   });
+
+  test("03-never-read-thread-opens-at-newest", async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "general");
+
+    // No establishReadFrontier here: the thread is never opened before the
+    // assertion, so no reply ever gets a msg:<id> marker. That is the case the
+    // contract covers — a reader with nowhere to return to still lands on the
+    // tail. The replies must arrive while another channel is active: messages
+    // emitted into the open channel are marked read on arrival, which is a
+    // different scenario (no unread replies at all) and not what the guard
+    // decides. 60 replies so "resumed to the first unread" (the top) and
+    // "pinned to the newest" cannot render the same frame; 40 was already the
+    // point at which the panel started to discriminate.
+    await page.getByTestId("channel-random").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+    const base = unreadTimestamp();
+    for (let i = 0; i < 60; i++) {
+      await emitMockMessage(page, "general", `Unread reply ${i + 1}`, {
+        parentEventId: "mock-general-welcome",
+        createdAt: base + i,
+      });
+    }
+
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await page.getByTestId("message-thread-summary").first().click();
+
+    const panel = page.getByTestId("message-thread-panel");
+    await expect(panel).toBeVisible();
+
+    const replies = page.getByTestId("message-thread-replies");
+    await expect(replies.getByTestId("message-row")).toHaveCount(60);
+
+    await waitForAnimations(page);
+    await panel.screenshot({
+      path: `${SHOT_DIR}/03-never-read-thread-opens-at-newest.png`,
+    });
+
+    // `toBeInViewport`, never a bounding-box comparison against `replies`: that
+    // container's box is the whole scrollable *content*, so every reply in it
+    // measures as "inside" and the assertion passes on a visibly wrong panel.
+    await expect(replies.getByTestId("message-row").last()).toBeInViewport();
+    // And the resume did not happen: the oldest unread reply, which is where a
+    // resume would have parked this reader, is scrolled far out of sight.
+    await expect(
+      replies.getByTestId("message-row").first(),
+    ).not.toBeInViewport();
+  });
 });
