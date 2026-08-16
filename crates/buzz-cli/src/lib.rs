@@ -946,9 +946,15 @@ pub enum WorkflowsCmd {
         /// Workflow UUID
         #[arg(long)]
         workflow: String,
-        /// Maximum number of results to return
+        /// Maximum number of results to return (1..100, default 20)
         #[arg(long)]
         limit: Option<u32>,
+        /// Keyset cursor — timestamp of the oldest run on the previous page (RFC3339, e.g. 2024-01-01T00:00:00Z). Must be supplied together with --before-id.
+        #[arg(long, requires = "before_id")]
+        before: Option<String>,
+        /// Keyset cursor — UUID of the oldest run on the previous page. Must be supplied together with --before.
+        #[arg(long, requires = "before")]
+        before_id: Option<String>,
     },
     /// Approve or deny a workflow step
     #[command(

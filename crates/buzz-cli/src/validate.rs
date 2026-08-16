@@ -74,8 +74,9 @@ pub fn validate_content_size(content: &str) -> Result<(), CliError> {
 
 /// Percent-encode for URL path segments and query parameter values.
 /// Encodes all bytes except RFC 3986 unreserved: A-Z a-z 0-9 - _ . ~
-#[cfg(test)]
+/// Uses an infallible hex lookup — no unwrap/expect in production code.
 pub fn percent_encode(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(s.len());
     for byte in s.bytes() {
         match byte {
@@ -83,15 +84,9 @@ pub fn percent_encode(s: &str) -> String {
                 out.push(byte as char);
             }
             _ => {
-                let hi = char::from_digit((byte >> 4) as u32, 16)
-                    .unwrap()
-                    .to_ascii_uppercase();
-                let lo = char::from_digit((byte & 0xf) as u32, 16)
-                    .unwrap()
-                    .to_ascii_uppercase();
                 out.push('%');
-                out.push(hi);
-                out.push(lo);
+                out.push(HEX[(byte >> 4) as usize] as char);
+                out.push(HEX[(byte & 0x0F) as usize] as char);
             }
         }
     }

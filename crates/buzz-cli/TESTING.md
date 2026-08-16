@@ -399,15 +399,64 @@ steps:
     action: send_message
     text: "Updated"' | jq .
 
-# workflows trigger
+# workflows trigger — trigger at least two runs with deterministically distinct events
 # NOTE: May return 400 "workflow not found" — the relay indexes workflow
 # definitions into a DB table asynchronously. If the definition event hasn't
-# been indexed yet, the trigger handler won't find it.
-buzz workflows trigger --workflow "$WF_ID" | jq .
+# been indexed yet, the trigger handler won't find it. The run row itself
+# is committed before the trigger response returns; only step execution
+# continues asynchronously.
+# Use --inputs to make the two trigger events distinct — Nostr timestamps have
+# second precision, so two identical triggers in the same second collide (same
+# event ID) and the second is treated as "duplicate: already processed" with
+# no new run. Distinct inputs guarantee distinct run_ids without relying on sleep.
+TRIG1=$(buzz workflows trigger --workflow "$WF_ID" --inputs '{"run":1}')
+echo "$TRIG1" | jq .
+RUN1=$(echo "$TRIG1" | jq -r '.message | ltrimstr("response:") | fromjson | .run_id // empty')
+[ -n "$RUN1" ] || { echo "FAIL: trigger 1 missing run_id in $TRIG1"; exit 1; }
+TRIG2=$(buzz workflows trigger --workflow "$WF_ID" --inputs '{"run":2}')
+echo "$TRIG2" | jq .
+RUN2=$(echo "$TRIG2" | jq -r '.message | ltrimstr("response:") | fromjson | .run_id // empty')
+[ -n "$RUN2" ] || { echo "FAIL: trigger 2 missing run_id in $TRIG2"; exit 1; }
+[ "$RUN1" != "$RUN2" ] || { echo "FAIL: run_ids not distinct (duplicate event) $RUN1"; exit 1; }
+echo "trigger run_ids distinct: $RUN1 vs $RUN2"
 
-# workflows runs
+# workflows runs — structured run history (GET /workflows/{workflow_id}/runs, NIP-98)
+# Output is the relay's structured JSON verbatim: {"runs":[...],"next":...} with
+# stable fields (id, workflow_id, status, current_step, execution_trace,
+# started_at, completed_at, error_code, error_message, created_at). No Nostr
+# kinds or #run tags. Relay errors 400/401/403/404 propagate with exact status
+# and no retry.
+# First page — default limit 20 (allowed 1..100):
 buzz workflows runs --workflow "$WF_ID" | jq .
-# Expected: [] — relay stores runs in DB, not as Nostr events; empty is normal
+# Expected: {"runs":[{"id":"...","workflow_id":"...","status":"...","current_step":N,"execution_trace":[...],"started_at":N,"completed_at":N,"error_code":...,"error_message":...,"created_at":N}...],"next":...}
+# Explicit limit:
+buzz workflows runs --workflow "$WF_ID" --limit 5 | jq .
+# Expected: same shape, at most 5 runs
+# Deterministic pagination check — use --limit 1 so .next is necessarily non-null with ≥2 runs.
+# Capture ONE page JSON value and derive both cursor fields from that same value (avoids cross-request race).
+# Each trigger commits its run row before returning success, so visibility is immediate;
+# fetch once and fail if both rows are not visible. Add bounded polling only if the
+# executed runtime demonstrates an actual visibility delay and record it.
+PAGE1=$(buzz workflows runs --workflow "$WF_ID" --limit 1)
+echo "$PAGE1" | jq .
+# Print and assert page 1 is paginated:
+echo "$PAGE1" | jq -e '.runs | length > 0' > /dev/null || { echo "FAIL: expected at least 1 run on page 1"; exit 1; }
+echo "$PAGE1" | jq -e '.next != null' > /dev/null || { echo "FAIL: expected non-null next cursor for limit 1 with ≥2 runs"; exit 1; }
+# Second page — paired keyset cursor from the SAME PAGE1 value; before and before_id must be supplied together.
+# Capture PAGE2 in memory (no fixed /tmp artifact) and assert it is a different run.
+NEXT_BEFORE=$(echo "$PAGE1" | jq -r '.next.before')
+NEXT_ID=$(echo "$PAGE1" | jq -r '.next.before_id')
+PAGE2=$(buzz workflows runs --workflow "$WF_ID" --limit 1 --before "$NEXT_BEFORE" --before-id "$NEXT_ID")
+echo "$PAGE2" | jq .
+echo "$PAGE2" | jq -e '.runs | length > 0' > /dev/null || { echo "FAIL: expected at least 1 run on page 2"; exit 1; }
+ID1=$(echo "$PAGE1" | jq -r '.runs[0].id')
+ID2=$(echo "$PAGE2" | jq -r '.runs[0].id')
+[ -n "$ID1" ] && [ -n "$ID2" ] || { echo "FAIL: missing run ids $ID1 $ID2"; exit 1; }
+[ "$ID1" != "$ID2" ] || { echo "FAIL: cursor ignored — page2 id $ID2 == page1 id $ID1"; exit 1; }
+echo "pagination proved: page1 $ID1 != page2 $ID2"
+# Paired-cursor validation (client-side, before network):
+buzz workflows runs --workflow "$WF_ID" --before "2026-01-15T10:00:00Z" 2>&1; echo "exit: $?"
+# Expected: exit 1 — before and before_id must be supplied together
 
 # workflows approve — requires a workflow run waiting for approval
 # This is hard to test ad-hoc without a workflow that has an approval gate.
