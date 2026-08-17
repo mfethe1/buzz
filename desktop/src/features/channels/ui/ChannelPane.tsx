@@ -59,6 +59,10 @@ import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
+import { useProblemEventIds } from "@/features/agents/pendingMentionAckStore";
+import { MentionAckFooter } from "@/features/agents/ui/MentionAckFooter";
+import { truncatePubkey } from "@/shared/lib/pubkey";
+
 const HUDDLE_TRANSCRIPT_ROOT_STYLE = {
   "--buzz-channel-content-top-padding": "0rem",
   "--channel-top-chrome-height": "0.25rem",
@@ -387,6 +391,31 @@ export const ChannelPane = React.memo(function ChannelPane({
     [activeChannel, currentPubkey, profiles],
   );
 
+  // NIP-MR: inline notices for mentions no agent picked up. The id list is
+  // reference-stable and almost always empty, so this builds nothing on the
+  // overwhelmingly common healthy path.
+  const mentionAckProblemIds = useProblemEventIds(activeChannel?.id ?? "");
+  const resolveMentionAckName = React.useCallback(
+    (pubkey: string) =>
+      profiles?.[pubkey]?.displayName ||
+      profiles?.[pubkey]?.name ||
+      truncatePubkey(pubkey),
+    [profiles],
+  );
+  const mentionAckFooters = React.useMemo(() => {
+    if (mentionAckProblemIds.length === 0) return undefined;
+    const footers: Record<string, React.ReactNode> = {};
+    for (const eventId of mentionAckProblemIds) {
+      footers[eventId] = (
+        <MentionAckFooter
+          eventId={eventId}
+          resolveName={resolveMentionAckName}
+        />
+      );
+    }
+    return footers;
+  }, [mentionAckProblemIds, resolveMentionAckName]);
+
   const handleWelcomeAddAgent = React.useCallback(() => {
     onAddAgent?.({
       beforeSend: () =>
@@ -627,6 +656,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               onSendVideoReviewComment={
                 activeChannel?.archivedAt ? undefined : onSendVideoReviewComment
               }
+              messageFooters={mentionAckFooters}
               onTargetReached={onTargetReached}
               onToggleReaction={onToggleReaction}
               targetMessageId={targetMessageId}
