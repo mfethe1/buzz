@@ -3,7 +3,8 @@
 How one owner's four machines stop behaving like four unrelated agents wearing
 one name — without putting agent secrets in a relay database forever.
 
-**Status:** design, v2. Nothing here is implemented.
+**Status:** design, v2.1. Nothing here is implemented, and the one piece of
+adjacent code (`920eced`) is **not on `main`** — see §3, defect 0.
 **Related:** [[multi-machine-agent-coordination]]
 
 > **v2 supersedes a rejected v1.** v1 proposed a new kind `30179` carrying the
@@ -31,6 +32,18 @@ one name — without putting agent secrets in a relay database forever.
 > could not verify are marked **[unverified]** inline. The companion document
 > was written without this discipline and contained fabrications; v1 of this one
 > contained two misreads and two imprecise anchors, all corrected below.
+>
+> **v2.1 updates two §3 claims**, both found while re-verifying against `main`.
+> They fail in different ways, and the difference matters:
+>
+> - **(a) was wrong.** `920eced` is called "already-shipped"; it is on no mainline
+>   branch and has no PR. Inherited from v1 and carried forward without re-checking
+>   — the failure mode the policy above exists to catch, one level up: the anchors
+>   were verified, the *claim about where the code lives* was not.
+> - **(b) went stale, and this document is the reason.** §3.1's "no manifest sets
+>   it" was true at the minute it was written; `de2b1945` wired the Helm chart an
+>   hour later, citing exactly that gap. A design doc that provokes a fix and then
+>   outlives its own observation is working correctly — it just needs the note.
 
 ---
 
@@ -124,13 +137,30 @@ NIP-AB is shipped and specified: `crates/buzz-core/src/pairing/`,
 
 v1 claimed the already-shipped relay rule "becomes live and meaningful" once
 identities unify. That is false on the deployed topology, and it matters because
-it is the mechanism the whole design's safety rests on. Three independent
+it is the mechanism the whole design's safety rests on. Four independent
 defects:
 
+0. **It is not shipped at all.** `920eced` ("feat(relay): one socket per agent
+   identity per community") is not on `main`. `git branch -a --contains 920eced`
+   returns only `design/tailnet-agent-mesh`, `worktree-phase2-node-descriptor-scope`,
+   and their fork remotes; there is no PR. `git grep BUZZ_SINGLE_AGENT_CONNECTION
+   main` returns nothing. Every citation in this section therefore describes code
+   on **this branch**, not deployed behaviour — including the three defects below.
+   Calling it "already-shipped" (above, inherited from v1) was wrong; the phrase is
+   kept so the correction is legible.
 1. **It defaults off.** `BUZZ_SINGLE_AGENT_CONNECTION` →
-   `.unwrap_or(false)` (`crates/buzz-relay/src/config.rs:554-556`). A repo-wide
-   grep finds the variable only in `config.rs` — no test, script, or manifest
-   sets it.
+   `.unwrap_or(false)` (`crates/buzz-relay/src/config.rs:554-556`).
+   *(This bullet used to continue: "a repo-wide grep finds the variable only in
+   `config.rs` — no test, script, or manifest sets it." That was true when written
+   (`90b58d15`, 2026-08-15 17:20) and **this document is why it is no longer**:
+   `de2b1945` — "make BUZZ_SINGLE_AGENT_CONNECTION reachable in deployment", one
+   hour later — wired the env var at
+   `deploy/charts/buzz/templates/deployment.yaml:135` from
+   `deploy/charts/buzz/values.yaml:123` (`singleAgentConnection: false`, commented
+   single-pod-only and pointing back here), alongside the defaults-off assertion at
+   `crates/buzz-relay/src/config.rs:1044-1046`. The deploy path now exists; the flag
+   is merely defaulted off, which is a different — and much cheaper — problem than
+   "unwired".)*
 2. **It is per-process.** `agent_slots` is a `DashMap` on `ConnectionManager`
    (`crates/buzz-relay/src/state.rs:200`), consulted in-process by
    `try_claim_agent_slot` (`:279-308`). Nothing is published to Redis. Under
@@ -226,10 +256,16 @@ identity design.
 
 ### Stage 1 — make the exclusion real
 
-Fix all three defects in §3: a Redis-backed lease (the `KIND_PUSH_LEASE` /
-kind 30350 author-only lease is the in-repo precedent), coverage of the
-`POST /events` path, and a decision on the default-off flag — either flip it or
-advertise the capability via NIP-11 so clients can gate on it.
+Fix all four defects in §3. Defect 0 is the cheapest and comes first: **land
+`920eced` on `main`** — it is a shipped-quality commit sitting on a branch with
+no PR, and until it merges the other three are unobservable in production.
+
+Then: a Redis-backed lease (the `KIND_PUSH_LEASE` / kind 30350 author-only lease
+is the in-repo precedent), coverage of the `POST /events` path, and a decision on
+the default-off flag — either flip it or advertise the capability via NIP-11 so
+clients can gate on it. Note the flag already has a deploy path
+(`values.yaml:123`), so "flip it" is a values change on a single-replica relay,
+not new plumbing.
 
 Add liveness: a refused harness must be able to take over when the holder
 disappears. The acceptance criterion is **the measured worst-case dead-mention
