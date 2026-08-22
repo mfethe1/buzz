@@ -59,16 +59,7 @@ part 'thread_detail_page/tail_alignment.dart';
 part 'thread_detail_page/thread_message.dart';
 part 'thread_detail_page/avatar.dart';
 part 'thread_detail_page/summarize_action.dart';
-
-const _landingHighlightDuration = Duration(seconds: 3);
-const _landingHighlightDelay = Duration(milliseconds: 50);
-const _landingHighlightTransitionDuration = Duration(milliseconds: 300);
-const _landingHighlightOpacity = 0.12;
-const _threadTailScrollTolerance = 0.5;
-
-// Keep the direct-position correction finite in case the viewport cannot
-// expose its tail (for example, continuously changing media dimensions).
-const _latestTailCorrectionLimit = 8;
+part 'thread_detail_page/constants.dart';
 
 /// Full-screen thread detail page.
 ///
