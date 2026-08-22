@@ -16,6 +16,10 @@ import {
 } from "./relayReconnectReplay.ts";
 import { buildChannelFilter } from "./relayChannelFilters.ts";
 import {
+  CHANNEL_REPAIR_EVENT_KINDS,
+  LIVE_ONLY_CHANNEL_EVENT_KINDS,
+} from "@/shared/constants/kinds";
+import {
   flushEvents,
   markReconnectLiveEose,
   markReconnectRepairDone,
@@ -131,8 +135,17 @@ test("native and E2E repair kinds stay coupled to the live channel filter", asyn
     readFile("src-tauri/src/commands/channel_reconnect_repair.rs", "utf8"),
     readFile("src/testing/e2eBridge.ts", "utf8"),
   ]);
-  const expectedKinds = [...buildChannelFilter("channel-1", 50).kinds].sort(
-    (left, right) => left - right,
+  // Repair requests the live channel filter MINUS the deliberately live-only
+  // kinds (session-scoped receipts have nothing to backfill). Deriving both
+  // sides from the same constants keeps the native/E2E arrays honest without
+  // forcing a live-only kind into the repair window.
+  const liveOnly = new Set(LIVE_ONLY_CHANNEL_EVENT_KINDS);
+  const expectedKinds = [...buildChannelFilter("channel-1", 50).kinds]
+    .filter((kind) => !liveOnly.has(kind))
+    .sort((left, right) => left - right);
+  assert.deepEqual(
+    expectedKinds,
+    [...CHANNEL_REPAIR_EVENT_KINDS].sort((left, right) => left - right),
   );
   assert.deepEqual(
     numericList(

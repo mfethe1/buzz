@@ -3407,15 +3407,18 @@ test("a device-less remote agent claims no device and sends without a notice", a
   );
   // "this-mac" is the mock bridge's label for THIS install. A provider-backed
   // agent borrowing it is exactly the bug this test guards.
-  await expect(
-    remoteRow.getByTestId("mention-device-label"),
-  ).not.toContainText("this-mac");
+  await expect(remoteRow.getByTestId("mention-device-label")).not.toContainText(
+    "this-mac",
+  );
 
   await remoteRow.click();
   await page.keyboard.type("are you there");
   await page.getByTestId("send-message").click();
 
-  const inviteButton = page.getByRole("button", { name: "Invite", exact: true });
+  const inviteButton = page.getByRole("button", {
+    name: "Invite",
+    exact: true,
+  });
   if (await inviteButton.isVisible().catch(() => false)) {
     await inviteButton.click();
   }

@@ -46,8 +46,8 @@ test("resolveWelcomeAgentSet honors relay preference without dropping to null", 
   // still resolve the set when the records are pinned to a different relay —
   // a null set silently disables the closer effect.
   assert.deepEqual(
-    resolveWelcomeAgentSet([bumble, fizz, honey], "ws://localhost:3001"),
-    { lead: fizz, teammates: [honey, bumble] },
+    resolveWelcomeAgentSet([pollen, fizz, honey], "ws://localhost:3001"),
+    { lead: fizz, teammates: [honey, pollen] },
   );
 
   // And when both communities have a record, the relay-pinned one wins even
@@ -59,7 +59,7 @@ test("resolveWelcomeAgentSet honors relay preference without dropping to null", 
   };
   assert.equal(
     resolveWelcomeAgentSet(
-      [otherCommunityFizz, fizz, honey, bumble],
+      [otherCommunityFizz, fizz, honey, pollen],
       "ws://localhost:3000",
     )?.lead,
     fizz,

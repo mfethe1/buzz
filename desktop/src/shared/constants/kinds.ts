@@ -122,6 +122,27 @@ export const CHANNEL_EVENT_KINDS = [
   KIND_AGENT_MENTION_ACK,
 ] as const;
 
+// Kinds carried by the live channel subscription that are deliberately NOT
+// repaired/backfilled on reconnect. Reconnect repair exists to recover timeline
+// state that must survive a gap; a session-scoped receipt has no meaning once
+// the session that recorded the pending mention is gone, so replaying it would
+// cost a query per page and change nothing on screen.
+//
+// This list is the single source of truth for that divergence: the native
+// (Rust) and E2E repair kind arrays are asserted equal to
+// CHANNEL_EVENT_KINDS minus these, so adding a live-only kind here is the one
+// place that keeps all three in sync.
+export const LIVE_ONLY_CHANNEL_EVENT_KINDS = [
+  KIND_AGENT_MENTION_ACK, // 44102 — see CHANNEL_EVENT_KINDS note above
+] as const;
+
+// The kinds reconnect repair must request: everything on the live channel
+// filter except the live-only kinds above.
+export const CHANNEL_REPAIR_EVENT_KINDS = CHANNEL_EVENT_KINDS.filter(
+  (kind) =>
+    !(LIVE_ONLY_CHANNEL_EVENT_KINDS as readonly number[]).includes(kind),
+);
+
 // Auxiliary (non-row) timeline kinds: events that overlay onto or hide an
 // existing message rather than rendering their own row — reactions, edits, and
 // deletions. History fetches request the visible content kinds only, so the
