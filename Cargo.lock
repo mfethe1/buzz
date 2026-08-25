@@ -1123,6 +1123,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-mcp"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "buzz-core",
+ "hex",
+ "nostr 0.44.7",
+ "reqwest 0.13.4",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [
