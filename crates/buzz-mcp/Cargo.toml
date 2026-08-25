@@ -1,0 +1,30 @@
+[package]
+name = "buzz-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "buzz_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "buzz-mcp"
+path = "src/main.rs"
+
+[dependencies]
+buzz-core = { workspace = true }
+nostr = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
