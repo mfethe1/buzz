@@ -4,6 +4,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use nostr::Event;
 
+use crate::device_identity::validate_device_id;
+use crate::managed_agents::definition_validation::{validate_capability, validate_device_label};
 use crate::managed_agents::{agent_events::managed_agent_content_from_event, RelayAgentInfo};
 
 use super::{agents_from_events, first_tag_value, profile_valid_oa_owner_pubkey, tags_named};
@@ -134,10 +136,42 @@ fn relay_agent_from_managed_policy(agent_pubkey: &str, event: &Event) -> Option<
         agent_type: "agent".to_string(),
         channels: Vec::new(),
         channel_ids: Vec::new(),
-        capabilities: Vec::new(),
+        // Owner-attested capability strings, validated like device fields:
+        // each string must survive the visible-text policy or it is dropped
+        // individually — never the whole entry (same reasoning as the device
+        // comments below: dropping the entry would hide a real, reachable
+        // agent over a cosmetic field).
+        capabilities: content
+            .capabilities
+            .iter()
+            .filter(|cap| validate_capability(cap).is_ok())
+            .cloned()
+            .collect(),
         status: "offline".to_string(),
         respond_to: Some(content.respond_to),
         respond_to_allowlist: content.respond_to_allowlist,
+        // Owner authentication proves *who wrote this*, not that what they
+        // wrote is well-formed. A sibling device running an older, buggy, or
+        // tampered-with build can publish any string here, and these two values
+        // are rendered verbatim beside an agent's name — so they are validated
+        // like any other untrusted input before they reach the UI.
+        //
+        // A value that fails degrades to `None` on its own. Dropping the whole
+        // directory entry over a bad label would hide a real, reachable agent;
+        // dropping just the label falls back to the same "no device
+        // information" rendering as a peer that predates Stage 0.
+        device_id: content
+            .device_id
+            .filter(|id| validate_device_id(id).is_ok()),
+        device_label: content
+            .device_label
+            .filter(|label| validate_device_label(label).is_ok()),
+        // Same validate-or-None rule: `model` is an owner-attested free-form
+        // string rendered verbatim, so a hostile or buggy publisher gets a
+        // `None` (no model shown), not a 10 KB control-character blob.
+        model: content
+            .model
+            .filter(|model| validate_capability(model).is_ok()),
     })
 }
 
