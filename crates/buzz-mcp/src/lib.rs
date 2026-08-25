@@ -35,7 +35,7 @@ fn map_relay_error(e: RelayError) -> Result<CallToolResult, ErrorData> {
 /// Render events compactly and stably: newest-last (ascending `created_at`),
 /// one JSON object per line, with a truncation marker when the server-side
 /// clamp bit. Content is presented as data with an explicit provenance line.
-fn render_events(events: &mut Vec<serde_json::Value>, requested: u32, clamped: u32) -> String {
+fn render_events(events: &mut [serde_json::Value], requested: u32, clamped: u32) -> String {
     events.sort_by_key(|e| e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0));
     let mut out = String::new();
     for e in events.iter() {

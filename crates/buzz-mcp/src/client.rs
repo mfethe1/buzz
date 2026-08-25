@@ -105,7 +105,7 @@ impl RelayClient {
         let url = format!("{}{path}", self.relay_url);
         let auth = self
             .sign_nip98(method.as_str(), &url, body.as_deref())
-            .map_err(|e| RelayError::Transport(e))?;
+            .map_err(RelayError::Transport)?;
         let mut req = self
             .http
             .request(method, &url)
