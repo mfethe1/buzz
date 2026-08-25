@@ -174,3 +174,69 @@ fn git_identifiers_and_evidence_reject_path_and_url_injection() {
         );
     }
 }
+
+#[test]
+fn free_text_fields_reject_paths_ips_credentials_and_env() {
+    for bad in [
+        "fix leak in /Users/alice/.aws/credentials",
+        "reproduce at ~/secrets/env",
+        "server is 192.168.1.10 today",
+        "ping 10.0.0.1, then deploy",
+        "key AKIAIOSFODNN7EXAMPLE rotated",
+        "token sk-ant-abc123 here",
+        "set AWS_SECRET_ACCESS_KEY=deadbeef",
+        "-----BEGIN RSA PRIVATE KEY-----",
+    ] {
+        for field in ["title", "objective"] {
+            let mut value: serde_json::Value = serde_json::from_str(&valid_cml()).unwrap();
+            value[field] = serde_json::json!(bad);
+            assert!(parse_cml(&value.to_string()).is_err(), "{field}: {bad}");
+        }
+    }
+    let mut value: serde_json::Value = serde_json::from_str(&valid_cml()).unwrap();
+    value["acceptance"] = serde_json::json!([
+        {"id":"A1","text":"fetch metadata from 169.254.169.254 endpoint","verified":false}
+    ]);
+    assert!(parse_cml(&value.to_string()).is_err());
+}
+
+#[test]
+fn extensions_are_bounded_and_scanned() {
+    let mut value: serde_json::Value = serde_json::from_str(&valid_cml()).unwrap();
+    value["extensions"] = serde_json::json!({"telemetry":{"host_path":"/Users/bob/work"}});
+    assert!(parse_cml(&value.to_string()).is_err());
+
+    let mut value: serde_json::Value = serde_json::from_str(&valid_cml()).unwrap();
+    let mut deep = serde_json::json!(1);
+    for _ in 0..12 {
+        deep = serde_json::json!({ "n": deep });
+    }
+    value["extensions"] = serde_json::json!({"deep": deep});
+    assert!(parse_cml(&value.to_string()).is_err());
+
+    let mut value: serde_json::Value = serde_json::from_str(&valid_cml()).unwrap();
+    value["extensions"] = serde_json::json!({"adapter":{"note":"friendly","retries":3}});
+    assert!(parse_cml(&value.to_string()).is_ok());
+}
+
+#[test]
+fn https_references_reject_userinfo() {
+    let mut value: serde_json::Value = serde_json::from_str(&valid_cml()).unwrap();
+    value["evidence"] = serde_json::json!([
+        {"kind":"runtime","reference":"https://user:token@example.com/report"}
+    ]);
+    assert!(parse_cml(&value.to_string()).is_err());
+}
+
+#[test]
+fn heartbeat_within_skew_tolerance_clamps_instead_of_rejecting() {
+    let mut value: serde_json::Value = serde_json::from_str(&valid_cml()).unwrap();
+    // heartbeat 30s after the transition: inside the 60s clamp, reads online.
+    value["runtime"]["last_heartbeat_at"] = serde_json::json!(1787673030_u64);
+    value["runtime"]["presence"] = serde_json::json!("online");
+    assert!(parse_cml(&value.to_string()).is_ok());
+
+    // heartbeat 5 minutes in the future: hard reject.
+    value["runtime"]["last_heartbeat_at"] = serde_json::json!(1787673300_u64);
+    assert!(parse_cml(&value.to_string()).is_err());
+}

@@ -236,9 +236,15 @@ pub fn derive_host_id(
     let mut mac = Hmac::<Sha256>::new_from_slice(host_secret)
         .map_err(|_| CmlError::Validation("invalid host secret".into()))?;
     mac.update(b"buzz-cml-host-id-v1\0");
-    mac.update(community_id.as_bytes());
-    mac.update(channel_id.as_bytes());
-    mac.update(agent_pubkey.as_bytes());
+    // Length-prefix every variable-length field so concatenation is unambiguous.
+    for field in [
+        community_id.as_bytes().as_slice(),
+        channel_id.as_bytes().as_slice(),
+        agent_pubkey.as_bytes(),
+    ] {
+        mac.update(&(field.len() as u32).to_be_bytes());
+        mac.update(field);
+    }
     let digest = mac.finalize().into_bytes();
     Ok(format!("h_{}", hex::encode(&digest[..8])))
 }
@@ -324,16 +330,47 @@ impl CmlTask {
             validate_nonempty("evidence kind", &evidence.kind, 64)?;
             validate_reference(&evidence.reference)?;
         }
+        self.validate_extensions()?;
+        Ok(())
+    }
+
+    /// Extensions are a versioned side channel: cap size/depth and apply the
+    /// same free-text privacy scan to every string they carry, recursively.
+    fn validate_extensions(&self) -> Result<(), CmlError> {
+        const MAX_EXTENSIONS_BYTES: usize = 8_192;
+        const MAX_EXTENSIONS_DEPTH: usize = 8;
+        let encoded = serde_json::to_string(&self.extensions).map_err(|error| {
+            CmlError::Validation(format!("extensions not serializable: {error}"))
+        })?;
+        if encoded.len() > MAX_EXTENSIONS_BYTES {
+            return invalid("extensions must not exceed 8192 bytes");
+        }
+        for (key, value) in &self.extensions {
+            if key.is_empty() || key.len() > 128 || key.chars().any(char::is_control) {
+                return invalid("extension keys must be non-empty, short, printable tokens");
+            }
+            scan_free_text("extensions", key)?;
+            validate_extension_value(value, 0, MAX_EXTENSIONS_DEPTH)?;
+        }
         Ok(())
     }
 
     fn validate_presence(&self) -> Result<(), CmlError> {
+        // Presence is derived at snapshot time from heartbeat age. Small clock
+        // skew between the heartbeat publisher and the transition author is
+        // clamped rather than rejected so canonical bytes stay replay-stable;
+        // large skew remains a validation error.
+        const MAX_SKEW_SECS: u64 = 60;
         let expected = match self.runtime.last_heartbeat_at {
             None => Presence::Offline,
             Some(timestamp) => {
-                let age = self.updated_at.checked_sub(timestamp).ok_or_else(|| {
-                    CmlError::Validation("heartbeat cannot be in the future".into())
-                })?;
+                let age = if self.updated_at >= timestamp {
+                    self.updated_at - timestamp
+                } else if timestamp - self.updated_at <= MAX_SKEW_SECS {
+                    0
+                } else {
+                    return invalid("heartbeat is more than 60s in the future");
+                };
                 if age <= self.runtime.ttl_seconds {
                     Presence::Online
                 } else if age <= self.runtime.ttl_seconds.saturating_mul(2) {
@@ -418,7 +455,127 @@ fn validate_nonempty(name: &str, value: &str, max_len: usize) -> Result<(), CmlE
             "{name} must be non-empty and at most {max_len} bytes"
         ));
     }
+    scan_free_text(name, value)?;
     Ok(())
+}
+
+/// Reject privacy-leaking content in every human-readable CML field.
+///
+/// Fail-closed per the spec's tiered-privacy table: absolute paths, IP
+/// literals, credentials (AWS keys, PEM blocks, bearer tokens), and
+/// environment-variable assignments never belong in signed task state.
+fn scan_free_text(name: &str, value: &str) -> Result<(), CmlError> {
+    for line in value.lines() {
+        for word in line.split_whitespace() {
+            if word.starts_with('/')
+                || word.starts_with('~')
+                || word.starts_with('\\')
+                || word.starts_with("C:\\")
+            {
+                return invalid(&format!(
+                    "{name} must not contain absolute paths (found {word:?})"
+                ));
+            }
+            if is_ip_literal(word) {
+                return invalid(&format!(
+                    "{name} must not contain IP addresses (found {word:?})"
+                ));
+            }
+            if word.starts_with("AKIA")
+                || word.starts_with("sk-ant-")
+                || word.starts_with("sk-or-")
+                || word.starts_with("ghp_")
+                || word.starts_with("gho_")
+                || word.starts_with("xoxb-")
+                || word.starts_with("Bearer ")
+            {
+                return invalid(&format!(
+                    "{name} must not contain credentials (found token prefix in {word:?})"
+                ));
+            }
+            if word.contains("BEGIN ") && word.contains("PRIVATE KEY") {
+                return invalid(&format!("{name} must not contain PEM material"));
+            }
+            if word.contains('=') && !word.contains("==") {
+                let (k, _) = word.split_once('=').unwrap_or_default();
+                if k.len() >= 3
+                    && k.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+                    && k.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                    && k.ends_with(|c: char| c.is_ascii_uppercase())
+                {
+                    return invalid(&format!(
+                        "{name} must not contain environment variable assignments (found {word:?})"
+                    ));
+                }
+            }
+        }
+        if line.contains("BEGIN RSA PRIVATE KEY")
+            || line.contains("BEGIN OPENSSH PRIVATE KEY")
+            || line.contains("BEGIN EC PRIVATE KEY")
+        {
+            return invalid(&format!("{name} must not contain PEM material"));
+        }
+    }
+    Ok(())
+}
+
+/// Recursively bound extension values and privacy-scan every string.
+fn validate_extension_value(value: &Value, depth: usize, max_depth: usize) -> Result<(), CmlError> {
+    if depth > max_depth {
+        return invalid("extensions must not nest deeper than 8 levels");
+    }
+    match value {
+        Value::Null => Ok(()),
+        Value::Bool(_) => Ok(()),
+        Value::Number(_) => Ok(()),
+        Value::String(text) => {
+            if text.len() > 2_048 {
+                return invalid("extension string values must not exceed 2048 bytes");
+            }
+            scan_free_text("extensions", text)
+        }
+        Value::Array(items) => {
+            if items.len() > 64 {
+                return invalid("extension arrays must not exceed 64 items");
+            }
+            items
+                .iter()
+                .try_for_each(|item| validate_extension_value(item, depth + 1, max_depth))
+        }
+        Value::Object(map) => {
+            if map.len() > 64 {
+                return invalid("extension objects must not exceed 64 keys");
+            }
+            for (key, item) in map {
+                if key.is_empty() || key.len() > 128 || key.chars().any(char::is_control) {
+                    return invalid("extension keys must be non-empty, short, printable tokens");
+                }
+                scan_free_text("extensions", key)?;
+                validate_extension_value(item, depth + 1, max_depth)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn is_ip_literal(word: &str) -> bool {
+    let candidate = word.trim_end_matches(&[',', ';', '.', ')', ']', '}'][..]);
+    let parts: Vec<&str> = candidate.split('.').collect();
+    if parts.len() == 4
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.bytes().all(|b| b.is_ascii_digit())
+                && p.parse::<u16>().is_ok_and(|n| n <= 255)
+        })
+    {
+        return true;
+    }
+    if let Some(rest) = candidate.strip_prefix('[') {
+        if let Some(v6) = rest.strip_suffix(']') {
+            return v6.contains(':') && v6.bytes().all(|b| b.is_ascii_hexdigit() || b == b':');
+        }
+    }
+    false
 }
 
 fn validate_sha(name: &str, value: &str) -> Result<(), CmlError> {
@@ -510,6 +667,9 @@ fn validate_reference(value: &str) -> Result<(), CmlError> {
     let is_buzz = value.starts_with("buzz://") && !value[7..].is_empty();
     if !is_hex_reference && !is_https && !is_buzz {
         return invalid("reference must be a canonical hash, HTTPS URL, or Buzz URL");
+    }
+    if is_https && value.contains('@') {
+        return invalid("https reference must not carry userinfo credentials");
     }
     Ok(())
 }
