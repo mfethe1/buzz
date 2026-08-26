@@ -174,17 +174,19 @@ fn two_distinct_workers_claiming_one_plan_reduce_to_conflicted_not_two_winners()
     assert_eq!(reduced.task.status, CmlStatus::Claimed);
     assert!(!reduced.conflicted);
 
-    // The duplicate is valid as a standalone event but can never silently win
-    // this task's chain: both claims are siblings of the plan, so the reducer
-    // surfaces the race as `conflicted` — never last-writer-wins — and only
-    // an authorized owner.resolve can pick the surviving worker.
+    // The duplicate is valid as a standalone event but can never win or even
+    // disturb this task's chain: the plan pre-assigned worker_a, so worker_b's
+    // claim rewrites an assigned role. After the forged-sibling fix the
+    // reducer quarantines it — the task stays claimed by worker_a instead of
+    // being held hostage in `conflicted`.
     assert!(validate_cml_event(&claim_b).is_ok());
-    let raced = reduce_cml_events(&[plan, claim_a, claim_b]).unwrap();
-    assert!(raced.conflicted);
-    assert_eq!(raced.task.status, CmlStatus::Conflicted);
-    assert!(
-        raced.task.lease.is_none(),
-        "a conflicted task must not retain an active lease"
+    let reduced = reduce_cml_events(&[plan, claim_a, claim_b]).unwrap();
+    assert!(!reduced.conflicted, "role-theft is quarantined, not a fork");
+    assert_eq!(reduced.task.status, CmlStatus::Claimed);
+    assert_eq!(
+        reduced.task.roles.worker.as_deref(),
+        Some(hex(&worker_a).as_str()),
+        "the assigned worker keeps the claim"
     );
 }
 

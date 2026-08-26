@@ -2262,11 +2262,24 @@ async fn ingest_event_inner(
             | KIND_JOB_CANCEL
             | KIND_JOB_ERROR
     );
+    // A job-kind event that carries the CML protocol tag, OR that pairs the
+    // h/d channel+task tags a CML chain lives under, must pass strict CML
+    // validation. Tag-presence gating alone would let an attacker poison a
+    // task's reduction by publishing an unvalidated stray event with matching
+    // h/d tags and no protocol tag.
     let has_protocol_tag = event
         .tags
         .iter()
         .any(|tag| tag.as_slice().first().map(String::as_str) == Some("protocol"));
-    if is_job_kind && has_protocol_tag {
+    let has_task_coordinate = event
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice().first().map(String::as_str) == Some("h"))
+        && event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice().first().map(String::as_str) == Some("d"));
+    if is_job_kind && (has_protocol_tag || has_task_coordinate) {
         buzz_core::cml_event::validate_cml_event_after_signature(&event)
             .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
     }
