@@ -39,9 +39,12 @@ fn project_task_null_on_missing_fields() {
 }
 
 #[test]
-fn url_encoding_is_safe_for_query_strings() {
-    // Deliberately via the crate's public helper if exported; otherwise the
-    // same logic is pinned by the lib tests. Here: no raw spaces or & leak in.
-    let id = "task with space&=";
-    assert!(!id.contains('%'));
+fn url_encoding_boundaries_via_public_helper() {
+    // Pins the injection-relevant boundary set via the crate's own helper:
+    // reserved query characters (&, =, ?, #), percent itself, and space must
+    // never reach the relay raw.
+    assert_eq!(buzz_mcp::urlencode("a&b=c?d#e"), "a%26b%3Dc%3Fd%23e");
+    assert_eq!(buzz_mcp::urlencode("100% done"), "100%25%20done");
+    assert_eq!(buzz_mcp::urlencode(""), "");
+    assert_eq!(buzz_mcp::urlencode("safe-_.~09AZaz"), "safe-_.~09AZaz");
 }

@@ -159,21 +159,9 @@ impl BuzzMcp {
         .into_iter()
         .next()
         .ok_or_else(|| ErrorData::invalid_params("event not found".to_string(), None))?;
-        // Resolve the thread root: the first e-tag's first value (root id).
-        let root_id = anchor
-            .get("tags")
-            .and_then(|t| t.as_array())
-            .and_then(|tags| {
-                tags.iter().find_map(|t| {
-                    let a = t.as_array()?;
-                    if a.first().and_then(|v| v.as_str()) == Some("e") {
-                        a.get(1).and_then(|v| v.as_str()).map(str::to_owned)
-                    } else {
-                        None
-                    }
-                })
-            })
-            .unwrap_or_else(|| p.event_id.clone());
+        // Resolve the thread root: the first e-tag's first value (root id),
+        // falling back to the anchor itself when it has no e-tag.
+        let root_id = thread_root_id(&anchor, &p.event_id);
         let clamped = clamp_limit(p.limit);
         let reply_filter = serde_json::json!({
             "kinds": client::THREAD_KINDS,
@@ -272,7 +260,7 @@ impl ServerHandler for BuzzMcp {
 
 /// Minimal percent-encoding for query-string values (alphanumerics and a few
 /// safe punctuation pass through; everything else becomes %XX).
-pub(crate) fn urlencode(s: &str) -> String {
+pub fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -283,6 +271,26 @@ pub(crate) fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+/// Resolve a thread's root id from an anchor event's e-tags: the first e-tag
+/// whose second element is a non-empty string, falling back to the anchor's
+/// own id when the anchor has no usable e-tag (it IS the root).
+pub(crate) fn thread_root_id(anchor: &serde_json::Value, anchor_id: &str) -> String {
+    anchor
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .and_then(|tags| {
+            tags.iter().find_map(|t| {
+                let a = t.as_array()?;
+                if a.first().and_then(|v| v.as_str()) == Some("e") {
+                    a.get(1).and_then(|v| v.as_str()).map(str::to_owned)
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_else(|| anchor_id.to_owned())
 }
 
 // ---- tool parameter schemas ----
@@ -373,6 +381,85 @@ mod tests {
         assert_eq!(urlencode("abcXYZ09-_.~"), "abcXYZ09-_.~");
         assert_eq!(urlencode("a b/c"), "a%20b%2Fc");
         assert_eq!(urlencode(""), "");
+        // Injection-relevant boundary characters all encode.
+        assert_eq!(urlencode("a&b=c?d#e"), "a%26b%3Dc%3Fd%23e");
+        assert_eq!(urlencode("%"), "%25");
+    }
+
+    // ---- hardening→verifying edge-case enumeration (REG-3) ----
+
+    fn ev(created_at: u64, id: &str) -> serde_json::Value {
+        serde_json::json!({"id": id, "created_at": created_at, "content": format!("m{id}")})
+    }
+
+    #[test]
+    fn render_events_empty_input_is_empty_output() {
+        // EC: empty relay result -> empty (not error, not placeholder junk).
+        let mut none: Vec<serde_json::Value> = vec![];
+        assert_eq!(render_events(&mut none, 50, 50), "");
+    }
+
+    #[test]
+    fn render_events_sorts_newest_last_and_marks_truncation() {
+        // EC: unordered input must come out ascending by created_at.
+        let mut events = vec![ev(30, "c"), ev(10, "a"), ev(20, "b")];
+        let out = render_events(&mut events, 50, 50);
+        let pos = |id: &str| out.find(&format!("\"m{id}\"")).expect(id);
+        assert!(
+            pos("a") < pos("b") && pos("b") < pos("c"),
+            "not sorted: {out}"
+        );
+        // EC: server clamped below the request -> explicit [note: ...] marker.
+        let mut clamped = vec![ev(1, "a"), ev(2, "b")];
+        let out = render_events(&mut clamped, 500, 2);
+        assert!(out.contains("[note: requested 500 events, server clamped to 2]"));
+        // No clamp -> no marker.
+        let mut exact = vec![ev(1, "a")];
+        assert!(!render_events(&mut exact, 1, 1).contains("[note:"));
+    }
+
+    #[test]
+    fn render_events_missing_created_at_sorts_first_not_panics() {
+        // EC: malformed event (no created_at) -> unwrap_or(0), never a panic.
+        let mut events = vec![
+            serde_json::json!({"id": "ok", "created_at": 5, "content": "mok"}),
+            serde_json::json!({"id": "bad"}),
+        ];
+        let out = render_events(&mut events, 50, 50);
+        assert!(out.contains("\"bad\"") && out.contains("\"mok\""));
+    }
+
+    #[test]
+    fn thread_root_id_resolves_e_tag_or_falls_back() {
+        let anchor_id = "anchor1";
+        // EC: reply anchor -> first e-tag value.
+        let reply = serde_json::json!({"tags": [["h","ch"],["e","root9",""],["e","other"]]});
+        assert_eq!(thread_root_id(&reply, anchor_id), "root9");
+        // EC: anchor IS the root (no e-tag) -> falls back to itself.
+        assert_eq!(
+            thread_root_id(&serde_json::json!({"tags": [["h","ch"]]}), anchor_id),
+            anchor_id
+        );
+        // EC: malformed tags (not an array / e-tag with no value) -> fallback.
+        assert_eq!(
+            thread_root_id(&serde_json::json!({"tags": "junk"}), anchor_id),
+            anchor_id
+        );
+        assert_eq!(thread_root_id(&serde_json::json!({}), anchor_id), anchor_id);
+        let empty_e = serde_json::json!({"tags": [["e"]]});
+        assert_eq!(thread_root_id(&empty_e, anchor_id), anchor_id);
+    }
+
+    #[test]
+    fn relay_error_display_is_distinct_per_class() {
+        // EC: offline/timeout vs authz denial vs malformed body must render
+        // distinctly so an agent can tell transient from permanent.
+        let t = RelayError::Transport("conn refused".into());
+        let s = RelayError::Status(403, "denied".into());
+        let m = RelayError::Malformed("bad json".into());
+        let (dt, ds, dm) = (t.to_string(), s.to_string(), m.to_string());
+        assert!(dt.contains("unreachable") && ds.contains("403") && dm.contains("malformed"));
+        assert!(dt != ds && ds != dm && dt != dm);
     }
 
     #[test]
