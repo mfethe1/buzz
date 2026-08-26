@@ -7,7 +7,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    cml::{parse_cml, CmlError, CmlStatus, CmlTask},
+    cml::{parse_cml, CmlError, CmlStatus, CmlTask, Roles},
     kind::{
         KIND_JOB_ACCEPTED, KIND_JOB_CANCEL, KIND_JOB_PROGRESS, KIND_JOB_REQUEST, KIND_JOB_RESULT,
     },
@@ -297,10 +297,17 @@ pub fn reduce_cml_events(events: &[Event]) -> Result<ReducedCmlTask, CmlEventErr
     if events.is_empty() {
         return invalid("cannot reduce an empty event set");
     }
+    // Quarantine, don't abort: a single stray/malformed event sharing the
+    // task's tags must never blind reduction of the whole chain. Events that
+    // fail single-event validation are skipped; the signed chain itself
+    // remains the authority.
     let validated: Vec<_> = events
         .iter()
-        .map(validate_cml_event)
-        .collect::<Result<_, _>>()?;
+        .filter_map(|event| validate_cml_event(event).ok())
+        .collect();
+    if validated.is_empty() {
+        return invalid("no valid CML events in the set");
+    }
     let task_id = validated[0].task.id;
     let channel_id = validated[0].channel_id;
     if validated
@@ -345,43 +352,74 @@ pub fn reduce_cml_events(events: &[Event]) -> Result<ReducedCmlTask, CmlEventErr
                 current = child;
             }
             _ => {
-                let child_ids: HashSet<_> = children.iter().map(|child| child.id).collect();
-                let resolutions: Vec<_> = validated
+                // Only legally-authorized siblings create a real fork. An
+                // event that fails transition validation against the current
+                // head is a forged/unauthorized sibling: quarantine it from
+                // the chain rather than letting it hold the task hostage.
+                let legal: Vec<_> = children
                     .iter()
-                    .filter(|event| {
-                        event.transition == CmlTransition::OwnerResolve
-                            && event.fork_heads.iter().copied().collect::<HashSet<_>>() == child_ids
-                            && event
-                                .selected
-                                .is_some_and(|selected| child_ids.contains(&selected))
-                    })
+                    .filter(|child| validate_transition(current, child).is_ok())
                     .collect();
-                if let [resolution] = resolutions.as_slice() {
-                    let selected_id = resolution.selected.ok_or_else(|| {
-                        CmlEventError::Invalid("resolution missing selected head".into())
-                    })?;
-                    let selected = by_id.get(&selected_id).copied().ok_or_else(|| {
-                        CmlEventError::Invalid("selected fork head is absent".into())
-                    })?;
-                    validate_transition(current, selected)?;
-                    validate_resolution_snapshot(selected, resolution)?;
-                    for child in &children {
-                        visited.insert(child.id);
+                match legal.as_slice() {
+                    [] => {
+                        // Every sibling is unauthorized: continue the chain
+                        // without any of them and record none as head.
+                        return Ok(ReducedCmlTask {
+                            task: current.task.clone(),
+                            head: current.id,
+                            conflicted: false,
+                        });
                     }
-                    if !visited.insert(resolution.id) {
-                        return invalid("event chain contains a cycle");
+                    [only] => {
+                        validate_transition(current, only)?;
+                        if !visited.insert(only.id) {
+                            return invalid("event chain contains a cycle");
+                        }
+                        current = only;
+                        continue;
                     }
-                    current = resolution;
-                    continue;
+                    legal_children => {
+                        let child_ids: HashSet<_> =
+                            legal_children.iter().map(|child| child.id).collect();
+                        let resolutions: Vec<_> = validated
+                            .iter()
+                            .filter(|event| {
+                                event.transition == CmlTransition::OwnerResolve
+                                    && event.fork_heads.iter().copied().collect::<HashSet<_>>()
+                                        == child_ids
+                                    && event
+                                        .selected
+                                        .is_some_and(|selected| child_ids.contains(&selected))
+                            })
+                            .collect();
+                        if let [resolution] = resolutions.as_slice() {
+                            let selected_id = resolution.selected.ok_or_else(|| {
+                                CmlEventError::Invalid("resolution missing selected head".into())
+                            })?;
+                            let selected = by_id.get(&selected_id).copied().ok_or_else(|| {
+                                CmlEventError::Invalid("selected fork head is absent".into())
+                            })?;
+                            validate_transition(current, selected)?;
+                            validate_resolution_snapshot(selected, resolution)?;
+                            for child in legal_children {
+                                visited.insert(child.id);
+                            }
+                            if !visited.insert(resolution.id) {
+                                return invalid("event chain contains a cycle");
+                            }
+                            current = resolution;
+                            continue;
+                        }
+                        let mut task = current.task.clone();
+                        task.status = CmlStatus::Conflicted;
+                        task.lease = None;
+                        return Ok(ReducedCmlTask {
+                            task,
+                            head: current.id,
+                            conflicted: true,
+                        });
+                    }
                 }
-                let mut task = current.task.clone();
-                task.status = CmlStatus::Conflicted;
-                task.lease = None;
-                return Ok(ReducedCmlTask {
-                    task,
-                    head: current.id,
-                    conflicted: true,
-                });
             }
         }
     }
@@ -439,24 +477,29 @@ fn validate_transition(
                 CmlTransition::RuntimeProve,
                 CmlStatus::Shipped
             )
-            | (
-                CmlStatus::Claimed,
-                CmlTransition::LeaseExpired,
-                CmlStatus::Planned
-            )
-    ) || (current.transition == CmlTransition::Cancel
-        && current.task.status == CmlStatus::Cancelled
-        && !matches!(
-            previous.task.status,
-            CmlStatus::Shipped | CmlStatus::Cancelled
-        ));
+    ) || (current.transition == CmlTransition::LeaseExpired
+        && previous.task.status == CmlStatus::Claimed
+        && current.task.status == CmlStatus::Planned
+        // The asserted expiry must actually have elapsed: a planner cannot
+        // revoke a live claim by asserting expiry before expires_at.
+        && previous
+            .task
+            .lease
+            .as_ref()
+            .is_some_and(|lease| current.task.updated_at >= lease.expires_at))
+        || (current.transition == CmlTransition::Cancel
+            && current.task.status == CmlStatus::Cancelled
+            && !matches!(
+                previous.task.status,
+                CmlStatus::Shipped | CmlStatus::Cancelled
+            ));
     if !valid {
         return invalid("invalid lifecycle transition");
     }
     if current.task.id != previous.task.id {
         return invalid("task id changed across transition");
     }
-    validate_immutable_contract(&previous.task, &current.task)?;
+    validate_immutable_contract(&previous.task, &current.task, current.transition)?;
     if current.transition == CmlTransition::ReviewReject {
         if previous.task.review.round.checked_add(1) != Some(current.task.review.round) {
             return invalid("review rejection must increment round by exactly one");
@@ -467,14 +510,18 @@ fn validate_transition(
     Ok(())
 }
 
-fn validate_immutable_contract(previous: &CmlTask, current: &CmlTask) -> Result<(), CmlEventError> {
+fn validate_immutable_contract(
+    previous: &CmlTask,
+    current: &CmlTask,
+    transition: CmlTransition,
+) -> Result<(), CmlEventError> {
     let unchanged = previous.title == current.title
         && previous.objective == current.objective
         && previous.priority == current.priority
         && previous.protocol == current.protocol
         && previous.version == current.version
         && acceptance_contract_equal(&previous.acceptance, &current.acceptance)
-        && previous.roles == current.roles
+        && roles_compatible(&previous.roles, &current.roles, transition)
         && previous.git.base_sha == current.git.base_sha
         && previous.git.branch == current.git.branch
         && previous.git.repo == current.git.repo
@@ -484,6 +531,46 @@ fn validate_immutable_contract(previous: &CmlTask, current: &CmlTask) -> Result<
         return invalid("signed planner contract changed after planning");
     }
     Ok(())
+}
+
+/// Role slots may only be filled, never rewritten or emptied, by the
+/// transition authorized to fill them:
+///
+/// - `worker.claim` fills a null `worker` slot with the event author.
+/// - `reviewer.reject` may fill a null `fixer` slot (the planner names the
+///   fixer for the round; v1 pins one fixer for the whole task).
+/// - `reviewer.approve` / `runtime.prove` may fill a null `reviewer` slot on
+///   first exercise when the plan left it open.
+///
+/// Any change to an already-assigned role, or any assignment outside these
+/// transitions, is contract forgery.
+fn roles_compatible(previous: &Roles, current: &Roles, transition: CmlTransition) -> bool {
+    // Roles may never change identity once assigned, and planner never changes.
+    if previous.planner != current.planner {
+        return false;
+    }
+    for (was, now) in [
+        (&previous.worker, &current.worker),
+        (&previous.reviewer, &current.reviewer),
+        (&previous.fixer, &current.fixer),
+    ] {
+        match (was, now) {
+            (Some(before), Some(after)) if before != after => return false,
+            (Some(_), None) => return false,
+            _ => {}
+        }
+    }
+    let filling_worker = previous.worker.is_none() && current.worker.is_some();
+    let filling_reviewer = previous.reviewer.is_none() && current.reviewer.is_some();
+    let filling_fixer = previous.fixer.is_none() && current.fixer.is_some();
+    match transition {
+        CmlTransition::Claim => !filling_reviewer && !filling_fixer,
+        CmlTransition::ReviewReject => !filling_worker && !filling_reviewer,
+        CmlTransition::ReviewApprove | CmlTransition::RuntimeProve => {
+            !filling_worker && !filling_fixer
+        }
+        _ => !filling_worker && !filling_reviewer && !filling_fixer,
+    }
 }
 
 fn acceptance_contract_equal(
