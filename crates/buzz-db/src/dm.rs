@@ -488,11 +488,19 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
     let id: Uuid = row.try_get("id")?;
     let topic_required: bool = row.try_get("topic_required")?;
 
+    // REG-8: DM rows are read through DM-scoped queries that do not SELECT
+    // `write_policy`. A DM has exactly two human participants and no roster to
+    // restrict, so the permissive historic default is the correct value here —
+    // and `crate::channel::row_to_channel_record` remains the only place that
+    // parses a stored policy.
+    let write_policy = crate::channel::ChannelWritePolicy::default();
+
     Ok(ChannelRecord {
         id,
         name: row.try_get("name")?,
         channel_type: row.try_get("channel_type")?,
         visibility: row.try_get("visibility")?,
+        write_policy,
         description: row.try_get("description")?,
         canvas: row.try_get("canvas")?,
         created_by: row.try_get("created_by")?,

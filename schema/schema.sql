@@ -35,6 +35,7 @@ CREATE TYPE delivery_method AS ENUM ('webhook', 'websocket');
 CREATE TYPE subscription_status AS ENUM ('active', 'paused', 'deleted');
 CREATE TYPE pause_reason AS ENUM ('user', 'system', 'rate_limit');
 CREATE TYPE channel_add_policy AS ENUM ('anyone', 'owner_only', 'nobody');
+CREATE TYPE channel_write_policy AS ENUM ('any_member', 'admins_only', 'human_only');
 
 -- ── Communities ───────────────────────────────────────────────────────────────
 -- Conformance: row zero (host binding). The host map. `resolve_host(host)`
@@ -101,6 +102,7 @@ CREATE TABLE channels (
     participant_hash BYTEA,
     ttl_seconds     INT,
     ttl_deadline    TIMESTAMPTZ,
+    write_policy    channel_write_policy NOT NULL DEFAULT 'any_member',
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_channels_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );

@@ -14,7 +14,7 @@ use buzz_core::CommunityId;
 // Re-export the canonical enum definitions from buzz-core.
 // These live in core (zero I/O deps) so the SDK can share them
 // without pulling in sqlx/tokio.
-pub use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
+pub use buzz_core::channel::{ChannelType, ChannelVisibility, ChannelWritePolicy, MemberRole};
 
 /// A channel row as returned from the database.
 #[derive(Debug, Clone)]
@@ -27,6 +27,10 @@ pub struct ChannelRecord {
     pub channel_type: String,
     /// Visibility string (`"open"` or `"private"`).
     pub visibility: String,
+    /// Who may originate a message in this channel (REG-8 / upstream #2497).
+    /// Defaults to [`ChannelWritePolicy::AnyMember`], the historic
+    /// membership-binary behavior.
+    pub write_policy: ChannelWritePolicy,
     /// Optional channel description.
     pub description: Option<String>,
     /// Optional canvas (rich document) content.
@@ -1481,11 +1485,24 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
     let ttl_seconds: Option<i32> = row.try_get("ttl_seconds").unwrap_or(None);
     let ttl_deadline: Option<DateTime<Utc>> = row.try_get("ttl_deadline").unwrap_or(None);
 
+    // REG-8: same absent-column tolerance as topic/purpose above — a query
+    // that does not SELECT the column yields the permissive historic
+    // default. A row whose stored value is unrecognized is a different case
+    // and must NOT silently become `any_member` (that would fail open), so
+    // an unparseable non-empty value is surfaced as an error.
+    let write_policy = match row.try_get::<String, _>("write_policy") {
+        Ok(raw) => raw
+            .parse::<ChannelWritePolicy>()
+            .map_err(DbError::InvalidData)?,
+        Err(_) => ChannelWritePolicy::default(),
+    };
+
     Ok(ChannelRecord {
         id,
         name: row.try_get("name")?,
         channel_type: row.try_get("channel_type")?,
         visibility: row.try_get("visibility")?,
+        write_policy,
         description: row.try_get("description")?,
         canvas: row.try_get("canvas")?,
         created_by: row.try_get("created_by")?,

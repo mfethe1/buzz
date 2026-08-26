@@ -778,6 +778,100 @@ pub(crate) async fn check_channel_membership(
     }
 }
 
+/// Kinds that ORIGINATE channel content, i.e. the events a per-channel write
+/// policy governs (REG-8; upstream issue #2497).
+///
+/// Deliberately narrower than [`requires_h_channel_scope`]. Excluded on
+/// purpose:
+/// - NIP-29 admin kinds (put/remove user, edit metadata, delete event/group):
+///   these are moderation and are already role-gated by their own validators.
+///   An admin must stay able to administer a channel nobody may post in.
+/// - Edits/deletions of existing content: the author already owns the message
+///   and `validate_edit_ownership` is the authority.
+/// - Reactions, read state, pins, bookmarks and huddle lifecycle: these do not
+///   originate a message. A read-only channel is about who may SPEAK.
+///
+/// Starting narrow is the safe direction: a kind omitted here keeps exactly
+/// its historic behavior, whereas one wrongly included would silently break a
+/// working flow.
+pub(crate) fn originates_channel_content(kind: u32) -> bool {
+    matches!(
+        kind,
+        KIND_STREAM_MESSAGE
+            | KIND_STREAM_MESSAGE_V2
+            | KIND_STREAM_MESSAGE_SCHEDULED
+            | KIND_FORUM_POST
+            | KIND_FORUM_COMMENT
+    )
+}
+
+/// Enforce the channel's write policy for a message the sender may otherwise
+/// publish (REG-8; upstream issue #2497).
+///
+/// Runs **after** [`check_channel_membership`] and only ever NARROWS: the
+/// default `any_member` reproduces the historic membership-binary behavior
+/// exactly, so a channel that never set a policy is unaffected.
+///
+/// Fails CLOSED on a role lookup error. The alternative — treating an
+/// unreadable role as permissive — would turn a transient database fault into
+/// a policy bypass on the one code path whose entire purpose is to deny.
+///
+/// A non-member reaching here is publishing into an `open` channel via the
+/// membership fallback above. Such a sender has no `channel_members` row and
+/// therefore no role to satisfy a restrictive policy, so any policy other than
+/// the default denies them.
+pub(crate) async fn check_channel_write_policy(
+    tenant: &TenantContext,
+    state: &AppState,
+    ch_id: Uuid,
+    pubkey_bytes: &[u8],
+    channel: Option<&buzz_db::channel::ChannelRecord>,
+) -> Result<(), String> {
+    use buzz_core::channel::{ChannelWritePolicy, MemberRole};
+
+    // Resolve the policy from the request's prefetched row when present,
+    // falling back to a direct read (mirrors the membership gate above).
+    let policy = match channel {
+        Some(ch) => ch.write_policy,
+        None => match state.db.get_channel(tenant.community(), ch_id).await {
+            Ok(ch) => ch.write_policy,
+            // A missing row is not this gate's error to raise: the membership
+            // gate already ran and later steps report a missing channel.
+            Err(_) => ChannelWritePolicy::default(),
+        },
+    };
+
+    // Fast path: the permissive default needs no role lookup, so channels
+    // that never set a policy pay nothing for this gate.
+    if policy == ChannelWritePolicy::AnyMember {
+        return Ok(());
+    }
+
+    let role = state
+        .db
+        .get_member_role(tenant.community(), ch_id, pubkey_bytes)
+        .await
+        .map_err(|e| format!("error: database error: {e}"))?;
+
+    // The stored role is a free-form String at the DB boundary. An
+    // unrecognized value must NOT be treated as permissive, so a parse
+    // failure denies rather than defaulting (fail closed).
+    let role = match role.as_deref().map(str::parse::<MemberRole>) {
+        Some(Ok(role)) => Some(role),
+        Some(Err(_)) => None,
+        None => None,
+    };
+
+    match role {
+        Some(role) if policy.allows_post(role) => Ok(()),
+        // Either a restrictive policy the role does not satisfy, or an
+        // open-channel non-member with no role at all. Both are denials.
+        _ => Err(format!(
+            "restricted: channel write policy is {policy}; you may not post here"
+        )),
+    }
+}
+
 fn check_token_channel_access(auth: &IngestAuth, channel_id: Uuid) -> Result<(), String> {
     if let Some(allowed) = auth.channel_ids() {
         if !allowed.contains(&channel_id) {
@@ -2555,6 +2649,21 @@ async fn ingest_event_inner(
                 state_for_request(tenant, auth.pubkey()),
             );
             auth_result.map_err(IngestError::Rejected)?;
+
+            // REG-8 (upstream #2497): the write-policy gate runs only after
+            // membership has been established, and only for kinds that
+            // originate channel content. It can only ever narrow.
+            if originates_channel_content(kind_u32) {
+                check_channel_write_policy(
+                    tenant,
+                    state,
+                    ch_id,
+                    &pubkey_bytes,
+                    channel_row.as_ref(),
+                )
+                .await
+                .map_err(IngestError::Rejected)?;
+            }
         }
     }
 
@@ -3293,6 +3402,84 @@ mod tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    /// REG-8 (#2497): the kind allowlist governed by the write policy is
+    /// deliberately narrow. Admin/moderation/reaction/edit kinds must keep
+    /// their historic behavior, or a read-only channel becomes unmoderatable.
+    #[test]
+    fn only_content_originating_kinds_are_governed_by_write_policy() {
+        use buzz_core::kind::{
+            KIND_NIP29_DELETE_EVENT, KIND_NIP29_EDIT_METADATA, KIND_NIP29_PUT_USER,
+            KIND_NIP29_REMOVE_USER, KIND_REACTION, KIND_STREAM_MESSAGE_BOOKMARKED,
+            KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
+            KIND_STREAM_MESSAGE_V2,
+        };
+
+        // Governed: these ORIGINATE content.
+        for kind in [
+            KIND_STREAM_MESSAGE,
+            KIND_STREAM_MESSAGE_V2,
+            KIND_STREAM_MESSAGE_SCHEDULED,
+            KIND_FORUM_POST,
+            KIND_FORUM_COMMENT,
+        ] {
+            assert!(
+                originates_channel_content(kind),
+                "kind {kind} originates content and must be governed"
+            );
+        }
+
+        // NOT governed — each for a stated reason.
+        for kind in [
+            KIND_NIP29_PUT_USER,      // moderation, separately role-gated
+            KIND_NIP29_REMOVE_USER,   // moderation
+            KIND_NIP29_EDIT_METADATA, // channel admin
+            KIND_NIP29_DELETE_EVENT,  // moderation
+            KIND_STREAM_MESSAGE_EDIT, // author already owns the message
+            KIND_REACTION,            // not speech
+            KIND_STREAM_MESSAGE_PINNED,
+            KIND_STREAM_MESSAGE_BOOKMARKED,
+            KIND_FORUM_VOTE, // a vote is not a post
+            KIND_CANVAS,
+        ] {
+            assert!(
+                !originates_channel_content(kind),
+                "kind {kind} must keep its historic behavior"
+            );
+        }
+    }
+
+    /// The default must govern nothing in practice: with `any_member` the gate
+    /// short-circuits before any role lookup, so an unmigrated channel is
+    /// byte-for-byte unaffected. Guards the backward-compat claim in the
+    /// migration.
+    #[test]
+    fn default_write_policy_admits_every_posting_role() {
+        use buzz_core::channel::{ChannelWritePolicy, MemberRole};
+
+        for role in [MemberRole::Owner, MemberRole::Admin, MemberRole::Member] {
+            assert!(
+                ChannelWritePolicy::AnyMember.allows_post(role),
+                "{role} could post before REG-8 and must still be able to"
+            );
+        }
+    }
+
+    /// An unrecognized stored role string must DENY under a restrictive
+    /// policy, never fall through to permitted. Mirrors the fail-closed parse
+    /// in `check_channel_write_policy`.
+    #[test]
+    fn unparseable_member_role_cannot_satisfy_a_restrictive_policy() {
+        use buzz_core::channel::MemberRole;
+        use std::str::FromStr;
+
+        for bad in ["superuser", "", "OWNER", "moderator"] {
+            assert!(
+                MemberRole::from_str(bad).is_err(),
+                "{bad:?} must not parse into a role that could be granted posting rights"
+            );
+        }
+    }
 
     #[test]
     fn missing_huddle_backing_channel_is_a_client_rejection() {
