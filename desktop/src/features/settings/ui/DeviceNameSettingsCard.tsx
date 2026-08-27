@@ -8,6 +8,7 @@ import {
 } from "@/features/agents/hooks";
 import {
   getDeviceNameSuggestion,
+  resetDeviceLabel,
   setDeviceLabel,
 } from "@/shared/api/tauriDeviceIdentity";
 import { Button } from "@/shared/ui/button";
@@ -54,6 +55,27 @@ export function DeviceNameSettingsCard() {
     },
   });
 
+  // REG-11: the one-click way back from a published name. FM1 honesty rule:
+  // the copy says "stop showing" (forward pseudonymisation), never "remove"
+  // or "erase" — the device id is unchanged and previously published events
+  // stay fetchable at their coordinates.
+  const resetDevice = useMutation({
+    mutationFn: () => resetDeviceLabel(),
+    onSuccess: (identity) => {
+      setEditedLabel(false);
+      setDraftLabel(identity.deviceLabel);
+      void queryClient.invalidateQueries({ queryKey: deviceIdentityQueryKey });
+      toast.success("Device name reset to anonymous");
+    },
+    onError: (error: unknown) => {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Could not reset this device's name",
+      );
+    },
+  });
+
   // The OS host name is only ever *offered*. A device's name starts opaque
   // (`device-xxxxxxxx`) precisely because host names routinely carry a real
   // person's name and this label is published world-readable — so the owner
@@ -81,6 +103,10 @@ export function DeviceNameSettingsCard() {
     suggestion !== null &&
     suggestion !== savedLabel &&
     suggestion !== trimmedLabel;
+
+  // REG-11: `device-xxxxxxxx` is the mint-time opaque default. Offering a
+  // reset when the label is already anonymous would be a confusing no-op.
+  const isOpaqueLabel = /^device-[0-9a-f]{8}$/.test(savedLabel);
   const saveDisabled =
     trimmedLabel.length === 0 ||
     trimmedLabel === savedLabel ||
@@ -142,6 +168,25 @@ export function DeviceNameSettingsCard() {
             >
               Save
             </Button>
+            {isOpaqueLabel ? null : (
+              <Button
+                data-testid="device-name-reset"
+                disabled={
+                  resetDevice.isPending ||
+                  renameDevice.isPending ||
+                  !deviceIdentity.data
+                }
+                onClick={() => {
+                  resetDevice.mutate();
+                }}
+                size="sm"
+                title="Stop showing a real name on your agents. New views see the anonymous device-xxxxxxxx default; the device id is unchanged and past events stay fetchable, so this is pseudonymisation, not erasure."
+                type="button"
+                variant="ghost"
+              >
+                Reset
+              </Button>
+            )}
           </div>
         </SettingsOptionRow>
       </SettingsOptionGroup>

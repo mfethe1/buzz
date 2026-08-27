@@ -313,6 +313,35 @@ pub fn get_device_name_suggestion() -> Option<String> {
     hostname_suggestion()
 }
 
+/// Reset this device's label to the mint-time opaque default and republish.
+///
+/// The revocation path for [`set_device_label`]: once a real name has been
+/// published there was previously no way back. The reset value is
+/// [`opaque_label`] of the non-rotating `device_id`, computed at call time, so
+/// the mint rule stays single-sourced and no "original label" is stored.
+///
+/// Honest scope, never overclaim in user-facing copy: this is **forward-looking
+/// pseudonymisation, not erasure and not unlinkability**. `device_id` is
+/// published alongside the label (see `agent_events`) and is never rotated, so
+/// an observer who recorded `(device_id, real-name)` can still resolve the
+/// device afterwards; and kind:30177 is parameterized-replaceable, so
+/// superseded events remain fetchable at their coordinates. New observers see
+/// only the opaque label. A full unlink requires the sign-out wipe (`reset`),
+/// which destroys all local agent state — proportionality is this command's
+/// whole value.
+///
+/// Propagation matches [`set_device_label`]: immediate for the applied
+/// community, eventual for the owner's others.
+#[tauri::command]
+pub fn reset_device_label(app: AppHandle) -> Result<DeviceIdentity, String> {
+    let path = device_identity_path(&app)?;
+    let identity = load_or_create_at(&path)?;
+    let reset = set_label_at(&path, &opaque_label(&identity.device_id))?;
+    cache(&reset);
+    republish_agent_records(&app);
+    Ok(reset)
+}
+
 /// Rename this device and republish the **active community's** local agents so
 /// its members see the new label without waiting for the next app restart.
 ///
@@ -406,6 +435,46 @@ mod tests {
             opaque_label("0123456789abcdef0123456789abcdef"),
             "device-01234567"
         );
+    }
+
+    /// REG-11: a reset must land exactly on the mint-time opaque label derived
+    /// from the non-rotating device_id — the same value [`mint_identity`]
+    /// would have published — so the mint rule stays single-sourced and no
+    /// "original label" is ever stored. Pure-logic half of `reset_device_label`
+    /// (the command wrapper adds cache + republish, which mirror
+    /// `set_device_label` verbatim).
+    #[test]
+    fn reset_lands_on_the_opaque_default_and_keeps_the_device_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device.json");
+
+        let minted = load_or_create_at(&path).unwrap();
+        let named = set_label_at(&path, "mfeth-win").unwrap();
+        assert_eq!(named.device_label, "mfeth-win");
+        assert_eq!(named.device_id, minted.device_id);
+
+        let reset = set_label_at(&path, &opaque_label(&named.device_id)).unwrap();
+        assert_eq!(reset.device_label, opaque_label(&minted.device_id));
+        assert_eq!(reset.device_id, minted.device_id);
+        assert_eq!(
+            reset,
+            load_or_create_at(&path).unwrap(),
+            "the reset must persist, not just compute"
+        );
+    }
+
+    /// REG-11: resetting twice is stable — the opaque label passes
+    /// [`sanitize_label`] (the same policy gate every label write takes), so a
+    /// reset on an already-opaque label is an idempotent no-op write.
+    #[test]
+    fn reset_is_idempotent_on_an_already_opaque_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device.json");
+
+        let minted = load_or_create_at(&path).unwrap();
+        let first = set_label_at(&path, &opaque_label(&minted.device_id)).unwrap();
+        let second = set_label_at(&path, &opaque_label(&first.device_id)).unwrap();
+        assert_eq!(first, second);
     }
 
     /// A minted identity must not leak the OS host name — it is published
