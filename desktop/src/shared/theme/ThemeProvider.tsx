@@ -13,6 +13,7 @@ import { invokeTauri } from "@/shared/api/tauri";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { getStorageItem } from "@/shared/lib/safeStorage";
 import { createThemeVars, hexToHsl } from "./adaptive-theme";
+import { applyBrandColor, parseBrandColor } from "./relayBrandColor";
 import {
   SYNTAX_THEMES,
   type SyntaxThemeName,
@@ -85,6 +86,7 @@ type ThemeContextValue = {
 type ThemeProviderProps = {
   children: ReactNode;
   defaultTheme?: SyntaxThemeName;
+  relayUrl?: string | null;
 };
 
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
@@ -480,6 +482,7 @@ async function applyTheme(name: SyntaxThemeName): Promise<{
 export function ThemeProvider({
   children,
   defaultTheme = "buzz",
+  relayUrl = null,
 }: ThemeProviderProps) {
   const glassBackgroundSupported = isTauri() && isMacPlatform();
 
@@ -632,6 +635,47 @@ export function ThemeProvider({
   useEffect(() => {
     applyAccentColor(resolveEffectiveAccent(effectiveTheme, accentColor));
   }, [accentColor, effectiveTheme]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const controller = new AbortController();
+
+    // Clear synchronously on every community transition. A slow or malformed
+    // destination must never retain the previous tenant's brand color.
+    applyBrandColor(root, null);
+    if (!relayUrl) return () => controller.abort();
+
+    let infoUrl: URL;
+    try {
+      infoUrl = new URL(relayUrl);
+      infoUrl.protocol = infoUrl.protocol === "wss:" ? "https:" : "http:";
+      infoUrl.pathname = "/info";
+      infoUrl.search = "";
+      infoUrl.hash = "";
+    } catch {
+      return () => controller.abort();
+    }
+
+    void fetch(infoUrl, {
+      headers: { Accept: "application/nostr+json" },
+      signal: controller.signal,
+    })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((info: unknown) => {
+        if (!controller.signal.aborted) {
+          applyBrandColor(
+            root,
+            parseBrandColor(info && typeof info === "object" ? info : null),
+          );
+        }
+      })
+      .catch(() => {
+        // Branding is presentation-only. Offline, timeout, CORS, and malformed
+        // responses all degrade to the already-applied stock theme.
+      });
+
+    return () => controller.abort();
+  }, [relayUrl]);
 
   const setTheme = useCallback((name: string) => {
     if (!isValidThemeName(name)) return;

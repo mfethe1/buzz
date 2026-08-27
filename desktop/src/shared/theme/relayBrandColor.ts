@@ -35,7 +35,9 @@ export type RelayBrandInfo = {
  * This is the same validate-or-None rule the agent directory applies to
  * device labels.
  */
-export function parseBrandColor(info: RelayBrandInfo | null | undefined): BrandColor | null {
+export function parseBrandColor(
+  info: RelayBrandInfo | null | undefined,
+): BrandColor | null {
   const raw = info?.buzz_brand_color;
   if (typeof raw !== "string") return null;
   if (!BRAND_COLOR_PATTERN.test(raw)) return null;
@@ -57,7 +59,12 @@ export const BRAND_COLOR_CSS_VAR = "--buzz-brand-color";
  * behind.
  */
 export function applyBrandColor(
-  root: { style: { setProperty(k: string, v: string): void; removeProperty(k: string): void } },
+  root: {
+    style: {
+      setProperty(k: string, v: string): void;
+      removeProperty(k: string): void;
+    };
+  },
   color: BrandColor | null,
 ): void {
   if (color === null) {
