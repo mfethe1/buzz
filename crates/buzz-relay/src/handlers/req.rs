@@ -1560,6 +1560,7 @@ mod tests {
         crate::nip11::RelayInfo::build(
             None,
             None,
+            None,
             false,
             crate::config::DEFAULT_MAX_FRAME_BYTES,
             None,

@@ -57,6 +57,10 @@ CREATE TABLE communities (
     -- Per-community workspace icon (NIP-11 `icon`), set via kind:9033.
     -- Added by migration 0003; kept here so desired-state applies match.
     icon            TEXT,
+    -- Per-community brand color (`#rrggbb`), set via the same kind:9033
+    -- workspace-profile command. Added by migration 0035; kept here so
+    -- desired-state applies match.
+    brand_color     TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     archived_at     TIMESTAMPTZ,
     deletion_state  TEXT NOT NULL DEFAULT 'active' CHECK (deletion_state IN ('active', 'quiescing', 'fenced', 'tombstone')),

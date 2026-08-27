@@ -269,6 +269,57 @@ impl Db {
         Ok(())
     }
 
+    /// Returns the community's brand color (`#rrggbb`), if set.
+    ///
+    /// Set by relay admins/owners via the kind:9033 workspace-profile command
+    /// alongside the icon; the value is validated and length-capped at that
+    /// write path. Mirrors [`Self::get_community_icon`] exactly, including the
+    /// empty-string-is-unset filter, so the two presentation scalars cannot
+    /// drift apart.
+    #[datastore_span(name = "get_community_brand_color", system = "postgresql")]
+    pub async fn get_community_brand_color(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<Option<String>> {
+        let row = sqlx::query(
+            r#"
+            SELECT brand_color
+            FROM communities
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row
+            .map(|row| row.try_get::<Option<String>, _>("brand_color"))
+            .transpose()?
+            .flatten()
+            .filter(|color| !color.is_empty()))
+    }
+
+    /// Sets or clears (`None`) the community's brand color.
+    #[datastore_span(name = "set_community_brand_color", system = "postgresql")]
+    pub async fn set_community_brand_color(
+        &self,
+        community_id: CommunityId,
+        brand_color: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE communities
+            SET brand_color = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(brand_color)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Ensure a configured community host exists and return its row.
     ///
     /// This is the startup/config seeding path for N=1 deployments. Migrations

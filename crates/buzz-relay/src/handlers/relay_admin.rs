@@ -94,6 +94,37 @@ fn validate_workspace_icon(icon: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Maximum accepted brand color length (`#rrggbb` is exactly 7 bytes; the cap
+/// is a defensive bound, the format check below is the real gate).
+const MAX_BRAND_COLOR_LEN: usize = 7;
+
+/// Validate a brand color: empty (clear) or a `#rrggbb` hex triplet.
+///
+/// Deliberately the strictest possible surface: no named colors, no `rgb()`,
+/// no alpha, no 3-digit shorthand. The value is served in an unauthenticated
+/// NIP-11 document and consumed as a CSS custom property, so anything that is
+/// not provably a color literal must be refused at the write path rather than
+/// sanitized at every read site.
+fn validate_brand_color(color: &str) -> Result<(), String> {
+    if color.is_empty() {
+        return Ok(());
+    }
+    if color.len() != MAX_BRAND_COLOR_LEN {
+        return Err(format!(
+            "brand color must be exactly {MAX_BRAND_COLOR_LEN} characters (#rrggbb), got {}",
+            color.len()
+        ));
+    }
+    let mut chars = color.chars();
+    if chars.next() != Some('#') {
+        return Err("brand color must start with '#'".to_string());
+    }
+    if !chars.all(|c| c.is_ascii_hexdigit()) {
+        return Err("brand color must be a #rrggbb hex triplet".to_string());
+    }
+    Ok(())
+}
+
 /// Whether `sender_role` may set the workspace profile (kind:9033).
 ///
 /// Closed relays (`membership_enforced == true`) require an `admin`/`owner`
@@ -291,6 +322,12 @@ async fn execute_relay_admin_command(
         let icon = extract_tag_value(event, "icon").unwrap_or_default();
         validate_workspace_icon(&icon)?;
 
+        // Empty or missing brand_color tag clears the brand color. Validated
+        // before EITHER write so a malformed color cannot land a partial
+        // profile update (icon stored, color rejected).
+        let brand_color = extract_tag_value(event, "brand_color").unwrap_or_default();
+        validate_brand_color(&brand_color)?;
+
         state
             .db
             .set_community_icon(
@@ -300,7 +337,21 @@ async fn execute_relay_admin_command(
             .await
             .map_err(|e| format!("failed to store workspace icon: {e}"))?;
 
-        info!(sender = %sender_hex, icon_len = icon.len(), "workspace profile updated");
+        state
+            .db
+            .set_community_brand_color(
+                tenant.community(),
+                (!brand_color.is_empty()).then_some(brand_color.as_str()),
+            )
+            .await
+            .map_err(|e| format!("failed to store brand color: {e}"))?;
+
+        info!(
+            sender = %sender_hex,
+            icon_len = icon.len(),
+            brand_color_set = !brand_color.is_empty(),
+            "workspace profile updated"
+        );
         return Ok(());
     }
 

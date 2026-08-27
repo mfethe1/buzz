@@ -1,0 +1,21 @@
+-- ── Per-community brand color (NIP-11 `buzz_brand_color`) ────────────────────
+-- Set by relay admins/owners via the same kind:9033 workspace-profile command
+-- that already sets the workspace `icon`; served to clients in the NIP-11 relay
+-- information document, bound to the community resolved from the request Host
+-- (the same row-zero seam as the icon, WS, and NIP-05).
+--
+-- Additive migration: previously applied files must not change checksum. This
+-- deliberately mirrors 0003_community_icon.sql — its own version, never folded
+-- into 0001, adding one per-row presentation attribute to the operator-global
+-- `communities` registry table (no community_id column by design; this is not
+-- tenant data in a shared table).
+--
+-- TEXT holds a `#rrggbb` hex triplet — validated and length-capped at the 9033
+-- write path, not here, exactly as the icon's URL validation lives at that
+-- write path rather than in a CHECK constraint.
+--
+-- Numbering note: 0034 is claimed by a sibling branch (channel write policy);
+-- this file takes 0035 rather than colliding. Migrations are content-addressed
+-- by checksum, so the two are independent and order-insensitive.
+
+ALTER TABLE communities ADD COLUMN brand_color TEXT;
