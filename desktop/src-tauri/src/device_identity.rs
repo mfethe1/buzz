@@ -318,7 +318,9 @@ pub fn get_device_name_suggestion() -> Option<String> {
 /// The revocation path for [`set_device_label`]: once a real name has been
 /// published there was previously no way back. The reset value is
 /// [`opaque_label`] of the non-rotating `device_id`, computed at call time, so
-/// the mint rule stays single-sourced and no "original label" is stored.
+/// the mint rule stays single-sourced and no "original label" is stored. The
+/// write itself goes through [`set_label`], the same persist-and-cache seam
+/// [`set_device_label`] uses, so a reset can never drift from a rename.
 ///
 /// Honest scope, never overclaim in user-facing copy: this is **forward-looking
 /// pseudonymisation, not erasure and not unlinkability**. `device_id` is
@@ -334,10 +336,8 @@ pub fn get_device_name_suggestion() -> Option<String> {
 /// community, eventual for the owner's others.
 #[tauri::command]
 pub fn reset_device_label(app: AppHandle) -> Result<DeviceIdentity, String> {
-    let path = device_identity_path(&app)?;
-    let identity = load_or_create_at(&path)?;
-    let reset = set_label_at(&path, &opaque_label(&identity.device_id))?;
-    cache(&reset);
+    let identity = ensure(&app)?;
+    let reset = set_label(&app, &opaque_label(&identity.device_id))?;
     republish_agent_records(&app);
     Ok(reset)
 }

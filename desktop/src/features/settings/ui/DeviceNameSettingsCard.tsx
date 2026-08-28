@@ -65,7 +65,11 @@ export function DeviceNameSettingsCard() {
     onSuccess: (identity) => {
       setEditedLabel(false);
       setDraftLabel(identity.deviceLabel);
-      void queryClient.invalidateQueries({ queryKey: deviceIdentityQueryKey });
+      // Publish the identity the command returned rather than invalidating and
+      // waiting for a refetch: the Reset control's own visibility is derived
+      // from this query, so a lagging cache leaves it on screen and clickable
+      // after the reset already landed.
+      queryClient.setQueryData(deviceIdentityQueryKey, identity);
       toast.success("Device name reset to anonymous");
     },
     onError: (error: unknown) => {
