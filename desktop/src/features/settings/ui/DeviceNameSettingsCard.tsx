@@ -46,7 +46,7 @@ export function DeviceNameSettingsCard() {
     onSuccess: (identity) => {
       setEditedLabel(false);
       setDraftLabel(identity.deviceLabel);
-      void queryClient.invalidateQueries({ queryKey: deviceIdentityQueryKey });
+      queryClient.setQueryData(deviceIdentityQueryKey, identity);
       toast.success("Device name updated");
     },
     onError: (error: unknown) => {

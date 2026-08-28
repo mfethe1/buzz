@@ -95,6 +95,15 @@ globalThis.__TAURI_INTERNALS__ = {
       calls.get_device_name_suggestion += 1;
       return Promise.resolve(null);
     }
+    if (command === "set_device_label") {
+      calls.set_device_label += 1;
+      backendLabel = "studio-mac";
+      return Promise.resolve({
+        deviceId: DEVICE_ID,
+        deviceLabel: backendLabel,
+        createdAt: "2026-08-27T00:00:00Z",
+      });
+    }
     if (command === "reset_device_label") {
       calls.reset_device_label += 1;
       backendLabel = OPAQUE;
@@ -135,6 +144,7 @@ beforeEach(() => {
   calls = {
     get_device_identity: 0,
     get_device_name_suggestion: 0,
+    set_device_label: 0,
     reset_device_label: 0,
   };
   resetGate = null;
@@ -269,6 +279,33 @@ describe("DeviceNameSettingsCard Reset control — REG-11 mounted regressions", 
       find(container, "device-name-input").value,
       OPAQUE,
       "the field must show the anonymous label the command returned",
+    );
+
+    await unmount();
+  });
+
+  it("offers Reset immediately after Save publishes a real name", async () => {
+    backendLabel = OPAQUE;
+    const { container, unmount } = await mountCard();
+
+    await type(find(container, "device-name-input"), "studio-mac");
+    await click(find(container, "device-name-save"));
+    await settle();
+
+    assert.equal(calls.set_device_label, 1);
+    assert.equal(
+      calls.get_device_identity,
+      1,
+      "Save success must publish the returned identity, not invalidate and refetch",
+    );
+    assert.equal(
+      find(container, "device-name-save").disabled,
+      true,
+      "Save must retire after the saved label reaches the identity cache",
+    );
+    assert.ok(
+      find(container, "device-name-reset"),
+      "a just-published real name must expose the way back immediately",
     );
 
     await unmount();
