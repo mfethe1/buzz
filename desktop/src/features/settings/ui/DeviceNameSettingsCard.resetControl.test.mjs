@@ -67,11 +67,16 @@ const DEVICE_ID = "0123456789abcdef0123456789abcdef";
 const OPAQUE = "device-01234567";
 
 /** Per-command invocation counts, asserted directly by the refetch test. */
-let calls;
+let calls = {
+  get_device_identity: 0,
+  get_device_name_suggestion: 0,
+  set_device_label: 0,
+  reset_device_label: 0,
+};
 /** Current on-disk label the stubbed backend reports. */
-let backendLabel;
+let backendLabel = OPAQUE;
 /** Optional gate held by `reset_device_label` so a pending state is observable. */
-let resetGate;
+let resetGate = null;
 /**
  * `get_device_identity` never resolves after the first call. A refetch is then
  * *observable* rather than merely counted: with an invalidate, the query stays
@@ -124,12 +129,12 @@ dom.window.__TAURI_INTERNALS__ = globalThis.__TAURI_INTERNALS__;
 
 // ── Deferred imports ──────────────────────────────────────────────────────────
 
-let React,
-  act,
-  createRoot,
-  QueryClient,
-  QueryClientProvider,
-  DeviceNameSettingsCard;
+let React = null;
+let act = null;
+let createRoot = null;
+let QueryClient = null;
+let QueryClientProvider = null;
+let DeviceNameSettingsCard = null;
 
 before(async () => {
   ({ default: React, act } = await import("react"));
@@ -155,7 +160,7 @@ after(() => dom.window.close());
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function deferred() {
-  let resolve;
+  let resolve = () => {};
   const promise = new Promise((r) => {
     resolve = r;
   });
