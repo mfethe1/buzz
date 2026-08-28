@@ -13,6 +13,7 @@ import {
 } from "@/shared/api/tauriDeviceIdentity";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
+import { saveIsDisabled, showsResetControl } from "./deviceNameCardLogic";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 
 /** Backend cap on the device label; mirrored here so the field stops typing at it. */
@@ -104,14 +105,16 @@ export function DeviceNameSettingsCard() {
     suggestion !== savedLabel &&
     suggestion !== trimmedLabel;
 
-  // REG-11: `device-xxxxxxxx` is the mint-time opaque default. Offering a
-  // reset when the label is already anonymous would be a confusing no-op.
-  const isOpaqueLabel = /^device-[0-9a-f]{8}$/.test(savedLabel);
-  const saveDisabled =
-    trimmedLabel.length === 0 ||
-    trimmedLabel === savedLabel ||
-    renameDevice.isPending ||
-    !deviceIdentity.data;
+  // REG-11: only offer the way back when this device is actually off its
+  // anonymous default — see `showsResetControl`.
+  const showsReset = showsResetControl(deviceIdentity.data);
+  const saveDisabled = saveIsDisabled({
+    trimmedLabel,
+    savedLabel,
+    identityLoaded: Boolean(deviceIdentity.data),
+    renamePending: renameDevice.isPending,
+    resetPending: resetDevice.isPending,
+  });
 
   return (
     <div className="min-w-0 space-y-3">
@@ -147,7 +150,11 @@ export function DeviceNameSettingsCard() {
             <Input
               className="w-48"
               data-testid="device-name-input"
-              disabled={!deviceIdentity.data || renameDevice.isPending}
+              disabled={
+                !deviceIdentity.data ||
+                renameDevice.isPending ||
+                resetDevice.isPending
+              }
               id="device-name-input"
               maxLength={DEVICE_LABEL_MAX_LENGTH}
               onChange={(event) => {
@@ -168,14 +175,10 @@ export function DeviceNameSettingsCard() {
             >
               Save
             </Button>
-            {isOpaqueLabel ? null : (
+            {showsReset ? (
               <Button
                 data-testid="device-name-reset"
-                disabled={
-                  resetDevice.isPending ||
-                  renameDevice.isPending ||
-                  !deviceIdentity.data
-                }
+                disabled={resetDevice.isPending || renameDevice.isPending}
                 onClick={() => {
                   resetDevice.mutate();
                 }}
@@ -186,7 +189,7 @@ export function DeviceNameSettingsCard() {
               >
                 Reset
               </Button>
-            )}
+            ) : null}
           </div>
         </SettingsOptionRow>
       </SettingsOptionGroup>
