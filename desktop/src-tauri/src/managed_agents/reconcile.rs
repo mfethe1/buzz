@@ -32,8 +32,8 @@ use nostr::JsonUtil;
 /// Reconcile `managed-agents.json` into kind:30177 events in the retention
 /// store. Boot-time entry point, called from `event_sync::run_event_sync`
 /// after the persona and team legs.
-pub(crate) fn reconcile_agents_to_events(
-    app: &tauri::AppHandle,
+pub(crate) fn reconcile_agents_to_events<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     keys: &nostr::Keys,
     db_path: &Path,
 ) {

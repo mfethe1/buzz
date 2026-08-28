@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{PoisonError, RwLock};
 
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 
 use crate::managed_agents::definition_validation::validate_device_label;
 use crate::managed_agents::storage::{atomic_write_json_restricted, managed_agents_base_dir};
@@ -197,7 +197,7 @@ fn set_label_at(path: &Path, label: &str) -> Result<DeviceIdentity, String> {
     Ok(identity)
 }
 
-fn device_identity_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn device_identity_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     Ok(managed_agents_base_dir(app)?.join("device.json"))
 }
 
@@ -211,7 +211,7 @@ fn cache(identity: &DeviceIdentity) {
 ///
 /// Idempotent: safe to call more than once. Called once from the Tauri `setup`
 /// hook, after boot migrations and before identity resolution.
-pub fn ensure(app: &AppHandle) -> Result<DeviceIdentity, String> {
+pub fn ensure<R: Runtime>(app: &AppHandle<R>) -> Result<DeviceIdentity, String> {
     let path = device_identity_path(app)?;
     let identity = load_or_create_at(&path)?;
     cache(&identity);
@@ -289,7 +289,7 @@ impl Drop for DeviceGuard {
 /// [`set_device_label`] command triggers that republish immediately via the
 /// managed-agent reconcile; calling this function directly leaves propagation
 /// to the next agent mutation or app restart.
-pub fn set_label(app: &AppHandle, label: &str) -> Result<DeviceIdentity, String> {
+pub fn set_label<R: Runtime>(app: &AppHandle<R>, label: &str) -> Result<DeviceIdentity, String> {
     let path = device_identity_path(app)?;
     let identity = set_label_at(&path, label)?;
     cache(&identity);
@@ -336,10 +336,7 @@ pub fn get_device_name_suggestion() -> Option<String> {
 /// community, eventual for the owner's others.
 #[tauri::command]
 pub fn reset_device_label(app: AppHandle) -> Result<DeviceIdentity, String> {
-    let identity = ensure(&app)?;
-    let reset = set_label(&app, &opaque_label(&identity.device_id))?;
-    republish_agent_records(&app);
-    Ok(reset)
+    reset_device_label_for_app(&app)
 }
 
 /// Rename this device and republish the **active community's** local agents so
@@ -370,7 +367,14 @@ pub fn set_device_label(app: AppHandle, label: String) -> Result<DeviceIdentity,
 /// Best-effort re-reconcile of every local managed-agent record so a changed
 /// device label reaches the relay now. `retain_agent_record`'s content-equality
 /// guard means records whose projection did not change stay untouched.
-fn republish_agent_records(app: &AppHandle) {
+fn reset_device_label_for_app<R: Runtime>(app: &AppHandle<R>) -> Result<DeviceIdentity, String> {
+    let identity = ensure(app)?;
+    let reset = set_label(app, &opaque_label(&identity.device_id))?;
+    republish_agent_records(app);
+    Ok(reset)
+}
+
+fn republish_agent_records<R: Runtime>(app: &AppHandle<R>) {
     use tauri::Manager;
 
     let state = app.state::<crate::app_state::AppState>();
@@ -389,6 +393,82 @@ fn republish_agent_records(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tauri::Manager as _;
+
+    struct EnvGuard {
+        previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn isolated_data_home(root: &Path) -> Self {
+            let vars = [
+                ("HOME", root.to_path_buf()),
+                ("XDG_DATA_HOME", root.join("xdg-data")),
+                ("APPDATA", root.join("AppData").join("Roaming")),
+                ("LOCALAPPDATA", root.join("AppData").join("Local")),
+            ];
+            let previous = vars
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect();
+            for (key, value) in vars {
+                std::env::set_var(key, value);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.previous {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    struct TestApp {
+        app: tauri::App<tauri::test::MockRuntime>,
+        data_dir: PathBuf,
+        _data_home: tempfile::TempDir,
+        _env: EnvGuard,
+    }
+
+    impl TestApp {
+        fn new() -> Self {
+            let data_home = tempfile::tempdir().expect("isolated data home");
+            let env = EnvGuard::isolated_data_home(data_home.path());
+
+            let app = tauri::test::mock_builder()
+                .manage(crate::app_state::build_app_state())
+                .build(tauri::test::mock_context(tauri::test::noop_assets()))
+                .expect("test app should build");
+            let data_dir = app
+                .handle()
+                .path()
+                .app_data_dir()
+                .expect("test app data dir should resolve");
+
+            Self {
+                app,
+                data_dir,
+                _data_home: data_home,
+                _env: env,
+            }
+        }
+
+        fn handle(&self) -> &tauri::AppHandle<tauri::test::MockRuntime> {
+            self.app.handle()
+        }
+    }
+
+    impl Drop for TestApp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.data_dir);
+        }
+    }
 
     #[test]
     fn sanitize_label_trims() {
@@ -475,6 +555,72 @@ mod tests {
         let first = set_label_at(&path, &opaque_label(&minted.device_id)).unwrap();
         let second = set_label_at(&path, &opaque_label(&first.device_id)).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn reset_succeeds_and_persists_when_republish_scope_is_unavailable() {
+        let _device_guard = DeviceGuard::set(None);
+        let app = TestApp::new();
+        let handle = app.handle();
+
+        let named = set_label(handle, "studio-mac").unwrap();
+        handle
+            .state::<crate::app_state::AppState>()
+            .identity_lost
+            .store(true, std::sync::atomic::Ordering::Release);
+
+        let reset =
+            reset_device_label_for_app(handle).expect("republish failure must not fail reset");
+        assert_eq!(reset.device_id, named.device_id);
+        assert_eq!(reset.device_label, opaque_label(&named.device_id));
+
+        let path = device_identity_path(handle).unwrap();
+        assert_eq!(load_or_create_at(&path).unwrap(), reset);
+        assert_eq!(current(), Some(reset));
+    }
+
+    #[test]
+    fn concurrent_rename_and_reset_leave_a_valid_identity_with_the_same_device_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("device.json");
+        let initial = load_or_create_at(&path).unwrap();
+        let named = set_label_at(&path, "studio-mac").unwrap();
+        assert_eq!(named.device_id, initial.device_id);
+
+        let device_id = named.device_id.clone();
+        let reset_label = opaque_label(&device_id);
+        let rename_path = path.clone();
+        let reset_path = path.clone();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let rename_barrier = std::sync::Arc::clone(&barrier);
+        let rename = std::thread::spawn(move || {
+            rename_barrier.wait();
+            set_label_at(&rename_path, "field-laptop")
+        });
+
+        let reset_barrier = std::sync::Arc::clone(&barrier);
+        let reset = std::thread::spawn(move || {
+            reset_barrier.wait();
+            set_label_at(&reset_path, &reset_label)
+        });
+
+        let renamed = rename
+            .join()
+            .expect("rename thread must not panic")
+            .unwrap();
+        let reset = reset.join().expect("reset thread must not panic").unwrap();
+        assert_eq!(renamed.device_id, device_id);
+        assert_eq!(reset.device_id, device_id);
+
+        let persisted = load_or_create_at(&path).unwrap();
+        let expected_reset_label = opaque_label(&device_id);
+        assert_eq!(persisted.device_id, device_id);
+        assert!(
+            persisted.device_label == "field-laptop" || persisted.device_label == expected_reset_label,
+            "last writer wins, but the persisted label must be one of the two intended labels: {persisted:?}"
+        );
+        validate_identity(&persisted).expect("the surviving identity must remain valid");
     }
 
     /// A minted identity must not leak the OS host name — it is published
