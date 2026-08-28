@@ -3,7 +3,10 @@ import test from "node:test";
 import {
   BRAND_COLOR_CSS_VAR,
   applyBrandColor,
+  applyRelayBrandColorFromInfo,
+  fetchRelayBrandColor,
   parseBrandColor,
+  relayInfoUrlFromRelayUrl,
 } from "./relayBrandColor.ts";
 
 function styleStub() {
@@ -90,4 +93,110 @@ test("switching communities replaces rather than accumulates", () => {
   applyBrandColor(root, "#123abc");
   assert.equal(root.props.size, 1);
   assert.equal(root.props.get(BRAND_COLOR_CSS_VAR), "#123abc");
+});
+
+test("relayInfoUrlFromRelayUrl maps relay URLs to host-equivalent /info", () => {
+  assert.equal(
+    relayInfoUrlFromRelayUrl("wss://tenant.example/ws?x=1#frag")?.toString(),
+    "https://tenant.example/info",
+  );
+  assert.equal(
+    relayInfoUrlFromRelayUrl("ws://localhost:3000")?.toString(),
+    "http://localhost:3000/info",
+  );
+  assert.equal(
+    relayInfoUrlFromRelayUrl("https://tenant.example/custom")?.toString(),
+    "https://tenant.example/info",
+  );
+  assert.equal(relayInfoUrlFromRelayUrl("file:///tmp/relay"), null);
+  assert.equal(relayInfoUrlFromRelayUrl("not a url"), null);
+});
+
+test("fetchRelayBrandColor reads valid NIP-11 color with the expected Accept header", async () => {
+  let seenUrl = null;
+  let seenAccept = null;
+  const color = await fetchRelayBrandColor("wss://tenant.example", {
+    fetchImpl: async (url, init) => {
+      seenUrl = url.toString();
+      seenAccept = init.headers.Accept;
+      return {
+        ok: true,
+        json: async () => ({ buzz_brand_color: "#ff8800" }),
+      };
+    },
+  });
+
+  assert.equal(color, "#ff8800");
+  assert.equal(seenUrl, "https://tenant.example/info");
+  assert.equal(seenAccept, "application/nostr+json");
+});
+
+test("fetchRelayBrandColor degrades to null for non-2xx, offline, and malformed JSON", async () => {
+  assert.equal(
+    await fetchRelayBrandColor("wss://tenant.example", {
+      fetchImpl: async () => ({
+        ok: false,
+        json: async () => {
+          throw new Error("json should not be read for non-2xx");
+        },
+      }),
+    }),
+    null,
+  );
+
+  assert.equal(
+    await fetchRelayBrandColor("wss://tenant.example", {
+      fetchImpl: async () => {
+        throw new Error("offline");
+      },
+    }),
+    null,
+  );
+
+  assert.equal(
+    await fetchRelayBrandColor("wss://tenant.example", {
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => {
+          throw new Error("malformed json");
+        },
+      }),
+    }),
+    null,
+  );
+});
+
+test("applyRelayBrandColorFromInfo clears first and ignores aborted stale responses", async () => {
+  const root = styleStub();
+  applyBrandColor(root, "#ff8800");
+
+  let resolveJson;
+  let notifyJsonStarted;
+  const jsonStarted = new Promise((resolve) => {
+    notifyJsonStarted = resolve;
+  });
+  const controller = new AbortController();
+  const applyPromise = applyRelayBrandColorFromInfo(
+    root,
+    "wss://tenant.example",
+    {
+      signal: controller.signal,
+      fetchImpl: async () => ({
+        ok: true,
+        json: () => {
+          notifyJsonStarted();
+          return new Promise((resolve) => {
+            resolveJson = resolve;
+          });
+        },
+      }),
+    },
+  );
+
+  assert.equal(root.props.has(BRAND_COLOR_CSS_VAR), false);
+  await jsonStarted;
+  controller.abort();
+  resolveJson({ buzz_brand_color: "#123abc" });
+  await applyPromise;
+  assert.equal(root.props.has(BRAND_COLOR_CSS_VAR), false);
 });

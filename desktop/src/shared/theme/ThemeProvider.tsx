@@ -13,7 +13,7 @@ import { invokeTauri } from "@/shared/api/tauri";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { getStorageItem } from "@/shared/lib/safeStorage";
 import { createThemeVars, hexToHsl } from "./adaptive-theme";
-import { applyBrandColor, parseBrandColor } from "./relayBrandColor";
+import { applyRelayBrandColorFromInfo } from "./relayBrandColor";
 import {
   SYNTAX_THEMES,
   type SyntaxThemeName,
@@ -640,39 +640,9 @@ export function ThemeProvider({
     const root = document.documentElement;
     const controller = new AbortController();
 
-    // Clear synchronously on every community transition. A slow or malformed
-    // destination must never retain the previous tenant's brand color.
-    applyBrandColor(root, null);
-    if (!relayUrl) return () => controller.abort();
-
-    let infoUrl: URL;
-    try {
-      infoUrl = new URL(relayUrl);
-      infoUrl.protocol = infoUrl.protocol === "wss:" ? "https:" : "http:";
-      infoUrl.pathname = "/info";
-      infoUrl.search = "";
-      infoUrl.hash = "";
-    } catch {
-      return () => controller.abort();
-    }
-
-    void fetch(infoUrl, {
-      headers: { Accept: "application/nostr+json" },
+    void applyRelayBrandColorFromInfo(root, relayUrl, {
       signal: controller.signal,
-    })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((info: unknown) => {
-        if (!controller.signal.aborted) {
-          applyBrandColor(
-            root,
-            parseBrandColor(info && typeof info === "object" ? info : null),
-          );
-        }
-      })
-      .catch(() => {
-        // Branding is presentation-only. Offline, timeout, CORS, and malformed
-        // responses all degrade to the already-applied stock theme.
-      });
+    });
 
     return () => controller.abort();
   }, [relayUrl]);

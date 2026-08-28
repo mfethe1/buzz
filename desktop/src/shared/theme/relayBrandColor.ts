@@ -24,6 +24,28 @@ export type RelayBrandInfo = {
   buzz_brand_color?: unknown;
 };
 
+type BrandColorRoot = {
+  style: {
+    setProperty(k: string, v: string): void;
+    removeProperty(k: string): void;
+  };
+};
+
+type RelayBrandResponse = {
+  ok: boolean;
+  json(): Promise<unknown>;
+};
+
+type RelayBrandFetch = (
+  input: URL,
+  init: { headers: { Accept: string }; signal?: AbortSignal },
+) => Promise<RelayBrandResponse>;
+
+type RelayBrandFetchOptions = {
+  fetchImpl?: RelayBrandFetch;
+  signal?: AbortSignal;
+};
+
 /**
  * Returns the relay's advertised brand color, or `null` when absent, cleared,
  * or not a well-formed `#rrggbb` literal.
@@ -48,6 +70,36 @@ export function parseBrandColor(
 export const BRAND_COLOR_CSS_VAR = "--buzz-brand-color";
 
 /**
+ * Converts a community relay URL to its host-equivalent NIP-11 `/info` URL.
+ *
+ * Communities are stored as ws(s) relay URLs in the desktop state. NIP-11 is
+ * served over HTTP(S) on the same host, pre-auth. Query strings/fragments from
+ * the relay URL are intentionally discarded; `/info` is a fixed document.
+ */
+export function relayInfoUrlFromRelayUrl(
+  relayUrl: string | null | undefined,
+): URL | null {
+  if (!relayUrl) return null;
+
+  try {
+    const infoUrl = new URL(relayUrl);
+    if (infoUrl.protocol === "wss:") {
+      infoUrl.protocol = "https:";
+    } else if (infoUrl.protocol === "ws:") {
+      infoUrl.protocol = "http:";
+    } else if (infoUrl.protocol !== "http:" && infoUrl.protocol !== "https:") {
+      return null;
+    }
+    infoUrl.pathname = "/info";
+    infoUrl.search = "";
+    infoUrl.hash = "";
+    return infoUrl;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Applies (or clears) the brand color on a root element as a CSS custom
  * property.
  *
@@ -59,12 +111,7 @@ export const BRAND_COLOR_CSS_VAR = "--buzz-brand-color";
  * behind.
  */
 export function applyBrandColor(
-  root: {
-    style: {
-      setProperty(k: string, v: string): void;
-      removeProperty(k: string): void;
-    };
-  },
+  root: BrandColorRoot,
   color: BrandColor | null,
 ): void {
   if (color === null) {
@@ -72,4 +119,40 @@ export function applyBrandColor(
     return;
   }
   root.style.setProperty(BRAND_COLOR_CSS_VAR, color);
+}
+
+export async function fetchRelayBrandColor(
+  relayUrl: string | null | undefined,
+  { fetchImpl = globalThis.fetch, signal }: RelayBrandFetchOptions = {},
+): Promise<BrandColor | null> {
+  const infoUrl = relayInfoUrlFromRelayUrl(relayUrl);
+  if (!infoUrl || !fetchImpl) return null;
+
+  try {
+    const response = await fetchImpl(infoUrl, {
+      headers: { Accept: "application/nostr+json" },
+      signal,
+    });
+    if (signal?.aborted || !response.ok) return null;
+
+    const info = await response.json();
+    if (signal?.aborted) return null;
+    return parseBrandColor(info && typeof info === "object" ? info : null);
+  } catch {
+    return null;
+  }
+}
+
+export async function applyRelayBrandColorFromInfo(
+  root: BrandColorRoot,
+  relayUrl: string | null | undefined,
+  options: RelayBrandFetchOptions = {},
+): Promise<void> {
+  // Clear first, synchronously, so a community transition never carries the
+  // previous tenant's color while the new relay's `/info` request is pending.
+  applyBrandColor(root, null);
+  const color = await fetchRelayBrandColor(relayUrl, options);
+  if (!options.signal?.aborted) {
+    applyBrandColor(root, color);
+  }
 }

@@ -10,7 +10,7 @@
 //! | 9030 | Add member      | admin or owner       |
 //! | 9031 | Remove member   | admin or owner       |
 //! | 9032 | Change role     | owner only           |
-//! | 9033 | Set workspace profile (icon) | admin or owner; on an open relay whose community has no admin/owner row at all, any authenticated sender (see [`may_set_workspace_profile`]) |
+//! | 9033 | Set workspace profile (icon/brand color) | admin or owner; on an open relay whose community has no admin/owner row at all, any authenticated sender (see [`may_set_workspace_profile`]) |
 
 use std::sync::Arc;
 
@@ -734,6 +734,35 @@ mod tests {
         assert!(validate_workspace_icon(&long_url).is_err());
         let long_data = format!("data:image/png;base64,{}", "A".repeat(98_304));
         assert!(validate_workspace_icon(&long_data).is_err());
+    }
+
+    #[test]
+    fn brand_color_empty_ok() {
+        assert!(validate_brand_color("").is_ok());
+    }
+
+    #[test]
+    fn brand_color_hex_triplet_ok() {
+        assert!(validate_brand_color("#ff8800").is_ok());
+        assert!(validate_brand_color("#FFFFFF").is_ok());
+        assert!(validate_brand_color("#000000").is_ok());
+    }
+
+    #[test]
+    fn brand_color_rejects_non_hex_triplets() {
+        for bad in [
+            "#fff",
+            "#ff8800ff",
+            "red",
+            "rgb(255,136,0)",
+            "ff8800",
+            "#gggggg",
+            "#ff 880",
+            " #ff8800",
+            "#ff8800 ",
+        ] {
+            assert!(validate_brand_color(bad).is_err(), "must reject {bad:?}");
+        }
     }
 
     // ─── Call-site integration: the 9033 gate wired to real config + DB ────
