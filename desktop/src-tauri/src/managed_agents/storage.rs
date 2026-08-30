@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Manager};
 
 use crate::app_state::keyring_service;
 use crate::managed_agents::{
@@ -32,7 +32,7 @@ fn agent_secret_store() -> Option<&'static SecretStore> {
     }
 }
 
-pub fn managed_agents_base_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
+pub fn managed_agents_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()

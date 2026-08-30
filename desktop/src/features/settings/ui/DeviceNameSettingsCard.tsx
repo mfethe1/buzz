@@ -8,12 +8,10 @@ import {
 } from "@/features/agents/hooks";
 import {
   getDeviceNameSuggestion,
-  resetDeviceLabel,
   setDeviceLabel,
 } from "@/shared/api/tauriDeviceIdentity";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
-import { saveIsDisabled, showsResetControl } from "./deviceNameCardLogic";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 
 /** Backend cap on the device label; mirrored here so the field stops typing at it. */
@@ -46,37 +44,12 @@ export function DeviceNameSettingsCard() {
     onSuccess: (identity) => {
       setEditedLabel(false);
       setDraftLabel(identity.deviceLabel);
-      queryClient.setQueryData(deviceIdentityQueryKey, identity);
+      void queryClient.invalidateQueries({ queryKey: deviceIdentityQueryKey });
       toast.success("Device name updated");
     },
     onError: (error: unknown) => {
       toast.error(
         error instanceof Error ? error.message : "Could not rename this device",
-      );
-    },
-  });
-
-  // REG-11: the one-click way back from a published name. FM1 honesty rule:
-  // the copy says "stop showing" (forward pseudonymisation), never "remove"
-  // or "erase" — the device id is unchanged and previously published events
-  // stay fetchable at their coordinates.
-  const resetDevice = useMutation({
-    mutationFn: () => resetDeviceLabel(),
-    onSuccess: (identity) => {
-      setEditedLabel(false);
-      setDraftLabel(identity.deviceLabel);
-      // Publish the identity the command returned rather than invalidating and
-      // waiting for a refetch: the Reset control's own visibility is derived
-      // from this query, so a lagging cache leaves it on screen and clickable
-      // after the reset already landed.
-      queryClient.setQueryData(deviceIdentityQueryKey, identity);
-      toast.success("Device name reset to anonymous");
-    },
-    onError: (error: unknown) => {
-      toast.error(
-        error instanceof Error
-          ? error.message
-          : "Could not reset this device's name",
       );
     },
   });
@@ -108,17 +81,11 @@ export function DeviceNameSettingsCard() {
     suggestion !== null &&
     suggestion !== savedLabel &&
     suggestion !== trimmedLabel;
-
-  // REG-11: only offer the way back when this device is actually off its
-  // anonymous default — see `showsResetControl`.
-  const showsReset = showsResetControl(deviceIdentity.data);
-  const saveDisabled = saveIsDisabled({
-    trimmedLabel,
-    savedLabel,
-    identityLoaded: Boolean(deviceIdentity.data),
-    renamePending: renameDevice.isPending,
-    resetPending: resetDevice.isPending,
-  });
+  const saveDisabled =
+    trimmedLabel.length === 0 ||
+    trimmedLabel === savedLabel ||
+    renameDevice.isPending ||
+    !deviceIdentity.data;
 
   return (
     <div className="min-w-0 space-y-3">
@@ -154,11 +121,7 @@ export function DeviceNameSettingsCard() {
             <Input
               className="w-48"
               data-testid="device-name-input"
-              disabled={
-                !deviceIdentity.data ||
-                renameDevice.isPending ||
-                resetDevice.isPending
-              }
+              disabled={!deviceIdentity.data || renameDevice.isPending}
               id="device-name-input"
               maxLength={DEVICE_LABEL_MAX_LENGTH}
               onChange={(event) => {
@@ -179,21 +142,6 @@ export function DeviceNameSettingsCard() {
             >
               Save
             </Button>
-            {showsReset ? (
-              <Button
-                data-testid="device-name-reset"
-                disabled={resetDevice.isPending || renameDevice.isPending}
-                onClick={() => {
-                  resetDevice.mutate();
-                }}
-                size="sm"
-                title="Stop showing a real name on your agents. New views see the anonymous device-xxxxxxxx default; the device id is unchanged and past events stay fetchable, so this is pseudonymisation, not erasure."
-                type="button"
-                variant="ghost"
-              >
-                Reset
-              </Button>
-            ) : null}
           </div>
         </SettingsOptionRow>
       </SettingsOptionGroup>
