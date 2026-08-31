@@ -201,6 +201,9 @@ enum Cmd {
     /// Create, trigger, and manage workflows
     #[command(subcommand)]
     Workflows(WorkflowsCmd),
+    /// Create and list durable channel tasks and request intake records
+    #[command(subcommand)]
+    Tasks(TasksCmd),
     /// Read the activity feed
     #[command(subcommand)]
     Feed(FeedCmd),
@@ -996,6 +999,47 @@ pub enum WorkflowsCmd {
         /// Optional note to include with the approval/denial
         #[arg(long)]
         note: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TasksCmd {
+    /// Create a durable task, preserving optional external request provenance
+    Create {
+        /// Short task title
+        #[arg(long)]
+        title: String,
+        /// Original request or longer description
+        #[arg(long)]
+        body: Option<String>,
+        /// Channel UUID
+        #[arg(long)]
+        channel: Option<String>,
+        /// Assignee pubkey (64-char hex)
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Sort priority (higher first)
+        #[arg(long, default_value_t = 0)]
+        priority: i32,
+        /// Origin transport or harness, e.g. telegram
+        #[arg(long)]
+        source: Option<String>,
+        /// Durable external idempotency/provenance reference
+        #[arg(long, requires = "source")]
+        source_ref: Option<String>,
+    },
+    /// List visible tasks with optional filters
+    List {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        assignee: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        source_ref: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
     },
 }
 
@@ -2180,6 +2224,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Dms(sub) => commands::dms::dispatch(sub, &client).await,
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
+        Cmd::Tasks(sub) => commands::tasks::dispatch(sub, &client).await.map(|output| {
+            println!("{output}");
+        }),
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client, &cli.format).await,
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
@@ -2398,6 +2445,7 @@ mod tests {
             "reactions",
             "repos",
             "social",
+            "tasks",
             "upload",
             "users",
             "workflows",
@@ -2517,6 +2565,7 @@ mod tests {
             names(&cmd, "workflows"),
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
+        assert_eq!(names(&cmd, "tasks"), vec!["create", "list"]);
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
         assert_eq!(
             names(&cmd, "social"),

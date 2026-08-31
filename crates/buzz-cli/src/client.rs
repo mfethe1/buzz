@@ -870,6 +870,36 @@ impl BuzzClient {
         .await
     }
 
+    /// POST JSON once to an authenticated relay endpoint.
+    ///
+    /// This deliberately does not retry: callers use it for relay-owned row
+    /// creation where a transport failure can be delivery-ambiguous. A caller
+    /// with an idempotency reference must reconcile that reference with a GET
+    /// before deciding whether to retry.
+    pub async fn post_authed_json(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let body = bytes::Bytes::from(
+            serde_json::to_vec(body)
+                .map_err(|error| CliError::Other(format!("JSON serialization failed: {error}")))?,
+        );
+        let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+        let response = self
+            .with_auth_tag(
+                self.http
+                    .post(&url)
+                    .header("Authorization", auth)
+                    .header("Content-Type", "application/json")
+                    .body(body),
+            )
+            .send()
+            .await?;
+        self.handle_response(response).await
+    }
+
     /// Submit a signed Nostr event via POST /events.
     ///
     /// For non-idempotent moderation command kinds (9040–9044), an ambiguous
