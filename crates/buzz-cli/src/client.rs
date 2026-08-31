@@ -870,6 +870,49 @@ impl BuzzClient {
         .await
     }
 
+    async fn send_authed_json(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        value: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        let url = format!("{}{path}", self.relay_url);
+        let body = bytes::Bytes::from(
+            serde_json::to_vec(value)
+                .map_err(|e| CliError::Other(format!("JSON serialization failed: {e}")))?,
+        );
+        let auth = sign_nip98(&self.keys, method.as_str(), &url, Some(&body))?;
+        let request = self
+            .http
+            .request(method, &url)
+            .header("Authorization", auth)
+            .header("Content-Type", "application/json")
+            .body(body);
+        let response = self.with_auth_tag(request).send().await?;
+        self.handle_response(response).await
+    }
+
+    /// One-shot authenticated JSON POST. Mutations are not blindly retried;
+    /// callers recover ambiguous outcomes by reading their idempotency key.
+    pub async fn post_authed_json(
+        &self,
+        path: &str,
+        value: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        self.send_authed_json(reqwest::Method::POST, path, value)
+            .await
+    }
+
+    /// One-shot authenticated JSON PATCH.
+    pub async fn patch_authed_json(
+        &self,
+        path: &str,
+        value: &serde_json::Value,
+    ) -> Result<String, CliError> {
+        self.send_authed_json(reqwest::Method::PATCH, path, value)
+            .await
+    }
+
     /// Submit a signed Nostr event via POST /events.
     ///
     /// For non-idempotent moderation command kinds (9040–9044), an ambiguous
