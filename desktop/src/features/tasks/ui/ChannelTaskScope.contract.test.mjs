@@ -24,3 +24,12 @@ test("global tasks route exposes a channel scope control", async () => {
   assert.match(source, /All channels/);
   assert.match(source, /channelId=\{selectedChannelId\}/);
 });
+
+test("owner request view is identity-scoped and renders provenance", async () => {
+  const source = await readFile(tasksPath, "utf8");
+
+  assert.match(source, /data-testid="my-requests-view"/);
+  assert.match(source, /identityQuery\.data\?\.pubkey/);
+  assert.match(source, /requestsOnly/);
+  assert.match(source, /showComposer=\{activeView !== "requests"\}/);
+});

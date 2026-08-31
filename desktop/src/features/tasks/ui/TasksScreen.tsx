@@ -2,14 +2,20 @@ import * as React from "react";
 
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { ChannelTaskList } from "@/features/tasks/ui/ChannelTaskList";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import { Button } from "@/shared/ui/button";
+
+type TaskView = "tasks" | "requests";
 
 /**
- * Community-wide task view with an explicit channel scope. The all-channels
- * state keeps channel identity on every row; choosing a channel reuses the
- * same scoped list shown inside that channel's auxiliary panel.
+ * Community-wide task view with explicit channel and owner-request scopes.
+ * Request rows retain transport provenance while the assignee filter keeps the
+ * owner view tied to the active Buzz identity.
  */
 export function TasksScreen() {
   const channels = useChannelsQuery().data ?? [];
+  const identityQuery = useIdentityQuery();
+  const [activeView, setActiveView] = React.useState<TaskView>("tasks");
   const [selectedChannelId, setSelectedChannelId] = React.useState<
     string | null
   >(null);
@@ -35,11 +41,32 @@ export function TasksScreen() {
   return (
     <div className="flex h-full flex-col gap-4 overflow-y-auto p-4">
       <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold">Channel tasks</h1>
+        <div className="min-w-0 flex-1">
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <h1 className="mr-2 text-lg font-semibold">Channel tasks</h1>
+            <Button
+              data-testid="all-tasks-view"
+              onClick={() => setActiveView("tasks")}
+              size="sm"
+              type="button"
+              variant={activeView === "tasks" ? "secondary" : "ghost"}
+            >
+              All tasks
+            </Button>
+            <Button
+              data-testid="my-requests-view"
+              onClick={() => setActiveView("requests")}
+              size="sm"
+              type="button"
+              variant={activeView === "requests" ? "secondary" : "ghost"}
+            >
+              My requests
+            </Button>
+          </div>
           <p className="text-sm text-muted-foreground">
-            Review every channel together or focus on one channel. Changes are
-            visible to every member and on mobile.
+            {activeView === "requests"
+              ? "Requests assigned to you, with their original transport and lifecycle state."
+              : "Review every channel together or focus on one channel. Changes are visible to every member and on mobile."}
           </p>
         </div>
         <label className="flex min-w-48 flex-col gap-1 text-xs font-medium text-muted-foreground">
@@ -62,8 +89,13 @@ export function TasksScreen() {
         </label>
       </header>
       <ChannelTaskList
+        assigneePubkey={
+          activeView === "requests" ? identityQuery.data?.pubkey : null
+        }
         channelId={selectedChannelId}
         channelNamesById={channelNamesById}
+        requestsOnly={activeView === "requests"}
+        showComposer={activeView !== "requests"}
       />
     </div>
   );

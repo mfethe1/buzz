@@ -19,8 +19,10 @@ import {
   setChannelTaskStatus,
 } from "./channelTasks";
 
-export const channelTasksKey = (channelId: string | null) =>
-  ["channel-tasks", channelId] as const;
+export const channelTasksKey = (
+  channelId: string | null,
+  assignee: string | null = null,
+) => ["channel-tasks", channelId, assignee] as const;
 
 const myWorkspaceTasksKey = ["my-workspace-tasks"] as const;
 
@@ -30,10 +32,13 @@ const myWorkspaceTasksKey = ["my-workspace-tasks"] as const;
  * the caller can see) — that is the v1 screen's mode; a concrete channel id
  * scopes the same query for a channel-pane embed.
  */
-export function useChannelTasks(channelId: string | null) {
+export function useChannelTasks(
+  channelId: string | null,
+  assignee: string | null = null,
+) {
   return useQuery({
-    queryKey: channelTasksKey(channelId),
-    queryFn: () => listChannelTasks({ channelId }),
+    queryKey: channelTasksKey(channelId, assignee),
+    queryFn: () => listChannelTasks({ channelId, assignee }),
   });
 }
 

@@ -3,6 +3,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
+  isRequestTask,
   isTaskDone,
   type ChannelTask,
 } from "@/features/tasks/lib/channelTasks";
@@ -25,16 +26,29 @@ import { cn } from "@/shared/lib/cn";
  * table over `/api/tasks`. v1 slice: list + create + complete/reopen.
  */
 export function ChannelTaskList({
+  assigneePubkey,
   channelId,
   channelNamesById,
+  requestsOnly = false,
+  showComposer = true,
 }: {
+  assigneePubkey?: string | null;
   channelId: string | null;
   channelNamesById?: ReadonlyMap<string, string>;
+  requestsOnly?: boolean;
+  showComposer?: boolean;
 }) {
-  const tasks = useChannelTasks(channelId);
+  const tasks = useChannelTasks(channelId, assigneePubkey ?? null);
   const createTask = useCreateChannelTask(channelId);
   const setStatus = useSetChannelTaskStatus();
   const [draft, setDraft] = React.useState("");
+  const visibleTasks = React.useMemo(
+    () =>
+      requestsOnly
+        ? (tasks.data ?? []).filter(isRequestTask)
+        : (tasks.data ?? []),
+    [requestsOnly, tasks.data],
+  );
 
   /**
    * REG-16 v1 candidate source: the people already visible in this task list.
@@ -45,7 +59,7 @@ export function ChannelTaskList({
    */
   const ownerCandidates: OwnerCandidate[] = React.useMemo(() => {
     const seen = new Map<string, OwnerCandidate>();
-    for (const task of tasks.data ?? []) {
+    for (const task of visibleTasks) {
       for (const pubkey of [task.createdBy, task.assignee]) {
         if (pubkey && !seen.has(pubkey)) {
           seen.set(pubkey, {
@@ -59,7 +73,7 @@ export function ChannelTaskList({
       }
     }
     return [...seen.values()];
-  }, [tasks.data]);
+  }, [visibleTasks]);
 
   /**
    * REG-16 hardening: the ranker's `recentParticipantPubkeys` and
@@ -83,7 +97,7 @@ export function ChannelTaskList({
       const openCounts = new Map<string, number>();
       // Copy before sorting: `tasks.data` is react-query cache state and must
       // never be mutated in place.
-      const byRecency = [...(tasks.data ?? [])].sort(
+      const byRecency = [...visibleTasks].sort(
         (a, b) => b.updatedAt - a.updatedAt,
       );
       for (const task of byRecency) {
@@ -104,7 +118,7 @@ export function ChannelTaskList({
         recentParticipantPubkeys: recent,
         openTaskCountByPubkey: openCounts,
       };
-    }, [tasks.data]);
+    }, [visibleTasks]);
 
   const onToggle = (task: ChannelTask) => {
     setStatus.mutate(
@@ -139,34 +153,36 @@ export function ChannelTaskList({
 
   return (
     <div className="flex min-h-0 flex-col gap-3">
-      <div className="flex items-center gap-2">
-        <Input
-          data-testid="channel-task-new-title"
-          disabled={channelId === null || createTask.isPending}
-          maxLength={200}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              onCreate();
+      {showComposer ? (
+        <div className="flex items-center gap-2">
+          <Input
+            data-testid="channel-task-new-title"
+            disabled={channelId === null || createTask.isPending}
+            maxLength={200}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                onCreate();
+              }
+            }}
+            placeholder="Add a channel task…"
+            value={draft}
+          />
+          <Button
+            data-testid="channel-task-create"
+            disabled={
+              channelId === null || draft.trim() === "" || createTask.isPending
             }
-          }}
-          placeholder="Add a channel task…"
-          value={draft}
-        />
-        <Button
-          data-testid="channel-task-create"
-          disabled={
-            channelId === null || draft.trim() === "" || createTask.isPending
-          }
-          onClick={onCreate}
-          size="sm"
-          type="button"
-          variant="outline"
-        >
-          <Plus className="h-4 w-4" />
-          Add
-        </Button>
-      </div>
+            onClick={onCreate}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <Plus className="h-4 w-4" />
+            Add
+          </Button>
+        </div>
+      ) : null}
       {tasks.isError ? (
         <p
           className="text-sm text-muted-foreground"
@@ -178,16 +194,18 @@ export function ChannelTaskList({
         </p>
       ) : null}
       {tasks.data ? (
-        tasks.data.length === 0 ? (
+        visibleTasks.length === 0 ? (
           <p
             className="text-sm text-muted-foreground"
             data-testid="channel-task-empty"
           >
-            No channel tasks yet.
+            {requestsOnly
+              ? "No requests assigned to you yet."
+              : "No channel tasks yet."}
           </p>
         ) : (
           <ul className="flex flex-col gap-1" data-testid="channel-task-list">
-            {tasks.data.map((task) => {
+            {visibleTasks.map((task) => {
               const done = isTaskDone(task);
               return (
                 <li key={task.id}>
@@ -217,6 +235,33 @@ export function ChannelTaskList({
                           #
                           {channelNamesById?.get(task.channelId) ??
                             task.channelId}
+                        </span>
+                      ) : null}
+                      {requestsOnly ? (
+                        <span
+                          className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground no-underline"
+                          data-testid="request-task-provenance"
+                        >
+                          <span className="rounded bg-muted px-1.5 py-0.5 capitalize">
+                            {task.source}
+                          </span>
+                          <span className="rounded bg-muted px-1.5 py-0.5">
+                            {task.status.replaceAll("_", " ")}
+                          </span>
+                          <span
+                            className="max-w-80 truncate"
+                            title={task.sourceRef ?? undefined}
+                          >
+                            {task.sourceRef}
+                          </span>
+                        </span>
+                      ) : null}
+                      {requestsOnly && task.body ? (
+                        <span
+                          className="mt-1 block line-clamp-2 text-xs text-muted-foreground no-underline"
+                          data-testid="request-task-body"
+                        >
+                          {task.body}
                         </span>
                       ) : null}
                     </span>

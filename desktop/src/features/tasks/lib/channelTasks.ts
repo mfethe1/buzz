@@ -15,6 +15,11 @@ export type ChannelTask = {
   status: string;
   assignee: string | null;
   createdBy: string | null;
+  body?: string | null;
+  source?: string | null;
+  sourceRef?: string | null;
+  createdAt?: number;
+  doneAt?: number | null;
   updatedAt: number;
 };
 
@@ -30,9 +35,27 @@ export type TaskStatusFilter = "open" | "in_progress" | "done";
 /** Relay statuses we render specially; unknown values degrade to a badge. */
 export const OPEN_STATUSES = new Set(["open", "todo"]);
 export const DONE_STATUSES = new Set(["done", "completed"]);
+export const REQUEST_SOURCES = new Set([
+  "telegram",
+  "discord",
+  "slack",
+  "whatsapp",
+  "signal",
+  "email",
+  "sms",
+  "webhook",
+]);
 
 export function isTaskDone(task: ChannelTask): boolean {
   return DONE_STATUSES.has(task.status);
+}
+
+export function isRequestTask(task: ChannelTask): boolean {
+  return (
+    typeof task.sourceRef === "string" &&
+    task.sourceRef.length > 0 &&
+    REQUEST_SOURCES.has(task.source ?? "")
+  );
 }
 
 /**
@@ -46,12 +69,14 @@ export function byUpdatedAtDesc(a: ChannelTask, b: ChannelTask): number {
 export async function listChannelTasks(input: {
   channelId?: string | null;
   status?: TaskStatusFilter;
+  assignee?: string | null;
   limit?: number;
 }): Promise<ChannelTask[]> {
   const { invokeTauri } = await import("@/shared/api/tauri");
   return invokeTauri<ChannelTask[]>("tasks_list", {
     channelId: input.channelId ?? null,
     status: input.status ?? null,
+    assignee: input.assignee ?? null,
     limit: input.limit ?? null,
   });
 }
@@ -60,12 +85,16 @@ export async function createChannelTask(input: {
   title: string;
   channelId?: string | null;
   body?: string | null;
+  source?: string | null;
+  sourceRef?: string | null;
 }): Promise<ChannelTask> {
   const { invokeTauri } = await import("@/shared/api/tauri");
   return invokeTauri<ChannelTask>("tasks_create", {
     title: input.title,
     channelId: input.channelId ?? null,
     bodyText: input.body ?? null,
+    source: input.source ?? null,
+    sourceRef: input.sourceRef ?? null,
   });
 }
 

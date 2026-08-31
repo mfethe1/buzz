@@ -60,6 +60,11 @@ const TASKS = [
     status: "open",
     assignee: null,
     createdBy: ALICE,
+    body: "Original Telegram request",
+    source: "telegram",
+    sourceRef: "telegram:7991290678:79398:42",
+    createdAt: 50,
+    doneAt: null,
     updatedAt: 100,
   },
   {
@@ -100,9 +105,11 @@ const TASKS = [
   },
 ];
 
+let listArgs = [];
 globalThis.__TAURI_INTERNALS__ = {
-  invoke: (command) => {
+  invoke: (command, args) => {
     if (command === "tasks_list") {
+      listArgs.push(args);
       return Promise.resolve(TASKS);
     }
     return Promise.reject(new Error(`unmocked: ${command}`));
@@ -241,6 +248,46 @@ describe("ChannelTaskList — derived ranking signals are actually wired", () =>
     await act(async () => scoped.root.unmount());
     scoped.container.remove();
     scoped.queryClient.clear();
+  });
+
+  it("renders only provenance-bearing requests assigned to the active identity", async () => {
+    listArgs = [];
+    const mounted = await mountList({
+      assigneePubkey: ALICE,
+      channelId: null,
+      requestsOnly: true,
+      showComposer: false,
+    });
+
+    assert.equal(
+      mounted.container.querySelectorAll('[data-testid="channel-task-row"]')
+        .length,
+      1,
+      "non-request tasks must not leak into My requests",
+    );
+    assert.deepEqual(
+      [
+        ...mounted.container.querySelector(
+          '[data-testid="request-task-provenance"]',
+        ).children,
+      ].map((node) => node.textContent.trim()),
+      ["telegram", "open", "telegram:7991290678:79398:42"],
+    );
+    assert.equal(
+      mounted.container.querySelector('[data-testid="request-task-body"]')
+        ?.textContent,
+      "Original Telegram request",
+    );
+    assert.equal(
+      mounted.container.querySelector('[data-testid="channel-task-new-title"]'),
+      null,
+      "automatic request intake owns creation in this view",
+    );
+    assert.equal(listArgs.at(-1)?.assignee, ALICE);
+
+    await act(async () => mounted.root.unmount());
+    mounted.container.remove();
+    mounted.queryClient.clear();
   });
 
   it("an already-assigned task renders no suggestion panel (FM1)", async () => {

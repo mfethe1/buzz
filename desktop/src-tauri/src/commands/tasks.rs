@@ -47,6 +47,11 @@ pub struct ChannelTask {
     pub status: String,
     pub assignee: Option<String>,
     pub created_by: Option<String>,
+    pub body: Option<String>,
+    pub source: Option<String>,
+    pub source_ref: Option<String>,
+    pub created_at: i64,
+    pub done_at: Option<i64>,
     pub updated_at: i64,
 }
 
@@ -60,6 +65,11 @@ impl ChannelTask {
             status: value["status"].as_str().unwrap_or_default().to_owned(),
             assignee: value["assignee"].as_str().map(str::to_owned),
             created_by: value["created_by"].as_str().map(str::to_owned),
+            body: value["body"].as_str().map(str::to_owned),
+            source: value["source"].as_str().map(str::to_owned),
+            source_ref: value["source_ref"].as_str().map(str::to_owned),
+            created_at: value["created_at"].as_i64().unwrap_or_default(),
+            done_at: value["done_at"].as_i64(),
             updated_at: value["updated_at"].as_i64().unwrap_or_default(),
         }
     }
@@ -132,9 +142,15 @@ pub async fn tasks_list(
     state: State<'_, AppState>,
     channel_id: Option<String>,
     status: Option<String>,
+    assignee: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<ChannelTask>, String> {
-    let path_and_query = list_path_and_query(channel_id.as_deref(), status.as_deref(), limit);
+    let path_and_query = list_path_and_query(
+        channel_id.as_deref(),
+        status.as_deref(),
+        assignee.as_deref(),
+        limit,
+    );
     let value = tasks_request(state.inner(), reqwest::Method::GET, &path_and_query, None).await?;
     parse_task_list(&value)
 }
@@ -154,6 +170,7 @@ fn clamp_limit(limit: Option<i64>) -> i64 {
 fn list_path_and_query(
     channel_id: Option<&str>,
     status: Option<&str>,
+    assignee: Option<&str>,
     limit: Option<i64>,
 ) -> String {
     let mut query: Vec<String> = vec![format!("limit={}", clamp_limit(limit))];
@@ -162,6 +179,9 @@ fn list_path_and_query(
     }
     if let Some(status) = status {
         query.push(format!("status={}", urlencode(status)));
+    }
+    if let Some(assignee) = assignee {
+        query.push(format!("assignee={}", urlencode(assignee)));
     }
     format!("{}?{}", TASKS_PATH, query.join("&"))
 }
@@ -185,11 +205,15 @@ pub async fn tasks_create(
     title: String,
     channel_id: Option<String>,
     body_text: Option<String>,
+    source: Option<String>,
+    source_ref: Option<String>,
 ) -> Result<ChannelTask, String> {
     let payload = serde_json::json!({
         "title": title,
         "channel_id": channel_id,
         "body": body_text,
+        "source": source,
+        "source_ref": source_ref,
     });
     let value = tasks_request(
         state.inner(),
@@ -494,7 +518,7 @@ mod tests {
     /// wrong filter.
     #[test]
     fn absent_filters_are_omitted_from_the_query() {
-        let q = list_path_and_query(None, None, None);
+        let q = list_path_and_query(None, None, None, None);
         assert_eq!(q, format!("/api/tasks?limit={DEFAULT_TASK_LIMIT}"));
         assert!(!q.contains("channel="), "no empty channel param");
         assert!(!q.contains("status="), "no empty status param");
@@ -509,7 +533,7 @@ mod tests {
     /// regression test for that defect.
     #[test]
     fn hostile_filter_values_cannot_smuggle_extra_query_params() {
-        let q = list_path_and_query(Some("abc&limit=9999"), None, Some(10));
+        let q = list_path_and_query(Some("abc&limit=9999"), None, None, Some(10));
         assert!(
             q.contains("channel=abc%26limit%3D9999"),
             "ampersand and equals must be encoded, got: {q}"
@@ -521,7 +545,7 @@ mod tests {
         );
 
         // Same guarantee on the status filter.
-        let q = list_path_and_query(None, Some("open&channel=other"), None);
+        let q = list_path_and_query(None, Some("open&channel=other"), None, None);
         assert!(
             !q.contains("&channel="),
             "status cannot inject channel: {q}"
@@ -531,8 +555,16 @@ mod tests {
     /// E7 — the full filter combination keeps a stable, signable ordering.
     #[test]
     fn full_query_has_stable_parameter_order() {
-        let q = list_path_and_query(Some("chan1"), Some("in progress"), Some(25));
-        assert_eq!(q, "/api/tasks?limit=25&channel=chan1&status=in%20progress");
+        let q = list_path_and_query(
+            Some("chan1"),
+            Some("in progress"),
+            Some("deadbeef"),
+            Some(25),
+        );
+        assert_eq!(
+            q,
+            "/api/tasks?limit=25&channel=chan1&status=in%20progress&assignee=deadbeef"
+        );
     }
 
     /// E8 — UNKNOWN STATUS TOLERANCE: a status the desktop does not model must
@@ -569,6 +601,35 @@ mod tests {
         assert_eq!(task.assignee, None, "numeric assignee is not a pubkey");
         assert_eq!(task.created_by, None);
         assert_eq!(task.updated_at, 0, "unparseable timestamp sorts last");
+    }
+
+    #[test]
+    fn request_provenance_and_assignee_filter_survive_the_tauri_boundary() {
+        let q = list_path_and_query(None, None, Some("ab&status=done"), Some(50));
+        assert_eq!(
+            q, "/api/tasks?limit=50&assignee=ab%26status%3Ddone",
+            "assignee must be independently encoded and signable",
+        );
+
+        let task = ChannelTask::from_json(&serde_json::json!({
+            "id": "request-1",
+            "title": "Build request intake",
+            "status": "in_progress",
+            "source": "telegram",
+            "source_ref": "telegram:7991290678:79398:42",
+            "body": "Original request text",
+            "created_at": 10,
+            "done_at": null,
+            "updated_at": 20
+        }));
+        assert_eq!(task.source.as_deref(), Some("telegram"));
+        assert_eq!(
+            task.source_ref.as_deref(),
+            Some("telegram:7991290678:79398:42")
+        );
+        assert_eq!(task.body.as_deref(), Some("Original request text"));
+        assert_eq!(task.created_at, 10);
+        assert_eq!(task.done_at, None);
     }
 
     /// E10 — a float timestamp (JSON has no integer type) must not silently
