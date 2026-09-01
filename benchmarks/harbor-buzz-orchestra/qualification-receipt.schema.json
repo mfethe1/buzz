@@ -220,7 +220,7 @@
       "additionalProperties": false,
       "properties": {
         "buzz_commit_sha": {
-          "pattern": "^[0-9a-f]{40,64}$",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "title": "Buzz Commit Sha",
           "type": "string"
         },
@@ -258,7 +258,7 @@
           "type": "string"
         },
         "qualifier_commit_sha": {
-          "pattern": "^[0-9a-f]{40,64}$",
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
           "title": "Qualifier Commit Sha",
           "type": "string"
         },

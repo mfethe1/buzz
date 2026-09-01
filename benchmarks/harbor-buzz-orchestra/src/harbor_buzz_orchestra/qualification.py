@@ -35,7 +35,7 @@ _SECRET_KEY = re.compile(
     r"(?:^|_)(?:api_?)?(?:key|token|secret|password|authorization|credential|cookie)(?:$|_)",
     re.IGNORECASE,
 )
-_GIT_SHA = r"^[0-9a-f]{40,64}$"
+_GIT_SHA = r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
 _SHA256 = r"^[0-9a-f]{64}$"
 _MAX_EVIDENCE = 512
 
@@ -91,6 +91,20 @@ class LaunchProvenance(StrictModel):
     provider: str = Field(min_length=1, max_length=80)
     argv_sha256: str = Field(pattern=_SHA256)
     flags: dict[str, str | int | float | bool] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def redact_secret_flags(self) -> LaunchProvenance:
+        """Redact launch flags whose keys look like credentials (fail-closed)."""
+        if any(_SECRET_KEY.search(key) for key in self.flags):
+            object.__setattr__(
+                self,
+                "flags",
+                {
+                    key: ("[REDACTED]" if _SECRET_KEY.search(key) else value)
+                    for key, value in self.flags.items()
+                },
+            )
+        return self
 
 
 Metric = str | int | float | bool
