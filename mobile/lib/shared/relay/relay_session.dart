@@ -618,7 +618,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _handleSyncRequired(List<dynamic> data) {
     if (!_socketConnected) return; // Gap frames during a reconnect are
     // consumed by the in-flight generation's own replay.
-    final reason = data.length > 1 && data[1] is String ? data[1] as String : null;
+    final reason = data.length > 1 && data[1] is String
+        ? data[1] as String
+        : null;
     // The reason is attacker-controllable text: never render it and only log
     // values from a fixed allowlist.
     if (reason != null && _syncRequiredKnownReasons.contains(reason)) {
