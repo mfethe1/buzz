@@ -18,10 +18,13 @@
 //! - `tool_call_update` `failed` → `failed` (+ summary text)
 //!
 //! The events are emitted onto the local observer feed as
-//! `subagent_lifecycle`; the relay-side task in [`crate`] then signs and
-//! publishes them as kind:20003 with the parent tag. Payloads here carry
-//! `{subagent_name, status, summary?}`; `parent_pubkey` is attached at the
-//! publish site, where the harness identity is known.
+//! `subagent_lifecycle` and ride the existing owner-scoped encrypted
+//! kind:24200 observer frames to clients (see `publish_relay_observer_event`
+//! in `lib.rs`). The frame's agent tag IS the parent identity, so payloads
+//! here carry only `{subagent_name, status, summary?}`; clients derive
+//! nesting from the frame's agent tag. No separate kind:20003 publish
+//! exists by design — 20003 was reserved for a future standalone ephemeral
+//! fan-out and is currently unused.
 
 use serde_json::Value;
 
@@ -237,7 +240,9 @@ mod tests {
             .expect("running payload");
         assert_eq!(running["status"], "running");
         // Repeated in_progress must not re-emit.
-        assert!(tracker.observe_update(&tool_call_update("t1", "in_progress")).is_none());
+        assert!(tracker
+            .observe_update(&tool_call_update("t1", "in_progress"))
+            .is_none());
         let mut complete = tool_call_update("t1", "completed");
         complete["content"] = json!([
             {"type": "content", "content": {"type": "text", "text": "found 3 leads"}}
@@ -247,7 +252,9 @@ mod tests {
         assert_eq!(done["subagent_name"], "scout");
         assert_eq!(done["summary"], "found 3 leads");
         // Terminal: further updates for the same id are untracked.
-        assert!(tracker.observe_update(&tool_call_update("t1", "in_progress")).is_none());
+        assert!(tracker
+            .observe_update(&tool_call_update("t1", "in_progress"))
+            .is_none());
     }
 
     #[test]
@@ -269,7 +276,9 @@ mod tests {
     fn update_without_tracking_is_ignored() {
         let mut tracker = SubagentTracker::new();
         // An in_progress update for a non-delegation tool call we never saw.
-        assert!(tracker.observe_update(&tool_call_update("other", "in_progress")).is_none());
+        assert!(tracker
+            .observe_update(&tool_call_update("other", "in_progress"))
+            .is_none());
     }
 
     #[test]
@@ -294,7 +303,10 @@ mod tests {
         ]);
         let done = tracker.observe_update(&complete).expect("complete payload");
         assert_eq!(
-            done["summary"].as_str().map(str::chars).map(Iterator::count),
+            done["summary"]
+                .as_str()
+                .map(str::chars)
+                .map(Iterator::count),
             Some(SUMMARY_MAX_CHARS)
         );
     }

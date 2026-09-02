@@ -467,6 +467,9 @@ const SUBAGENT_LIFECYCLE_KIND = "subagent_lifecycle";
 const subagentsByParent = new Map<string, SubagentStatus[]>();
 const MAX_SUBAGENTS_PER_PARENT = 100;
 const subagentLifecycleListeners = new Set<() => void>();
+// Monotonic version of subagentsByParent contents; bumped only on a real
+// fold so caches can detect same-length mutations (status/summary updates).
+let subagentsVersion = 0;
 
 /**
  * Ingest one `subagent_lifecycle` payload for a parent agent. Returns true
@@ -499,6 +502,7 @@ function ingestSubagentLifecycleEvent(
     return false;
   }
   subagentsByParent.set(parent, nextList.slice(-MAX_SUBAGENTS_PER_PARENT));
+  subagentsVersion += 1;
   return true;
 }
 
@@ -509,16 +513,22 @@ function ingestSubagentLifecycleEvent(
  */
 const EMPTY_SUBAGENTS: readonly SubagentStatus[] = [];
 let cachedAllSubagents: readonly SubagentStatus[] = EMPTY_SUBAGENTS;
+let cachedAllSubagentsVersion = -1;
 export function getAllSubagents(): readonly SubagentStatus[] {
   const total = Array.from(subagentsByParent.values()).reduce(
     (sum, list) => sum + list.length,
     0,
   );
   if (total === 0) {
+    cachedAllSubagentsVersion = -1;
     return EMPTY_SUBAGENTS;
   }
-  if (cachedAllSubagents.length !== total) {
+  // Bumped on every real fold (status transition, summary update, add) so
+  // same-length mutations still produce a fresh array reference — a length
+  // check alone would return the stale array and freeze the tree UI.
+  if (cachedAllSubagentsVersion !== subagentsVersion) {
     cachedAllSubagents = Array.from(subagentsByParent.values()).flat();
+    cachedAllSubagentsVersion = subagentsVersion;
   }
   return cachedAllSubagents;
 }
@@ -1034,6 +1044,7 @@ export function resetAgentObserverStore() {
   snapshotByAgent.clear();
   archiveEventsByChannel.clear();
   subagentsByParent.clear();
+  subagentsVersion += 1;
   cachedAllSubagents = EMPTY_SUBAGENTS;
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
