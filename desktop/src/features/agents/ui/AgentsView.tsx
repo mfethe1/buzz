@@ -9,7 +9,6 @@ import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { AgentDialog } from "./AgentDialog";
 import { ConnectHermesProfilesDialog } from "./ConnectHermesProfilesDialog";
-import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { CommunityCatalogDialog } from "./CommunityCatalogDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
 import { PersonaShareDialog } from "./PersonaShareDialog";

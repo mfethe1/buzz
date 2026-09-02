@@ -1502,6 +1502,7 @@ void main() {
     await Future<void>.delayed(Duration.zero);
 
     expect(_reqs(socket), hasLength(1));
+  });
 
   // The relay rejects an over-quota EVENT on the OK channel rather than with a
   // bare NOTICE, because a NOTICE carries no event id and `_pendingEvents` is

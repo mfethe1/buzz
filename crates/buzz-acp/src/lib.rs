@@ -6196,7 +6196,7 @@ mod owner_control_command_tests {
         });
 
         handle_cancel_turn_control(&payload, &mut pool, Some(&observer));
-        handle_switch_model_control(&payload, &mut pool, Some(&observer), None);
+        handle_switch_model_control(&payload, &mut pool, Some(&observer), None).await;
         let results = observer.snapshot();
         assert_eq!(results.len(), 2);
         for result in results {

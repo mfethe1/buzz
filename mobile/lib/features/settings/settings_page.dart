@@ -215,7 +215,6 @@ class SettingsPage extends HookConsumerWidget {
               children: [
                 profileHeader,
                 _CommunitySection(invitePageBuilder: invitePageBuilder),
-                const _AppearanceSection(),
                 const _NotificationsSection(),
                 _ConnectionSection(
                   identityRecoveryPageBuilder: identityRecoveryPageBuilder,

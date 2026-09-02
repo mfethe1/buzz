@@ -4,6 +4,7 @@ import { ChevronDown, Plus, Upload } from "lucide-react";
 import { isCatalogPersonaSelected } from "@/features/agents/lib/catalog";
 import { effectiveAgentDescription } from "@/features/agents/lib/agentDescription";
 import { isCatalogPersona } from "@/features/agents/lib/personaCatalogRelay";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { CatalogTeam } from "@/features/agents/lib/teamCatalogRelay";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -737,7 +738,7 @@ function PersonaCatalogDetail({ persona }: { persona: AgentPersona }) {
     addedByLabel = "You";
   } else {
     const summary = ownerPubkey
-      ? ownerBatchQuery.data?.profiles[ownerPubkey.toLowerCase()]
+      ? ownerBatchQuery.data?.profiles[normalizePubkey(ownerPubkey)]
       : undefined;
     addedByLabel = resolveCatalogOwnerLabel(summary);
   }
@@ -800,7 +801,7 @@ function TeamCatalogDetail({ team }: { team: CatalogTeam }) {
     addedByLabel = "You";
   } else {
     const summary = ownerPubkey
-      ? ownerBatchQuery.data?.profiles[ownerPubkey.toLowerCase()]
+      ? ownerBatchQuery.data?.profiles[normalizePubkey(ownerPubkey)]
       : undefined;
     addedByLabel = resolveCatalogOwnerLabel(summary);
   }
