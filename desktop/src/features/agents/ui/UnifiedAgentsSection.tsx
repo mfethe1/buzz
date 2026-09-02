@@ -243,6 +243,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 function AgentPersonaCard({
   actions,
   agent,
+  defaultModel,
   label,
   persona,
   restartingAgentPubkey,
@@ -294,6 +295,12 @@ function AgentPersonaCard({
   ]
     .filter((part): part is string => Boolean(part))
     .join(" · ");
+  const modelLabel = resolveAgentCardModelLabel({
+    agent,
+    personaModel: null,
+    provider: agent?.provider,
+    defaultModel,
+  });
 
   return (
     <AgentIdentityCard
