@@ -98,7 +98,9 @@ export function catalogTeamsFromPublications(
   localTeams: readonly AgentTeam[],
   currentPubkey: string | null | undefined,
 ): CatalogTeam[] {
-  const normalizedCurrentPubkey = currentPubkey ? normalizePubkey(currentPubkey) : null;
+  const normalizedCurrentPubkey = currentPubkey
+    ? normalizePubkey(currentPubkey)
+    : null;
 
   return publications
     .map((publication) => {
