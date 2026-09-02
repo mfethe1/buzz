@@ -785,7 +785,7 @@ mod tests {
             format!("Nostr {encoded}")
         }
 
-        struct Fixture {
+        pub(super) struct Fixture {
             state: Arc<AppState>,
             pool: sqlx::PgPool,
             host: String,
@@ -800,7 +800,7 @@ mod tests {
         /// are live. Redis must be real: the HTTP admission gate fails closed
         /// (503) when the shared limiter is unavailable, which would mask the
         /// authorization verdict under test.
-        async fn fixture() -> Option<Fixture> {
+        pub(super) async fn fixture() -> Option<Fixture> {
             let host = format!("task-authz-{}.example", Uuid::new_v4().simple());
             let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
                 .or_else(|_| std::env::var("DATABASE_URL"))
@@ -983,29 +983,8 @@ mod tests {
             }
         }
 
-        /// The single route-level scenario: a relay member outside a private
-        /// channel must receive 404 (not 403, not data) on every task route,
-        /// and the channel-bound task must vanish from listings. The owner's
-        /// positive control proves the 404s are authz, not breakage.
-        #[tokio::test]
-        #[ignore = "requires Postgres and Redis"]
-        async fn private_channel_task_is_invisible_to_non_members_at_the_route() {
-            let Some(f) = fixture().await else {
-                eprintln!("SKIP: Postgres/Redis unavailable");
-                return;
-            };
-            // Catch assertion panics so cleanup ALWAYS runs, then resume them.
-            let result = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
-                private_channel_assertions(&f),
-            ))
-            .await;
-            cleanup(&f).await;
-            if let Err(panic) = result {
-                std::panic::resume_unwind(panic);
-            }
-        }
 
-        async fn private_channel_assertions(f: &Fixture) {
+        pub(super) async fn private_channel_assertions(f: &Fixture) {
             let task_path = format!("/api/tasks/{}", f.task_id);
 
             // --- Positive control: the owner sees the task. Without this, 404s
@@ -1103,4 +1082,31 @@ mod tests {
             );
         }
     }
+
+    mod postgres_tests {
+        use super::route_authz::{fixture, private_channel_assertions};
+
+        /// The single route-level scenario: a relay member outside a private
+        /// channel must receive 404 (not 403, not data) on every task route,
+        /// and the channel-bound task must vanish from listings. The owner's
+        /// positive control proves the 404s are authz, not breakage.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn private_channel_task_is_invisible_to_non_members_at_the_route() {
+            let Some(f) = fixture().await else {
+                eprintln!("SKIP: Postgres/Redis unavailable");
+                return;
+            };
+            // Catch assertion panics so cleanup ALWAYS runs, then resume them.
+            let result = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                private_channel_assertions(&f),
+            ))
+            .await;
+            drop(f);
+            if let Err(payload) = result {
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
 }
+
