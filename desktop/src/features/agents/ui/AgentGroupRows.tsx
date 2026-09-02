@@ -1,4 +1,5 @@
 import type { ManagedAgent, PresenceLookup } from "@/shared/api/types";
+import type { SubagentStatus } from "@/features/agents/lib/subagents";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { ManagedAgentRow } from "./ManagedAgentRow";
 
@@ -13,6 +14,8 @@ export type AgentGroupRowsProps = {
   presenceLoaded: boolean;
   presenceLookup: PresenceLookup;
   selectedLogAgentPubkey: string | null;
+  /** Live subagent records (SPEC-nested-subagents); optional, empty default. */
+  subagents?: readonly SubagentStatus[];
   onOpenProfile: (pubkey: string) => void;
   onSelectLogAgent: (pubkey: string | null) => void;
 };
@@ -28,6 +31,7 @@ export function AgentGroupRows({
   presenceLoaded,
   presenceLookup,
   selectedLogAgentPubkey,
+  subagents = [],
   onOpenProfile,
   onSelectLogAgent,
 }: AgentGroupRowsProps) {
@@ -48,6 +52,7 @@ export function AgentGroupRows({
           personaLabelsById={personaLabelsById}
           presenceLoaded={presenceLoaded}
           presenceLookup={presenceLookup}
+          subagents={subagents}
           onOpenProfile={onOpenProfile}
           onSelectLogAgent={onSelectLogAgent}
         />

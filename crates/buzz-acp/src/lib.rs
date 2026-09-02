@@ -11,10 +11,11 @@ mod prompt_framing;
 mod prompt_project;
 mod queue;
 mod relay;
+mod scope;
 /// Durable session-binding + processed-event store (IDs and timestamps only).
 pub mod session_store;
-mod scope;
 mod setup_mode;
+mod subagent;
 #[cfg(test)]
 mod testshell;
 mod usage;
@@ -6196,7 +6197,7 @@ mod owner_control_command_tests {
         });
 
         handle_cancel_turn_control(&payload, &mut pool, Some(&observer));
-        handle_switch_model_control(&payload, &mut pool, Some(&observer), None);
+        handle_switch_model_control(&payload, &mut pool, Some(&observer), None).await;
         let results = observer.snapshot();
         assert_eq!(results.len(), 2);
         for result in results {
@@ -6249,9 +6250,7 @@ mod owner_control_command_tests {
                 ControlSignal::Cancel => {
                     handle_cancel_turn_control(&payload, &mut pool, Some(&observer));
                 }
-                _ => {
-                    handle_switch_model_control(&payload, &mut pool, Some(&observer), None).await
-                }
+                _ => handle_switch_model_control(&payload, &mut pool, Some(&observer), None).await,
             }
             assert_eq!(rx.await.unwrap(), signal);
             assert_eq!(observer.snapshot()[0].payload["status"], "sent");
@@ -11364,8 +11363,8 @@ mod session_store_dedupe_tests {
 
 #[cfg(test)]
 mod session_store_idle_switch_tests {
-    use crate::scope::SessionScope;
     use super::*;
+    use crate::scope::SessionScope;
     use session_store::{ContextKey, InMemorySessionStore, SessionStore};
 
     async fn dummy_agent(channel_id: uuid::Uuid) -> OwnedAgent {
@@ -11386,10 +11385,10 @@ mod session_store_idle_switch_tests {
             goose_system_prompt_supported: None,
             protocol_version: 1,
         };
-        agent
-            .state
-            .sessions
-            .insert(SessionScope::Conversation { channel_id }, "retired-sid".into());
+        agent.state.sessions.insert(
+            SessionScope::Conversation { channel_id },
+            "retired-sid".into(),
+        );
         agent
     }
 

@@ -170,6 +170,8 @@ pub struct AcpClient {
     current_hard_deadline: Option<tokio::time::Instant>,
     /// Optional local observer feed used by the desktop app.
     observer: Option<ObserverHandle>,
+    /// Per-client delegation-tool correlation for subagent lifecycle events.
+    subagent_tracker: crate::subagent::SubagentTracker,
     /// Pool slot index for this agent process.
     observer_agent_index: Option<usize>,
     /// Best-effort context attached to raw ACP wire events.
@@ -557,6 +559,7 @@ impl AcpClient {
             last_prompt_id: None,
             current_hard_deadline: None,
             observer: None,
+            subagent_tracker: crate::subagent::SubagentTracker::new(),
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
             active_run_id: None,
@@ -1807,6 +1810,14 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                // [lenny] Workstream A: detect subagent delegation tool calls
+                // (e.g. Hermes `delegate_task`) and emit parent-tagged
+                // subagent lifecycle events. Additive only — when no observer
+                // is attached or the tool isn't a delegation, this is a no-op
+                // and existing flows are untouched.
+                if let Some(event) = self.subagent_tracker.observe_update(update) {
+                    self.observe(crate::subagent::OBSERVER_KIND_SUBAGENT_LIFECYCLE, event);
+                }
                 true
             }
             "tool_call_update" => {
@@ -1816,6 +1827,12 @@ impl AcpClient {
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
                 tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
+                // [lenny] Workstream A: correlate tool-call status updates
+                // (in_progress → running; completed → complete; failed →
+                // failed) with the tracked delegation.
+                if let Some(event) = self.subagent_tracker.observe_update(update) {
+                    self.observe(crate::subagent::OBSERVER_KIND_SUBAGENT_LIFECYCLE, event);
+                }
                 false
             }
             "plan" => {
