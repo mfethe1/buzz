@@ -465,12 +465,11 @@ pub const KIND_PRESENCE_UPDATE: u32 = 20001;
 pub const KIND_PAIRING: u32 = 24134;
 /// Ephemeral: typing indicator for a channel.
 pub const KIND_TYPING_INDICATOR: u32 = 20002;
-/// Ephemeral: subagent lifecycle event (spawned/running/complete/failed) for a
-/// subagent delegated by a managed agent (SPEC nested-subagents, Workstream A).
-/// Carries a `["parent", <parent-agent-pubkey-hex>]` tag so clients can nest
-/// subagents under their parent agent; content is a JSON payload with
-/// `subagent_name`, `parent_pubkey`, `status`, and optional `summary` /
-/// `parent_event_id`. Never stored.
+/// Ephemeral: RESERVED for a future standalone subagent-lifecycle fan-out
+/// (20003). Currently unused: subagent lifecycle events ride the
+/// owner-scoped encrypted kind:24200 observer frames instead, and clients
+/// derive the parent from the frame's agent tag (see
+/// `crates/buzz-acp/src/subagent.rs`). Do not repurpose this number.
 pub const KIND_SUBAGENT_LIFECYCLE: u32 = 20003;
 /// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
