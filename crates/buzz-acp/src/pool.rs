@@ -2029,8 +2029,8 @@ fn context_key_for_source(
     worker_index: usize,
 ) -> crate::session_store::ContextKey {
     match source {
-        PromptSource::Channel(cid) => {
-            crate::session_store::ContextKey::Channel(*cid).for_worker(worker_index)
+        PromptSource::Channel(scope) => {
+            crate::session_store::ContextKey::Channel(scope.channel_id()).for_worker(worker_index)
         }
         PromptSource::Heartbeat => {
             crate::session_store::ContextKey::Heartbeat.for_worker(worker_index)
@@ -2157,9 +2157,12 @@ async fn try_restore_stored_session(
                         tracing::warn!(%error, %cid, "session store processed_event_ids_for_channel failed");
                         Vec::new()
                     });
-                agent.state.sessions.insert(cid, binding.session_id.clone());
+                agent.state.sessions.insert(
+                    SessionScope::Conversation { channel_id: cid },
+                    binding.session_id.clone(),
+                );
                 agent.state.deliveries.insert(
-                    cid,
+                    SessionScope::Conversation { channel_id: cid },
                     ChannelDeliveryState {
                         standing_context_sent: true,
                         delivered_event_ids: delivered.into_iter().collect(),
@@ -3132,7 +3135,7 @@ pub async fn run_prompt_task(
                             );
                             store_mark_events_processed(
                                 &ctx,
-                                *cid,
+                                scope.channel_id(),
                                 &pending_delivered_event_ids,
                             )
                             .await;
@@ -3189,7 +3192,7 @@ pub async fn run_prompt_task(
                     standing_sent,
                     &pending_delivered_event_ids,
                 );
-                store_mark_events_processed(&ctx, *cid, &pending_delivered_event_ids).await;
+                store_mark_events_processed(&ctx, scope.channel_id(), &pending_delivered_event_ids).await;
             } else if !agent.has_system_prompt_support() {
                 agent.state.heartbeat_standing_context_sent = true;
             }
@@ -9397,11 +9400,11 @@ done"#,
                 .agent
                 .state
                 .sessions
-                .get(&channel_id)
+                .get(&SessionScope::Conversation { channel_id })
                 .map(String::as_str),
             Some("stored-sid")
         );
-        let delivery = result.agent.state.deliveries.get(&channel_id).unwrap();
+        let delivery = result.agent.state.deliveries.get(&SessionScope::Conversation { channel_id }).unwrap();
         assert!(delivery.standing_context_sent);
         assert!(delivery.delivered_event_ids.contains("already-done"));
         let methods = read_methods(&capture);
@@ -9522,7 +9525,7 @@ done"#,
             .await
             .unwrap();
         let mut state = SessionState::default();
-        state.sessions.insert(channel_id, "keep-sid".into());
+        state.sessions.insert(SessionScope::Conversation { channel_id }, "keep-sid".into());
         state.invalidate_all();
         assert!(state.sessions.is_empty());
         let binding = store

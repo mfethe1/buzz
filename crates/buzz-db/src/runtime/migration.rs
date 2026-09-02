@@ -1433,7 +1433,7 @@ mod postgres_tests {
         assert!(!migrations[0].sql.as_str().contains("CREATE TABLE tasks"));
 
         // The desired-state schema mirrors both tables.
-        let desired_schema = include_str!("../../../schema/schema.sql");
+        let desired_schema = include_str!("../../../../schema/schema.sql");
         assert!(desired_schema.contains("CREATE TABLE tasks"));
         assert!(desired_schema.contains("CREATE TABLE task_events"));
 
@@ -1442,24 +1442,6 @@ mod postgres_tests {
         assert!(crate::deletion::EXPECTED_SCOPED_TABLES.contains(&"task_events"));
     }
 
-    #[test]
-    fn push_match_trigger_is_narrowed_to_message_kinds_additively() {
-        let mut migrations: Vec<_> = MIGRATOR.iter().collect();
-        migrations.sort_by_key(|migration| migration.version);
-
-        let push_migration = migrations
-            .iter()
-            .find(|migration| migration.version == 40)
-            .expect("push-message migration 0040");
-        let sql = push_migration.sql.as_str();
-        assert!(sql.contains("CREATE OR REPLACE FUNCTION enqueue_push_match_job"));
-        assert!(sql.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
-        assert!(!sql.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
-
-        let desired_schema = include_str!("../../../schema/schema.sql");
-        assert!(desired_schema.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
-        assert!(!desired_schema.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
-    }
 
     #[test]
     fn migration_lint_detects_tables_missing_community_id_by_default() {

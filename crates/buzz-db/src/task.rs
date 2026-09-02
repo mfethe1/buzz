@@ -597,7 +597,7 @@ mod tests {
     // `just test` (Docker Postgres + Redis) is what turns them on. Run one
     // directly with:
     //
-    //     cargo test -p buzz-db --lib task::tests -- --ignored
+    //     cargo test -p buzz-db --lib crate::task::tests -- --ignored
     //
     // against a database that has migration 0033 applied.
 
@@ -977,4 +977,76 @@ mod tests {
 
         delete_test_community(&pool, community).await;
     }
+}
+
+use buzz_datastore_tracing::datastore_span;
+use crate::Db;
+
+
+// ---------------------------------------------------------------------------
+// Fork addition (PR #6425): Db facade methods for the task system.
+// These impl blocks live with the task module so upstream's restructured
+// lib.rs facade stays untouched.
+// ---------------------------------------------------------------------------
+impl Db {
+    #[datastore_span(name = "create_task", system = "postgresql")]
+    pub async fn create_task(
+        &self,
+        community: CommunityId,
+        new_task: crate::task::NewTask,
+    ) -> Result<crate::task::TaskRecord> {
+        crate::task::create_task(&self.pool, community, new_task).await
+    }
+
+    /// Read one task scoped to `community`.
+    #[datastore_span(name = "get_task", system = "postgresql")]
+    pub async fn get_task(&self, community: CommunityId, id: Uuid) -> Result<crate::task::TaskRecord> {
+        crate::task::get_task(&self.pool, community, id).await
+    }
+
+    /// List a community's tasks, newest-modified first.
+    #[datastore_span(name = "list_tasks", system = "postgresql")]
+    pub async fn list_tasks(
+        &self,
+        community: CommunityId,
+        filter: &crate::task::TaskFilter,
+    ) -> Result<Vec<crate::task::TaskRecord>> {
+        crate::task::list_tasks(&self.pool, community, filter).await
+    }
+
+    /// Read one task's append-only history, oldest first.
+    #[datastore_span(name = "list_task_events", system = "postgresql")]
+    pub async fn list_task_events(
+        &self,
+        community: CommunityId,
+        task_id: Uuid,
+    ) -> Result<Vec<crate::task::TaskEventRecord>> {
+        crate::task::list_task_events(&self.pool, community, task_id).await
+    }
+
+    /// Apply a task patch, appending one history row per field that changed.
+    #[datastore_span(name = "update_task", system = "postgresql")]
+    pub async fn update_task(
+        &self,
+        community: CommunityId,
+        id: Uuid,
+        patch: &crate::task::TaskPatch,
+        actor_pubkey: Option<&[u8]>,
+    ) -> Result<crate::task::TaskRecord> {
+        crate::task::update_task(&self.pool, community, id, patch, actor_pubkey).await
+    }
+
+    /// Append a comment or summary to a task's history.
+    #[datastore_span(name = "append_task_event", system = "postgresql")]
+    pub async fn append_task_event(
+        &self,
+        community: CommunityId,
+        task_id: Uuid,
+        actor_pubkey: Option<&[u8]>,
+        action: buzz_core::task::TaskAction,
+        body: Option<&str>,
+    ) -> Result<crate::task::TaskEventRecord> {
+        crate::task::append_task_event(&self.pool, community, task_id, actor_pubkey, action, body).await
+    }
+
 }

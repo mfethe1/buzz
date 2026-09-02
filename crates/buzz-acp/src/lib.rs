@@ -6196,7 +6196,7 @@ mod owner_control_command_tests {
         });
 
         handle_cancel_turn_control(&payload, &mut pool, Some(&observer));
-        handle_switch_model_control(&payload, &mut pool, Some(&observer));
+        handle_switch_model_control(&payload, &mut pool, Some(&observer), None);
         let results = observer.snapshot();
         assert_eq!(results.len(), 2);
         for result in results {
@@ -6247,9 +6247,11 @@ mod owner_control_command_tests {
             });
             match &signal {
                 ControlSignal::Cancel => {
-                    handle_cancel_turn_control(&payload, &mut pool, Some(&observer))
+                    handle_cancel_turn_control(&payload, &mut pool, Some(&observer));
                 }
-                _ => handle_switch_model_control(&payload, &mut pool, Some(&observer)),
+                _ => {
+                    handle_switch_model_control(&payload, &mut pool, Some(&observer), None).await
+                }
             }
             assert_eq!(rx.await.unwrap(), signal);
             assert_eq!(observer.snapshot()[0].payload["status"], "sent");
@@ -11362,6 +11364,7 @@ mod session_store_dedupe_tests {
 
 #[cfg(test)]
 mod session_store_idle_switch_tests {
+    use crate::scope::SessionScope;
     use super::*;
     use session_store::{ContextKey, InMemorySessionStore, SessionStore};
 
@@ -11386,7 +11389,7 @@ mod session_store_idle_switch_tests {
         agent
             .state
             .sessions
-            .insert(channel_id, "retired-sid".into());
+            .insert(SessionScope::Conversation { channel_id }, "retired-sid".into());
         agent
     }
 
@@ -11413,7 +11416,7 @@ mod session_store_idle_switch_tests {
             store.load_binding(&key).await.unwrap().is_none(),
             "idle switch must retire durable bindings so restore cannot resurrect them"
         );
-        if let Some(mut agent) = pool.try_claim(Some(channel_id)) {
+        if let Some(mut agent) = pool.try_claim(Some(&SessionScope::Conversation { channel_id })) {
             agent.acp.shutdown().await;
         }
     }
@@ -11452,7 +11455,7 @@ mod session_store_idle_switch_tests {
                 .session_id,
             "keep-sid"
         );
-        if let Some(mut agent) = pool.try_claim(Some(channel_id)) {
+        if let Some(mut agent) = pool.try_claim(Some(&SessionScope::Conversation { channel_id })) {
             agent.acp.shutdown().await;
         }
     }

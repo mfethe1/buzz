@@ -685,6 +685,38 @@ impl ActionSink for RelayActionSink {
     }
 }
 
+/// only for targets also named in the workflow owner's stored step template.
+fn append_workflow_mention_tags(
+    tags: &mut Vec<Tag>,
+    rendered_text: &str,
+    authored_text: &str,
+    members: &[(String, String)],
+    author_pubkey_hex: &str,
+) -> Result<(), ActionSinkError> {
+    let rendered_mentions = resolve_mention_pubkeys(rendered_text, members);
+    let authored_mentions: std::collections::HashSet<String> =
+        resolve_mention_pubkeys(authored_text, members)
+            .into_iter()
+            .collect();
+
+    for mentioned in rendered_mentions {
+        if mentioned != author_pubkey_hex {
+            tags.push(
+                Tag::parse(["p", &mentioned])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
+            );
+        }
+        if authored_mentions.contains(&mentioned) {
+            tags.push(
+                Tag::parse(["buzz:workflow-mention", &mentioned]).map_err(|e| {
+                    ActionSinkError::EventBuild(format!("workflow mention tag: {e}"))
+                })?,
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1312,20 +1344,14 @@ mod postgres_tests {
         // Attribution moved off `p` and onto `actor`: ACP wakes on any `p`
         // matching an agent's pubkey, so p-tagging the owner woke them as an
         // extra agent whenever an agent owned the workflow.
-        let actor_targets: Vec<&str> = stored
-            .event
-            .tags
-            .iter()
-            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("actor"))
-            .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
-            .collect();
+        let actor_targets = tag_values(&explicit, "actor");
         assert_eq!(
             actor_targets,
-            vec![author_hex.as_str()],
+            vec![author_hex.clone()],
             "author must be attributed via the actor tag; got {actor_targets:?}"
         );
         assert!(
-            !p_tag_targets.contains(&author_hex.as_str()),
+            !p_tag_targets.iter().any(|t| t == &author_hex),
             "author must NOT be p-tagged — that wakes them as a second agent; got {p_tag_targets:?}"
         );
         assert!(
