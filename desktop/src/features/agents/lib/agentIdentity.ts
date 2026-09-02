@@ -22,6 +22,12 @@ export function agentIdentityKey(candidate: AgentIdentityInput): string | null {
 export type AgentDisplayInput = AgentIdentityInput & {
   name?: string | null;
   personaId?: string | null;
+  /**
+   * Parent agent pubkey (hex) when this agent is a subagent spawned by
+   * another agent (SPEC-nested-subagents: tag `["parent", pubkey]`). Derived
+   * client-side; drives nesting, not identity.
+   */
+  parentPubkey?: string | null;
 };
 
 /**
@@ -43,7 +49,12 @@ export function agentDisplayGroupKey(agent: AgentDisplayInput): string {
   // render `persona:a|name:x|name:y`, so two different agents share one card
   // and one of them stops being openable.
   const foldedName = foldAgentDisplayName(agent.name);
-  return `persona:${personaId.length}:${personaId}|name:${foldedName.length}:${foldedName}`;
+  // Parent pubkey FIRST, persona second (SPEC-nested-subagents): a subagent
+  // always groups under its parent before persona/name semantics apply, so it
+  // can never be folded onto an unrelated persona card. Absent for top-level
+  // agents — same key as before this field existed, by construction.
+  const parentPubkey = agent.parentPubkey?.trim().toLowerCase() ?? "";
+  return `parent:${parentPubkey.length}:${parentPubkey}|persona:${personaId.length}:${personaId}|name:${foldedName.length}:${foldedName}`;
 }
 
 /**
