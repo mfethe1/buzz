@@ -1,5 +1,6 @@
 import * as React from "react";
 import { ListTodo } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import type { SearchHighlightNavigation } from "@/app/navigation/searchHighlightNavigation";
 import { getCachedSearchHitEvent } from "@/app/navigation/searchHitEventCache";
@@ -14,8 +15,16 @@ import {
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
 import { useProfileQuery } from "@/features/profile/hooks";
-import { useProjectsQuery } from "@/features/projects/hooks";
+import {
+  useProjectHomeForChannelQuery,
+  useProjectsQuery,
+} from "@/features/projects/hooks";
 import { findProjectHomeByChannelId } from "@/features/projects/lib/projectHomeChannel";
+import {
+  isProjectCollectionAuthoritative,
+  isProjectRelayValidated,
+  shouldUseScopedProjectHomeLookup,
+} from "@/features/projects/projectSnapshot";
 import { ProjectChannelHome } from "@/features/projects/ui/ProjectChannelHome";
 import { ChannelTaskList } from "@/features/tasks/ui/ChannelTaskList";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -115,6 +124,7 @@ export function ChannelRouteScreen({
   targetThreadRootId,
 }: ChannelRouteScreenProps) {
   const isHuddleTranscript = huddleWindowChannelId() !== null;
+  const queryClient = useQueryClient();
   const { closeForumPost, goForumPost } = useAppNavigation();
   const channelsQuery = useChannelsQuery();
   const projectsQuery = useProjectsQuery();
@@ -139,10 +149,22 @@ export function ChannelRouteScreen({
     memberChannel ??
     openDirectoryQuery.data?.find((channel) => channel.id === channelId) ??
     null;
-  const projectHome = findProjectHomeByChannelId(
+  const enumeratedProjectHome = findProjectHomeByChannelId(
     channelId,
     projectsQuery.data ?? [],
   );
+  const projectCollectionIsAuthoritative =
+    isProjectCollectionAuthoritative(queryClient);
+  const projectHomeLookupQuery = useProjectHomeForChannelQuery(
+    channelId,
+    shouldUseScopedProjectHomeLookup({
+      collectionIsAuthoritative: projectCollectionIsAuthoritative,
+      hasEnumeratedProjectHome: Boolean(enumeratedProjectHome),
+      isHuddleTranscript,
+    }),
+  );
+  const projectHome =
+    enumeratedProjectHome ?? projectHomeLookupQuery.data ?? null;
   const [targetMessageEvents, setTargetMessageEvents] = React.useState<
     RelayEvent[]
   >(() => {
@@ -282,6 +304,7 @@ export function ChannelRouteScreen({
   if (projectHome && !isHuddleTranscript) {
     return (
       <ProjectChannelHome
+        allowRepositoryHealing={isProjectRelayValidated(projectHome)}
         autoSendDraftKey={autoSendDraftKey}
         project={projectHome}
         projects={projectsQuery.data ?? [projectHome]}

@@ -22,6 +22,11 @@ pub struct AgentDefinition {
     pub id: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
+    /// Optional short, PUBLIC description (max 280 chars), shown on the
+    /// agent's card/profile and carried on the public kind:30175 persona
+    /// event. EXCLUDED from `persona_content_hash` (no restart badge).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub system_prompt: String,
     /// Preferred ACP runtime ID (e.g., 'goose', 'claude', 'codex'). Determines which agent binary
     /// Buzz spawns. When deploying from this persona, this runtime is pre-selected in the UI.
@@ -76,6 +81,12 @@ pub struct AgentDefinition {
     /// a new local id, so the only link back to the publication is this pair.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_source: Option<CatalogSource>,
+    /// Provenance of a persona copied out of another owner's shared TEAM
+    /// publication, as opposed to their persona catalog. Distinct from
+    /// `catalog_source` because a 30178 member is not addressable as a 30175
+    /// coordinate — see [`TeamMemberCatalogSource`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_catalog_source: Option<TeamMemberCatalogSource>,
     /// Harness-level configuration passed to the agent subprocess as environment variables.
     /// Opaque to Buzz — keys and values are runtime-specific.
     ///
@@ -145,6 +156,7 @@ impl AgentDefinition {
             respond_to: RespondTo::default(),
             respond_to_allowlist: Vec::new(),
             display_name: Some(self.display_name),
+            description: self.description,
             slug: Some(self.id),
             runtime: self.runtime,
             name_pool: self.name_pool,
@@ -155,6 +167,7 @@ impl AgentDefinition {
             source_team: self.source_team,
             source_team_persona_slug: self.source_team_persona_slug,
             catalog_source: self.catalog_source,
+            team_catalog_source: self.team_catalog_source,
             definition_respond_to: self.respond_to,
             definition_respond_to_allowlist: self.respond_to_allowlist,
             definition_parallelism: self.parallelism,
@@ -178,6 +191,7 @@ impl ManagedAgentRecord {
                 .clone()
                 .unwrap_or_else(|| self.name.clone()),
             avatar_url: self.avatar_url.clone(),
+            description: self.description.clone(),
             system_prompt: self.system_prompt.clone().unwrap_or_default(),
             runtime: self.runtime.clone(),
             model: self.model.clone(),
@@ -190,6 +204,7 @@ impl ManagedAgentRecord {
             source_team: self.source_team.clone(),
             source_team_persona_slug: self.source_team_persona_slug.clone(),
             catalog_source: self.catalog_source.clone(),
+            team_catalog_source: self.team_catalog_source.clone(),
             env_vars: self.env_vars.clone(),
             respond_to: self.definition_respond_to.clone(),
             respond_to_allowlist: self.definition_respond_to_allowlist.clone(),
@@ -379,6 +394,13 @@ pub struct ManagedAgentRecord {
     /// from `AgentDefinition.display_name` (unified agent model, Phase 1A).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Optional short, PUBLIC agent description. Keyless definition records
+    /// carry the authored value; persona-linked instances leave it absent and
+    /// resolve through their definition so a second copy cannot drift.
+    /// Display metadata only (never spawn-relevant, never part of the persona
+    /// content hash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Stable definition slug — the former `AgentDefinition.id`. Key-less
     /// records (definitions not yet instantiated) publish kind:30175 at
     /// `d_tag = slug`, preserving the pre-merge event coordinates. `None` for
@@ -432,6 +454,10 @@ pub struct ManagedAgentRecord {
     /// definition was copied from, when it came from another owner's catalog.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_source: Option<CatalogSource>,
+    /// Absorbed from `AgentDefinition.team_catalog_source` — the team
+    /// publication and member this definition was copied out of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_catalog_source: Option<TeamMemberCatalogSource>,
     /// NIP-AP definition-level behavioral defaults, absorbed from
     /// `AgentDefinition` in WIRE shape (kebab-case string / optional u32),
     /// distinct from the instance-side `respond_to`/`respond_to_allowlist`/
@@ -461,8 +487,14 @@ pub struct ManagedAgentRecord {
     /// deserialize as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_mesh: Option<RelayMeshConfig>,
-    /// Canonical Claude Code effort level. Injected as `BUZZ_ACP_EFFORT_LEVEL` at spawn
-    /// so the harness applies it via `session/set_config_option` at session creation.
+    /// Canonical, harness-agnostic startup effort level. This is the single
+    /// persisted effort authority: at spawn the launch projection
+    /// (`config_bridge::effort`) resolves the effective value over this column
+    /// and all env tiers, then emits it under the destination runtime's native
+    /// key — `GOOSE_THINKING_EFFORT` for Goose, `BUZZ_AGENT_THINKING_EFFORT` for
+    /// buzz-agent, or the `BUZZ_ACP_EFFORT_LEVEL` startup sentinel for
+    /// Claude/Codex and keyless/unknown adapters. Preserved across runtime
+    /// switches (invalid values skip-as-absent at projection time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_level: Option<String>,
 }
@@ -591,6 +623,162 @@ pub struct ManagedAgentLogResponse {
     pub log_path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AcpAvailabilityStatus {
+    Available,
+    AdapterMissing,
+    /// Adapter binary is present but unsupported — either the deprecated
+    /// package or a version below the supported floor. Reinstall required.
+    AdapterOutdated,
+    CliMissing,
+    NotInstalled,
+}
+
+/// Authentication/login status for a CLI-based ACP runtime. Serializes as a tagged union
+/// `{ status: "...", diagnostic?: "..." }` so the TypeScript side can exhaustively switch on `status`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum AuthStatus {
+    /// The CLI reported a successful login.
+    LoggedIn,
+    /// The CLI exited non-zero without a config-parse signal.
+    LoggedOut,
+    /// The CLI exited non-zero and its stderr contains a config-parse error.
+    ConfigInvalid {
+        /// Trimmed excerpt of the stderr message.
+        diagnostic: String,
+    },
+    /// This runtime does not have a login step (e.g. goose, buzz-agent).
+    NotApplicable,
+    /// Probe was not attempted (runtime unavailable or probe timed out).
+    Unknown,
+}
+
+/// Origin of an ACP runtime catalog entry. Serializes as a lowercase string so the TypeScript consumer can switch on it without numeric comparisons.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessSource {
+    /// Compiled into the app — one of the four first-class runtimes.
+    Builtin,
+    /// Static preset entry with bundled logo, PATH-probed, not editable/deletable.
+    Preset,
+    /// Loaded at runtime from the user's `custom_harnesses/` directory.
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AcpRuntimeCatalogEntry {
+    pub id: String,
+    pub label: String,
+    pub avatar_url: String,
+    pub availability: AcpAvailabilityStatus,
+    pub command: Option<String>,
+    pub binary_path: Option<String>,
+    pub default_args: Vec<String>,
+    pub mcp_command: Option<String>,
+    /// Environment variable used to apply the initial model, when supported.
+    pub model_env_var: Option<String>,
+    /// Environment variable used to apply the selected LLM provider, when supported.
+    pub provider_env_var: Option<String>,
+    /// Environment variable used to apply thinking effort, when supported.
+    pub thinking_env_var: Option<String>,
+    /// Canonical accepted effort values for this runtime, in display order.
+    /// Serialized from `KnownAcpRuntime::effort_normalization.canonical` for
+    /// runtimes with a static finite vocabulary (e.g. Goose). `None` for
+    /// runtimes with no canonicalization contract (buzz-agent uses a
+    /// provider/model catalog; Claude/Codex/unknown runtimes accept any string).
+    ///
+    /// The renderer uses this to drive choices and validation, replacing the
+    /// TS-side `GOOSE_EFFORT_CANONICAL_VALUES` duplicate. When non-null, the
+    /// `harnessNative` effort field uses this list exclusively — `off` and all
+    /// other valid Goose values are always present when this is Goose, so
+    /// `useEffortAutoClear` never incorrectly deletes a valid saved value.
+    pub effort_canonical_values: Option<Vec<String>>,
+    pub max_tokens_env_var: Option<String>,
+    pub context_limit_env_var: Option<String>,
+    pub max_rounds_env_var: Option<String>,
+    pub install_hint: String,
+    pub install_instructions_url: String,
+    /// true when at least one automated install step is available
+    pub can_auto_install: bool,
+    /// true when this runtime depends on a separately installed vendor CLI.
+    pub requires_external_cli: bool,
+    pub underlying_cli_path: Option<String>,
+    /// true when an npm adapter step is pending but Node.js / npm is absent.
+    /// The UI hides the Install button and shows a Node.js install callout.
+    pub node_required: bool,
+    /// Login/authentication status for CLI-based runtimes.
+    pub auth_status: AuthStatus,
+    /// Hint for completing authentication, shown when `auth_status` is not `logged_in`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_hint: Option<String>,
+    /// Whether this entry came from the compiled-in catalog or a user-supplied
+    /// JSON file in `custom_harnesses/`. The UI uses this to decide editability.
+    pub source: HarnessSource,
+    /// Definition-level env vars for `source: custom` entries; populated from
+    /// `HarnessDefinition.env` so saves don't silently erase existing vars.
+    /// Absent for builtin/preset entries. Skipped when empty in serialization.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub definition_env: BTreeMap<String, String>,
+    /// Spawn-time parallelism cap; absent for uncapped harnesses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_parallelism: Option<u32>,
+}
+
+/// Result of a single install step (CLI or adapter).
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallStepResult {
+    pub step: String,
+    pub command: String,
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    /// Actionable guidance shown in the UI when this step failed due to a
+    /// recognized condition (e.g. EACCES writing Buzz's private npm prefix).
+    /// `None` when the step succeeded or no pattern matched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+/// Aggregate result of installing a runtime (may include CLI + adapter steps).
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallRuntimeResult {
+    pub success: bool,
+    pub steps: Vec<InstallStepResult>,
+    /// Number of local agents successfully stopped and restarted after a
+    /// successful install. Mirrors `GlobalAgentConfigSaveResult.restarted_count`.
+    pub restarted_count: u32,
+    /// Number of agents whose stop succeeded but respawn failed.
+    /// Mirrors `GlobalAgentConfigSaveResult.failed_restart_count`.
+    pub failed_restart_count: u32,
+    /// Install log file for this run, when one was written. The UI surfaces it
+    /// on failure so a user can read the full retry history instead of only the
+    /// last step's truncated output. `None` when no log could be opened.
+    pub log_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CommandAvailabilityInfo {
+    pub command: String,
+    pub resolved_path: Option<String>,
+    pub available: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverManagedAgentPrereqsRequest {
+    pub acp_command: Option<String>,
+    pub mcp_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ManagedAgentPrereqsInfo {
+    pub acp: CommandAvailabilityInfo,
+    pub mcp: CommandAvailabilityInfo,
+}
+
 #[derive(Debug, Serialize)]
 pub struct UpdateManagedAgentResponse {
     pub agent: ManagedAgentSummary,
@@ -621,54 +809,6 @@ pub struct AgentModelInfo {
     pub id: String,
     pub name: Option<String>,
     pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TeamRecord {
-    pub id: String,
-    pub name: String,
-    pub description: Option<String>,
-    /// Runtime-layered instructions shared by every member deployment.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
-    pub persona_ids: Vec<String>,
-    #[serde(default)]
-    pub is_builtin: bool,
-    /// Absolute path to the team's backing directory (if directory-backed).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_dir: Option<PathBuf>,
-    /// Whether `source_dir` is a symlink to an external directory.
-    #[serde(default)]
-    pub is_symlink: bool,
-    /// Resolved symlink target path (for display). Only set when `is_symlink` is true.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub symlink_target: Option<String>,
-    /// Version from the team's `plugin.json` manifest.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateTeamRequest {
-    pub name: String,
-    pub description: Option<String>,
-    pub instructions: Option<String>,
-    #[serde(default)]
-    pub persona_ids: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateTeamRequest {
-    pub id: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub instructions: Option<String>,
-    #[serde(default)]
-    pub persona_ids: Vec<String>,
 }
 
 pub const DEFAULT_ACP_COMMAND: &str = "buzz-acp";
@@ -859,6 +999,10 @@ mod relay_mesh;
 pub use relay_mesh::RelayMeshConfig;
 mod requests;
 pub use requests::*;
+mod team_catalog_source;
+pub use team_catalog_source::{TeamCatalogSource, TeamMemberCatalogSource};
+mod teams;
+pub use teams::{CreateTeamRequest, TeamRecord, UpdateTeamRequest};
 
 #[cfg(test)]
 mod tests;

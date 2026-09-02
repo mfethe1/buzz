@@ -124,7 +124,8 @@ run_unit_tests() {
   # buzz-acp harness unit tests: in-process, fixtures spawn a local POSIX shell
   # as a fake agent (no relay, no database). Mirrors the nextest path in
   # `just test-unit` — the two lists must stay in step.
-  run_test_step "buzz-acp unit tests" \
+# ACP author-gate and queue tests are pure unit tests. Keep this fallback in
+  # step with `just test-unit`; ignored lifecycle tests run elsewhere.  run_test_step "buzz-acp unit tests" \
     cargo test -p buzz-acp --lib -- --nocapture
 }
 

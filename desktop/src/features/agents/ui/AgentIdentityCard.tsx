@@ -11,7 +11,12 @@ type AgentIdentityCardProps = {
   avatarUrl?: string | null;
   dataTestId: string;
   label: string;
-  modelLabel?: string | null;
+  /**
+   * Second line under the agent name: the effective description when one
+   * resolves (owner-authored — see `lib/agentDescription.ts`),
+   * otherwise the model label. Callers compose the fallback.
+   */
+  subtitle?: string | null;
   onClick: () => void;
   /** Optional badge rendered below the label (e.g. "Restart required"). */
   statusBadge?: ReactNode;
@@ -26,7 +31,7 @@ export function AgentIdentityCard({
   avatarUrl,
   dataTestId,
   label,
-  modelLabel,
+  subtitle,
   onClick,
   statusBadge,
   subtitle,
@@ -56,6 +61,7 @@ export function AgentIdentityCard({
                 className="h-full w-full border-[3px] border-background bg-muted shadow-none"
                 iconClassName="h-8 w-8"
                 label={label}
+                shape="squircle"
               />
             ) : (
               <IdentityInitialsAvatar
@@ -83,6 +89,8 @@ export function AgentIdentityCard({
         {modelLabel ? (
           <span className="min-w-0 truncate text-xs font-normal text-secondary-foreground/75">
             {modelLabel}
+          <span className="line-clamp-2 min-w-0 text-xs font-normal text-muted-foreground">
+            {subtitle}
           </span>
         ) : null}
         {/* pointer-events-auto: the overlay button above has pointer-events-none

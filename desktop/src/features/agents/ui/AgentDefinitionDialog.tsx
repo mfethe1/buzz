@@ -10,6 +10,7 @@ import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
 import { AgentCreationPreview } from "./AgentCreationPreview";
+import { AgentIdentityFields } from "./AgentDescriptionField";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
@@ -143,6 +144,7 @@ export function AgentDefinitionDialog({
 }: AgentDefinitionDialogProps) {
   const runtimesLoading = runtimeCatalogStatus === "loading";
   const [displayName, setDisplayName] = React.useState("");
+  const [descriptionDraft, setDescriptionDraft] = React.useState("");
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [avatarUrl, setAvatarUrl] = React.useState("");
@@ -216,6 +218,7 @@ export function AgentDefinitionDialog({
     }
 
     setDisplayName(initialValues.displayName);
+    setDescriptionDraft(initialValues.description ?? "");
     setAvatarUrl(initialValues.avatarUrl ?? "");
     setSystemPrompt(initialValues.systemPrompt);
     setRuntime(initialValues.runtime ?? "");
@@ -368,6 +371,8 @@ export function AgentDefinitionDialog({
           : undefined;
     const baseInput = {
       displayName: displayName.trim(),
+      // Empty string → null happens in the API wrapper (normalizeDescription).
+      description: descriptionDraft,
       avatarUrl: avatarUrl.trim() || undefined,
       systemPrompt: systemPrompt,
       runtime: runtimeForSubmit,
@@ -773,33 +778,13 @@ export function AgentDefinitionDialog({
       />
 
       <div className="space-y-5">
-        <div className="space-y-1.5">
-          <label
-            className="text-sm font-medium text-foreground"
-            htmlFor="persona-display-name"
-          >
-            Agent name
-          </label>
-          <div
-            className={cn(
-              "flex min-h-11 items-center px-3",
-              PERSONA_FIELD_SHELL_CLASS,
-            )}
-          >
-            <Input
-              autoCorrect="off"
-              className={cn(
-                "h-8 px-0 py-0 leading-6",
-                PERSONA_FIELD_CONTROL_CLASS,
-              )}
-              disabled={isPending}
-              id="persona-display-name"
-              onChange={(event) => setDisplayName(event.target.value)}
-              placeholder="Fizz"
-              value={displayName}
-            />
-          </div>
-        </div>
+        <AgentIdentityFields
+          description={descriptionDraft}
+          disabled={isPending}
+          displayName={displayName}
+          onDescriptionChange={setDescriptionDraft}
+          onDisplayNameChange={setDisplayName}
+        />
 
         <div className="space-y-1.5">
           <label
@@ -837,6 +822,7 @@ export function AgentDefinitionDialog({
         >
           {aiConfigurationMode === "custom" ? (
             <AgentHarnessField
+              catalogStatus={runtimeCatalogStatus}
               disabled={isPending || runtimesLoading}
               onValueChange={handleRuntimeDropdownChange}
               options={runtimeDropdownOptions}
@@ -845,7 +831,6 @@ export function AgentDefinitionDialog({
               warning={runtimeWarning}
             />
           ) : null}
-
           {llmProviderFieldVisible && aiConfigurationMode === "custom" ? (
             <div className="space-y-1.5">
               <RequiredFieldLabel

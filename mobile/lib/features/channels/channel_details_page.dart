@@ -253,7 +253,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
         Navigator.canPop(context) &&
         Theme.of(context).platform == TargetPlatform.iOS;
     return FrostedScaffold(
-      backgroundColor: context.colors.surface,
+      useUtilitySurfaceTheme: true,
       appBar: FrostedAppBar(
         centerTitle: true,
         leading: usesNativeIosGlassBackButton
@@ -672,6 +672,7 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
         radius: 20,
         backgroundColor: context.colors.primaryContainer,
         fallback: Text(label.isEmpty ? '?' : label[0].toUpperCase()),
+        isAgent: member.isBot,
       ),
       title: Text.rich(
         TextSpan(

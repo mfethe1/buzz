@@ -86,12 +86,14 @@ function ProjectHomeHeaderToggle({
 }
 
 export function ProjectChannelHome({
+  allowRepositoryHealing,
   autoSendDraftKey,
   project,
   projects,
   targetMessageEvents = EMPTY_TARGET_MESSAGE_EVENTS,
   targetMessageId,
 }: {
+  allowRepositoryHealing: boolean;
   autoSendDraftKey?: string | null;
   project: Project;
   projects: Project[];
@@ -202,7 +204,11 @@ export function ProjectChannelHome({
     },
     [],
   );
-  useHealProjectHomeRepositories(project, identityQuery.data?.pubkey);
+  useHealProjectHomeRepositories(
+    project,
+    allowRepositoryHealing,
+    identityQuery.data?.pubkey,
+  );
   const handleOpenCommit = React.useCallback(
     (commitHash: string) => {
       if (!workspaceRepository) return;
@@ -269,6 +275,7 @@ export function ProjectChannelHome({
         )}
         data-project-context-detached={summaryVisible ? "true" : undefined}
         data-project-detail-screen
+        data-repository-healing-enabled={allowRepositoryHealing}
         data-testid="project-channel-home"
       >
         <div

@@ -10,81 +10,55 @@
 //! - Uses `sqlx::query()` (runtime) not `sqlx::query!()` (compile-time).
 //!
 //! ## Runtime and store ownership
-//! This crate intentionally keeps database runtime and Buzz domain persistence
-//! together while maintaining an internal boundary between them:
+//! Database runtime infrastructure and domain persistence are physically
+//! separated behind this crate-root compatibility facade:
 //!
-//! - Runtime concerns own pool construction, writer/replica routing, transaction
-//!   creation, session invariants, metrics, and health support.
+//! - Runtime concerns own pool construction, writer/replica routing,
+//!   transactions, sessions, metrics, health support, and migrations.
 //! - Store concerns own domain-specific SQL, row mapping, locking, mutation
 //!   rules, indexes, and focused persistence tests.
 //!
-//! Transaction-required store operations accept [`sqlx::Transaction`] so their
-//! composition requirement is visible in the type. Private connection helpers
-//! are reserved for SQL primitives that are valid on any same-session
-//! connection. New domains should prove this boundary incrementally instead of
-//! exposing raw pools or introducing broad store traits.
+//! Existing crate-root modules, records, and [`Db`] methods remain the public
+//! API. The internal `runtime` and `store` namespaces are not public APIs.
 
-/// Explicit deployment-global admin report reads.
-pub mod admin_moderation;
-/// API token storage and lookup.
-pub mod api_token;
-/// Relay-scoped archived identity persistence (NIP-IA).
-pub mod archived_identities;
-/// Channel and membership persistence.
-pub mod channel;
-/// Community lifecycle and host-map persistence.
-pub mod community;
-/// Durable whole-community deletion lifecycle and PostgreSQL adapter.
-pub mod deletion;
-/// Direct message channel persistence.
-pub mod dm;
+mod runtime;
+mod store;
+
 /// Database error types.
 pub mod error;
-/// Event storage and retrieval.
-pub mod event;
-/// Home feed queries.
-pub mod feed;
-/// Git repository name registry (NIP-34 kind:30617).
-pub mod git_repo;
-/// Embedded database migrations.
-pub mod migration;
-/// Community moderation: reports, bans/timeouts, audit actions.
-pub mod moderation;
-mod observability;
-/// Monthly table partition management.
-pub mod partition;
-/// Buzz product-feedback sidecar persistence.
-pub mod product_feedback;
-/// Community-scoped push lease and durable wake-outbox persistence.
-pub mod push;
-/// Reaction persistence.
-pub mod reaction;
-/// Use-limited relay invite persistence (v2 opaque tokens).
-pub mod relay_invite;
-/// Relay-level membership persistence (NIP-43).
-pub mod relay_members;
-/// Replaceable-event persistence and coordinate locking.
-pub mod replaceable;
-/// Replica freshness fence for keyset-cursor read routing.
-pub mod replica_fence;
-/// Task and task-event persistence.
+/// Task and task-event persistence (fork: PR #6425 pending upstream).
 pub mod task;
-/// Thread metadata persistence.
-pub mod thread;
-/// Per-community usage rollup queries for Prometheus gauges.
-pub mod usage;
-/// User profile persistence.
-pub mod user;
-/// Workflow, run, and approval persistence.
-pub mod workflow;
 
+#[cfg(test)]
+mod test_support;
+
+pub use runtime::{
+    insert_mentions, migration, replica_fence, Db, DbConfig, DbPoolStats, DbReadinessOutcome,
+    ReadSession,
+};
+pub(crate) use runtime::{
+    insert_mentions_in_transaction, observability, route_proof, ReadSessionInner, RouteDecision,
+    RoutePredicate,
+};
+pub use store::{
+    admin_moderation, allowlist, api_token, archived_identities, channel, channel_members,
+    community, deletion, dm, event, feed, git_repo, moderation, partition, product_feedback, push,
+    reaction, relay_admin_actions, relay_invite, relay_members, relay_operators, reminder,
+    replaceable, thread, usage, user, workflow,
+};
+
+pub use allowlist::AllowlistEntry;
+pub use api_token::{ApiTokenRecord, TokenSummary};
 pub use community::{
     ArchivedCommunityRecord, CommunityRecord, CreateCommunityWithOwnerResult,
     CreatedCommunityRecord, EnsuredCommunityRecord, OwnedCommunityRecord,
     UnarchivedCommunityRecord,
 };
 pub use error::{DbError, Result};
-pub use event::{EventQuery, ReactionEventInsertOutcome, DEFAULT_MAX_PAGE_LIMIT};
+pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
+pub use reaction::ReactionEventInsertOutcome;
+pub use reminder::DueReminder;
+pub use usage::UsageMetricsLeader;
 
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
@@ -7722,3 +7696,4 @@ mod tests {
         drop_scratch_db(&admin, pool, &name).await;
     }
 }
+use buzz_core::CommunityId;

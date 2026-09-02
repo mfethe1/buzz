@@ -419,6 +419,7 @@ export function AppSidebar({
             accessibleLabel: participant.label,
             avatarUrl: participant.avatarUrl,
             channelId,
+            isAgent: participant.isAgent,
             label: dmChannelLabels[channelId] ?? participant.label,
           },
         ];
