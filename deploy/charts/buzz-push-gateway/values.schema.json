@@ -30,18 +30,14 @@
           "$ref": "#/$defs/enabledProfile"
         }
       }
-||||||| be8d7756d
-    "appAttestAppId": {
-      "type": "string",
-      "minLength": 1
-},
+    },
     "apnsKey": false,
     "podAnnotations": {
       "type": "object",
       "additionalProperties": {
         "type": "string"
-      }    },
-    "apnsKey": false,
+      }
+    },
     "httpRoute": {
       "type": "object",
       "required": [

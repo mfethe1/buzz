@@ -82,7 +82,7 @@ export function AgentIdentityCard({
           {label}
         </span>
         {subtitle ? (
-          <span className="min-w-0 truncate text-2xs font-normal text-muted-foreground">
+          <span className="line-clamp-2 min-w-0 text-xs font-normal text-muted-foreground">
             {subtitle}
           </span>
         ) : null}

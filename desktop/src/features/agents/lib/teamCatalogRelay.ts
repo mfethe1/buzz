@@ -1,4 +1,5 @@
 import { invokeTauri } from "@/shared/api/tauri";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { AgentTeam } from "@/shared/api/types";
 
 /**
@@ -97,7 +98,9 @@ export function catalogTeamsFromPublications(
   localTeams: readonly AgentTeam[],
   currentPubkey: string | null | undefined,
 ): CatalogTeam[] {
-  const normalizedCurrentPubkey = currentPubkey?.toLowerCase() ?? null;
+  const normalizedCurrentPubkey = currentPubkey
+    ? normalizePubkey(currentPubkey)
+    : null;
 
   return publications
     .map((publication) => {

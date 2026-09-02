@@ -243,7 +243,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 function AgentPersonaCard({
   actions,
   agent,
-  defaultModel,
   label,
   persona,
   restartingAgentPubkey,
@@ -280,12 +279,6 @@ function AgentPersonaCard({
   onStartPersona: (persona: AgentPersona) => void;
 }) {
   const title = label;
-  const modelLabel = resolveAgentCardModelLabel({
-    agent,
-    personaModel: persona.model,
-    provider: persona.provider,
-    defaultModel,
-  });
   const isActive = agent ? isManagedAgentActive(agent) : false;
   const profileQuery = useUserProfileQuery(agent?.pubkey);
   const avatarUrl = agent
@@ -347,6 +340,7 @@ function AgentPersonaCard({
       dataTestId={testId}
       label={title}
       modelLabel={modelLabel}
+      subtitle={runtimeSubtitle || null}
       onClick={() => {
         // The card's main click always opens the PERSONA target, never an
         // explicit pubkey. A pubkey target is durable in the panel, so a pick
@@ -367,7 +361,6 @@ function AgentPersonaCard({
           </Badge>
         ) : null
       }
-      subtitle={runtimeSubtitle || null}
     />
   );
 }
