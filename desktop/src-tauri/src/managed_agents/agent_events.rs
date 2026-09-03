@@ -31,6 +31,7 @@ use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 
+use super::types::MachineHome;
 use super::{ManagedAgentRecord, RespondTo};
 
 /// The JSON body stored in a managed-agent event's content field.
@@ -78,6 +79,13 @@ pub struct ManagedAgentEventContent {
     /// equivalent to absent for consumers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+    /// AGENT-HOMES-001: machine-home designation carried on the 30177
+    /// record. Absent on events published before this field shipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_home: Option<MachineHome>,
+    /// True when this agent is its machine's home agent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub home: bool,
 }
 
 /// Project a `ManagedAgentRecord` onto the content fields published in
@@ -151,6 +159,8 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
         // publishers and new readers interoperate before any UI can author
         // capability strings. Publishing real values is v2 scope.
         capabilities: Vec::new(),
+        machine_home: record.machine_home.clone(),
+        home: record.home,
     }
 }
 
@@ -274,10 +284,22 @@ mod tests {
             definition_parallelism: None,
             relay_mesh: None,
             effort_level: None,
+            machine_home: None,
+            home: false,
         }
     }
 
-    #[test]
+    
+    fn fixture_record() -> ManagedAgentRecord {
+        {
+            let mut sample = sample_agent();
+            sample.pubkey = "agent".to_string();
+            sample
+        }
+    }
+
+    
+#[test]
     fn build_agent_event_produces_correct_kind() {
         let builder = build_agent_event(&sample_agent()).unwrap();
         let keys = nostr::Keys::generate();
@@ -654,5 +676,29 @@ mod tests {
             .tags
             .iter()
             .all(|t| t.as_slice().first().map(String::as_str) != Some("e")));
+    }
+
+    #[test]
+    fn machine_home_round_trips_through_30177_content() {
+        let mut record = fixture_record();
+        record.machine_home = Some(MachineHome {
+            id: "device-winnie-01".to_string(),
+            label: "winnie-desktop".to_string(),
+            runtime: "hermes".to_string(),
+        });
+        record.home = true;
+        let content = agent_event_content(&record);
+        assert_eq!(content.machine_home.as_ref().unwrap().id, "device-winnie-01");
+        assert!(content.home);
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("\"machine_home\""));
+        assert!(json.contains("\"home\":true"));
+        // absent fields stay absent (old publishers interop)
+        let mut legacy = fixture_record();
+        legacy.machine_home = None;
+        legacy.home = false;
+        let legacy_json = serde_json::to_string(&agent_event_content(&legacy)).unwrap();
+        assert!(!legacy_json.contains("\"machine_home\""));
+        assert!(!legacy_json.contains("\"home\""));
     }
 }

@@ -173,6 +173,8 @@ impl AgentDefinition {
             definition_parallelism: self.parallelism,
             relay_mesh: None,
             effort_level: None,
+            machine_home: None,
+            home: false,
         }
     }
 }
@@ -241,6 +243,12 @@ pub struct RelayAgentInfo {
     /// whose author matches the agent's signed NIP-OA owner.
     #[serde(default)]
     pub device_label: Option<String>,
+    /// AGENT-HOMES-001: machine-home designation from the 30177 record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_home: Option<MachineHome>,
+    /// True when this agent IS its machine's home agent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub home: bool,
     /// LLM the agent runs, as published on its kind:30177 record.
     /// Owner-attested, never verified. `None` on definition-linked instances
     /// (the model lives on their kind:30175 definition), on legacy kind:10100
@@ -248,6 +256,18 @@ pub struct RelayAgentInfo {
     #[serde(default)]
     pub model: Option<String>,
 }
+
+/// Machine-home identity for an agent record (AGENT-HOMES-001).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MachineHome {
+    /// Opaque device id (see `device_identity`), stable per machine.
+    pub id: String,
+    /// Human label, e.g. "winnie-desktop".
+    pub label: String,
+    /// Harness runtime family, e.g. "hermes" | "openclaw".
+    pub runtime: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedAgentRecord {
     pub pubkey: String,
@@ -497,6 +517,13 @@ pub struct ManagedAgentRecord {
     /// switches (invalid values skip-as-absent at projection time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_level: Option<String>,
+    /// AGENT-HOMES-001: machine-home designation. `Some` on exactly one
+    /// agent per `machine_home.id` — enforced at create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_home: Option<MachineHome>,
+    /// True when this agent is its machine's home agent.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub home: bool,
 }
 
 #[derive(Debug)]
@@ -607,6 +634,10 @@ pub struct ManagedAgentSummary {
     pub log_path: String,
     pub respond_to: RespondTo,
     pub respond_to_allowlist: Vec<String>,
+    /// AGENT-HOMES-001: machine-home designation, if this agent is a home.
+    pub machine_home: Option<MachineHome>,
+    /// True when this agent IS its machine's home agent.
+    pub home: bool,
 }
 
 #[derive(Debug, Serialize)]

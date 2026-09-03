@@ -264,6 +264,8 @@ mod tests {
                 device_id: None,
                 device_label: None,
                 model: None,
+                machine_home: None,
+                home: false,
             },
             RelayAgentInfo {
                 pubkey: "c".repeat(64),
@@ -279,6 +281,8 @@ mod tests {
                 device_id: None,
                 device_label: None,
                 model: None,
+                machine_home: None,
+                home: false,
             },
         ];
 
@@ -308,6 +312,8 @@ mod tests {
             device_id: None,
             device_label: None,
             model: None,
+            machine_home: None,
+            home: false,
         }];
 
         retain_agents_allowed_by_build(&mut agents, false);
