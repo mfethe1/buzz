@@ -1,5 +1,6 @@
 use super::{
     built_in_persona_records, ensure_persona_ids_are_active, ensure_persona_is_active,
+    FIZZ_SYSTEM_PROMPT, HONEY_SYSTEM_PROMPT, POLLEN_SYSTEM_PROMPT,
     merge_personas, migrate_retired_personas, validate_persona_activation_change,
     validate_persona_deletion, BUILT_IN_PERSONAS, RETIRED_PERSONAS,
 };
@@ -35,36 +36,21 @@ fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
 
 #[test]
 fn merge_personas_adds_missing_built_ins() {
-    let (records, changed) = merge_personas(Vec::new(), "2026-03-19T00:00:00Z");
-
-    assert!(changed);
-    assert_eq!(records.len(), BUILT_IN_PERSONAS.len());
-    assert!(records.iter().all(|record| record.is_builtin));
-    assert!(records
-        .iter()
-        .any(|record| record.id == "builtin:fizz" && record.runtime.is_none()));
-    let display_names: Vec<&str> = records
-        .iter()
-        .map(|record| record.display_name.as_str())
-        .collect();
-    assert_eq!(display_names, vec!["Fizz", "Honey", "Pollen"]);
-    let active_ids: Vec<&str> = records
-        .iter()
-        .filter(|record| record.is_active)
-        .map(|record| record.id.as_str())
-        .collect();
-    assert_eq!(
-        active_ids,
-        vec!["builtin:fizz", "builtin:honey", "builtin:bumble"]
-    );
+    // AGENT-HOMES-001: BUILT_IN_PERSONAS is now empty — a fresh store must
+    // stay empty (no records injected) and be a no-op (changed == false).
+    let (records, changed) = merge_personas(Vec::new(), "2026-09-03T00:00:00Z");
+    assert!(records.is_empty());
+    assert!(!changed, "empty built-ins must not mark store changed");
 }
 
 #[test]
 fn merge_personas_preserves_custom_records() {
     let custom = custom_persona("custom:test", "Custom");
-    let (records, changed) = merge_personas(vec![custom.clone()], "2026-03-19T00:00:00Z");
+    // AGENT-HOMES-001: no built-ins are injected, so an all-custom store is
+    // an unchanged no-op beyond preserving the records.
+    let (records, changed) = merge_personas(vec![custom.clone()], "2026-09-03T00:00:00Z");
 
-    assert!(changed);
+    assert!(!changed, "custom-only store must not be marked changed");
     assert!(records.iter().any(|record| record.id == custom.id));
 }
 
@@ -80,16 +66,18 @@ fn merge_personas_preserves_builtin_edits() {
 
     let (records, changed) = merge_personas(vec![edited_builtin.clone()], "2026-03-19T00:00:00Z");
 
-    assert!(changed); // The remaining seeded built-ins are added.
+    // AGENT-HOMES-001: fizz is retired — the record survives with edits
+    // intact but gains the (retired) suffix and deactivation.
+    assert!(changed);
     let fizz = records
         .iter()
         .find(|record| record.id == "builtin:fizz")
-        .expect("fizz built-in should exist");
-    assert_eq!(fizz.display_name, edited_builtin.display_name);
+        .expect("fizz record must survive retirement");
     assert_eq!(fizz.system_prompt, edited_builtin.system_prompt);
     assert_eq!(fizz.name_pool, edited_builtin.name_pool);
     assert_eq!(fizz.env_vars, edited_builtin.env_vars);
-    assert_eq!(fizz.is_active, edited_builtin.is_active);
+    assert!(!fizz.is_active);
+    assert!(fizz.display_name.starts_with("My Fizz"));
 }
 
 #[test]
@@ -97,15 +85,18 @@ fn merge_personas_restores_builtin_marker_without_resetting_edits() {
     let mut edited_builtin = custom_persona("builtin:fizz", "My Fizz");
     edited_builtin.is_builtin = false;
 
-    let (records, changed) = merge_personas(vec![edited_builtin], "2026-03-19T00:00:00Z");
+    let (records, changed) = merge_personas(vec![edited_builtin], "2026-09-03T00:00:00Z");
 
+    // AGENT-HOMES-001: fizz is retired — marker is demoted, not restored,
+    // and the record is soft-deprecated rather than reset.
     assert!(changed);
     let fizz = records
         .iter()
         .find(|record| record.id == "builtin:fizz")
-        .expect("fizz built-in should exist");
-    assert!(fizz.is_builtin);
-    assert_eq!(fizz.display_name, "My Fizz");
+        .expect("fizz record must survive retirement");
+    assert!(!fizz.is_builtin);
+    assert!(!fizz.is_active);
+    assert_eq!(fizz.display_name, "My Fizz (retired)");
 }
 
 #[test]
@@ -119,12 +110,11 @@ fn merge_personas_adds_fizz_and_retires_old_builtins_for_existing_store() {
     let (records, changed) = merge_personas(legacy_builtins, "2026-03-19T00:00:00Z");
 
     assert!(changed);
-    let fizz = records
+    // AGENT-HOMES-001: fizz is retired, not injected — only the legacy
+    // solo record remains, soft-retired.
+    assert!(records
         .iter()
-        .find(|record| record.id == "builtin:fizz")
-        .expect("fizz built-in should exist");
-    assert!(fizz.is_builtin);
-    assert!(fizz.is_active);
+        .all(|record| record.id != "builtin:fizz"));
 
     let solo = records
         .iter()
@@ -383,17 +373,10 @@ fn migrate_is_idempotent() {
 
 #[test]
 fn fizz_builtin_has_no_pinned_runtime() {
-    // The Fizz built-in must not hard-pin a runtime so it inherits the
-    // bundled default (buzz-agent) rather than requiring goose on PATH.
-    let records = built_in_persona_records("2026-01-01T00:00:00Z");
-    let fizz = records
-        .iter()
-        .find(|r| r.id == "builtin:fizz")
-        .expect("builtin:fizz must exist");
-    assert_eq!(
-        fizz.runtime, None,
-        "Fizz built-in must not pin a runtime — it should inherit the default"
-    );
+    // AGENT-HOMES-001: fizz is retired; built_in_persona_records is empty,
+    // so nothing is injected and there is no runtime to pin.
+    let records = built_in_persona_records("2026-09-03T00:00:00Z");
+    assert!(records.is_empty(), "no built-in personas may be injected");
 }
 
 #[test]
@@ -411,4 +394,43 @@ fn fizz_builtin_resolves_to_buzz_agent() {
         "buzz-agent",
         "Fizz must resolve to buzz-agent specifically"
     );
+}
+
+#[test]
+fn merge_personas_fresh_store_has_no_active_builtins() {
+    // AGENT-HOMES-001: fresh store must yield zero is_builtin && is_active records.
+    let (records, _changed) = merge_personas(vec![], "2026-09-03T00:00:00Z");
+    let active_builtins = records
+        .iter()
+        .filter(|r| r.is_builtin && r.is_active)
+        .count();
+    assert_eq!(active_builtins, 0, "fresh store must have no active builtins");
+}
+
+#[test]
+fn merge_personas_retires_fizz_honey_pollen_for_existing_store() {
+    // AGENT-HOMES-001: migrated store with the three demo builtins → each gains
+    // "(retired)" suffix and is_active=false; records survive for dangling refs.
+    let mut fizz = custom_persona("builtin:fizz", "Fizz");
+    fizz.is_builtin = true;
+    fizz.is_active = true;
+    fizz.system_prompt = FIZZ_SYSTEM_PROMPT.to_string();
+    let mut honey = custom_persona("builtin:honey", "Honey");
+    honey.is_builtin = true;
+    honey.is_active = true;
+    honey.system_prompt = HONEY_SYSTEM_PROMPT.to_string();
+    let mut bumble = custom_persona("builtin:bumble", "Pollen");
+    bumble.is_builtin = true;
+    bumble.is_active = true;
+    bumble.system_prompt = POLLEN_SYSTEM_PROMPT.to_string();
+    let (records, changed) = merge_personas(vec![fizz, honey, bumble], "2026-09-03T00:00:00Z");
+    assert!(changed);
+    for id in ["builtin:fizz", "builtin:honey", "builtin:bumble"] {
+        let rec = records
+            .iter()
+            .find(|r| r.id == id)
+            .unwrap_or_else(|| panic!("record for {id} must survive retirement"));
+        assert!(rec.display_name.ends_with("(retired)"), "{id} display_name={}", rec.display_name);
+        assert!(!rec.is_active, "{id} must be inactive after retirement");
+    }
 }

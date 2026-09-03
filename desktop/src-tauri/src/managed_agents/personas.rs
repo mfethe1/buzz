@@ -35,19 +35,21 @@ pub(crate) const POLLEN_LEGACY_SYSTEM_PROMPT: &str = "You are Bumble, a curious 
 // product name everywhere it is consumed.
 const POLLEN_AVATAR: &str = BUMBLE_AVATAR;
 
-const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
+const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[];
+
+/// AGENT-HOMES-001: retired demo personas (fizz/honey/pollen) are no longer
+/// seeded, but legacy migration paths (avatar refresh, pollen migration) must
+/// still resolve their canonical metadata. Single source of truth.
+const RETIRED_PERSONA_METADATA: &[BuiltInPersona] = &[
     BuiltInPersona {
         id: "builtin:fizz",
         display_name: "Fizz",
         avatar_url: Some(FIZZ_AVATAR),
         system_prompt: FIZZ_SYSTEM_PROMPT,
-        name_pool: &[
-            "Nectar", "Comet", "Bramble", "Clover", "Amber", "Daisy", "Mason", "Thistle",
-            "Waxwing", "Hive", "Meadow", "Juniper", "Aster", "Sage", "Willow", "Orchard", "Buzz",
-        ],
+        name_pool: &["Fizz"],
         model: None,
         runtime: None,
-        default_active: true,
+        default_active: false,
     },
     BuiltInPersona {
         id: "builtin:honey",
@@ -57,7 +59,7 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
         name_pool: &["Honey"],
         model: None,
         runtime: None,
-        default_active: true,
+        default_active: false,
     },
     BuiltInPersona {
         id: POLLEN_PERSONA_ID,
@@ -67,18 +69,31 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
         name_pool: &[POLLEN_DISPLAY_NAME],
         model: None,
         runtime: None,
-        default_active: true,
+        default_active: false,
     },
 ];
 
 pub(crate) fn built_in_persona_avatar_url(id: &str) -> Option<&'static str> {
     BUILT_IN_PERSONAS
         .iter()
+        .chain(RETIRED_PERSONA_METADATA)
         .find(|persona| persona.id == id)
         .and_then(|persona| persona.avatar_url)
 }
 
 const RETIRED_PERSONAS: &[(&str, &str)] = &[
+    (
+        "builtin:fizz",
+        FIZZ_SYSTEM_PROMPT,
+    ),
+    (
+        "builtin:honey",
+        HONEY_SYSTEM_PROMPT,
+    ),
+    (
+        "builtin:bumble",
+        POLLEN_SYSTEM_PROMPT,
+    ),
     (
         "builtin:solo",
         "",
@@ -150,7 +165,43 @@ fn built_in_persona_records(now: &str) -> Vec<AgentDefinition> {
 pub(crate) fn built_in_persona_definition(id: &str, now: &str) -> Option<AgentDefinition> {
     built_in_persona_records(now)
         .into_iter()
+        .chain(
+            RETIRED_PERSONA_METADATA
+                .iter()
+                .map(|persona| retired_persona_record(persona, now)),
+        )
         .find(|persona| persona.id == id)
+}
+
+/// A retired persona as it existed when it was a live built-in. Migration
+/// paths and legacy-store simulations need the canonical *historical* shape
+/// (is_builtin: true); they never re-seed it into a live store —
+/// merge_personas no longer injects these ids.
+fn retired_persona_record(persona: &BuiltInPersona, now: &str) -> AgentDefinition {
+    AgentDefinition {
+        id: persona.id.to_string(),
+        display_name: persona.display_name.to_string(),
+        avatar_url: persona.avatar_url.map(|s| s.to_string()),
+        description: None,
+        system_prompt: persona.system_prompt.to_string(),
+        runtime: persona.runtime.map(|s| s.to_string()),
+        model: persona.model.map(|s| s.to_string()),
+        provider: None,
+        name_pool: persona.name_pool.iter().map(|s| s.to_string()).collect(),
+        is_builtin: true,
+        is_active: false,
+        created_at: now.to_string(),
+        updated_at: now.to_string(),
+        shared: false,
+        source_team: None,
+        source_team_persona_slug: None,
+        catalog_source: None,
+        team_catalog_source: None,
+        env_vars: Default::default(),
+        respond_to: None,
+        respond_to_allowlist: Vec::new(),
+        parallelism: None,
+    }
 }
 
 fn built_in_order(id: &str) -> Option<usize> {
