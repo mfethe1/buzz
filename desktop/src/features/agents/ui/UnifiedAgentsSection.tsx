@@ -20,7 +20,9 @@ import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
+import { SubagentTree } from "./SubagentTree";
 import { buildUnifiedGroups } from "./unifiedAgentGroups";
+import type { SubagentStatus } from "@/features/agents/lib/subagents";
 
 type UnifiedAgentsSectionProps = {
   defaultModel: string;
@@ -28,6 +30,12 @@ type UnifiedAgentsSectionProps = {
   actionNoticeMessage: string | null;
   agents: ManagedAgent[];
   agentsError: Error | null;
+  /**
+   * Live subagent records (SPEC-nested-subagents). Optional and empty by
+   * default until Workstream A streams parent-tagged lifecycle events; the
+   * tree renders nothing without records.
+   */
+  subagents?: readonly SubagentStatus[];
   isActionPending: boolean;
   isAgentsLoading: boolean;
   restartingAgentPubkey: string | null;
@@ -71,6 +79,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     defaultModel,
     agents,
     agentsError,
+    subagents = [],
     isActionPending,
     isAgentsLoading,
     restartingAgentPubkey,
@@ -187,6 +196,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               label="Unknown agents"
               restartingAgentPubkey={restartingAgentPubkey}
               startingAgentPubkey={startingAgentPubkey}
+              subagents={subagents}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
               onRestartAgent={onRestartAgent}
@@ -202,6 +212,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
               label="Custom agents"
               restartingAgentPubkey={restartingAgentPubkey}
               startingAgentPubkey={startingAgentPubkey}
+              subagents={subagents}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
               onRestartAgent={onRestartAgent}
@@ -232,6 +243,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 function AgentPersonaCard({
   actions,
   agent,
+  defaultModel,
   label,
   persona,
   restartingAgentPubkey,
@@ -283,6 +295,12 @@ function AgentPersonaCard({
   ]
     .filter((part): part is string => Boolean(part))
     .join(" · ");
+  const modelLabel = resolveAgentCardModelLabel({
+    agent,
+    personaModel: null,
+    provider: agent?.provider,
+    defaultModel,
+  });
 
   return (
     <AgentIdentityCard
@@ -328,6 +346,7 @@ function AgentPersonaCard({
       avatarUrl={avatarUrl}
       dataTestId={testId}
       label={title}
+      modelLabel={modelLabel}
       subtitle={runtimeSubtitle || null}
       onClick={() => {
         // The card's main click always opens the PERSONA target, never an
@@ -465,6 +484,7 @@ function CollapsibleAgentGroup({
   defaultModel,
   restartingAgentPubkey,
   startingAgentPubkey,
+  subagents,
   onToggle,
   onOpenAgentProfile,
   onRestartAgent,
@@ -477,6 +497,7 @@ function CollapsibleAgentGroup({
   defaultModel: string;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
+  subagents: readonly SubagentStatus[];
   onToggle: (key: string) => void;
   onOpenAgentProfile: (
     pubkey: string,
@@ -502,20 +523,29 @@ function CollapsibleAgentGroup({
         <span className="text-xs text-muted-foreground">({agents.length})</span>
       </button>
       {!isCollapsed ? (
-        <div className={IDENTITY_CARD_GRID_CLASS}>
-          {agents.map((agent) => (
-            <StandaloneAgentCard
-              agent={agent}
-              defaultModel={defaultModel}
-              key={agent.pubkey}
-              restartingAgentPubkey={restartingAgentPubkey}
-              startingAgentPubkey={startingAgentPubkey}
-              onOpenAgentProfile={onOpenAgentProfile}
-              onRestartAgent={onRestartAgent}
-              onStartAgent={onStartAgent}
-            />
-          ))}
-        </div>
+        <>
+          <div className={IDENTITY_CARD_GRID_CLASS}>
+            {agents.map((agent) => (
+              <StandaloneAgentCard
+                agent={agent}
+                defaultModel={defaultModel}
+                key={agent.pubkey}
+                restartingAgentPubkey={restartingAgentPubkey}
+                startingAgentPubkey={startingAgentPubkey}
+                onOpenAgentProfile={onOpenAgentProfile}
+                onRestartAgent={onRestartAgent}
+                onStartAgent={onStartAgent}
+              />
+            ))}
+          </div>
+          {/* SPEC-nested-subagents B2: default-collapsed subagent rows
+              under any parent card in this group; renders nothing while no
+              parent here has subagent records. */}
+          <SubagentTree
+            parentPubkeys={agents.map((agent) => agent.pubkey)}
+            subagents={subagents}
+          />
+        </>
       ) : null}
     </div>
   );

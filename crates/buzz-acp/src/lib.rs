@@ -15,6 +15,7 @@ mod scope;
 /// Durable session-binding + processed-event store (IDs and timestamps only).
 pub mod session_store;
 mod setup_mode;
+mod subagent;
 #[cfg(test)]
 mod testshell;
 mod usage;

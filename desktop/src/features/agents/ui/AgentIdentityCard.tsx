@@ -17,6 +17,8 @@ type AgentIdentityCardProps = {
    * otherwise the model label. Callers compose the fallback.
    */
   subtitle?: string | null;
+  /** Optional tertiary model-label line under the subtitle. */
+  modelLabel?: string | null;
   onClick: () => void;
   /** Optional badge rendered below the label (e.g. "Restart required"). */
   statusBadge?: ReactNode;
@@ -30,6 +32,7 @@ export function AgentIdentityCard({
   dataTestId,
   label,
   subtitle,
+  modelLabel,
   onClick,
   statusBadge,
 }: AgentIdentityCardProps) {
@@ -81,6 +84,11 @@ export function AgentIdentityCard({
         {subtitle ? (
           <span className="line-clamp-2 min-w-0 text-xs font-normal text-muted-foreground">
             {subtitle}
+          </span>
+        ) : null}
+        {modelLabel ? (
+          <span className="min-w-0 truncate text-xs font-normal text-secondary-foreground/75">
+            {modelLabel}
           </span>
         ) : null}
         {/* pointer-events-auto: the overlay button above has pointer-events-none

@@ -23,6 +23,11 @@ import type {
   ObserverEvent,
   TranscriptItem,
 } from "./ui/agentSessionTypes";
+import type { SubagentStatus } from "./lib/subagents";
+import {
+  foldSubagentLifecycle,
+  parseSubagentLifecyclePayload,
+} from "./lib/subagentLifecycleIngest";
 import {
   type TranscriptState,
   buildTranscriptState,
@@ -450,6 +455,94 @@ export function isObserverEventAfter(
 // exactly as unbatched ones; the envelope itself is never stored.
 const OBSERVER_BATCH_KIND = "batch";
 
+// SPEC-nested-subagents: lifecycle kind emitted by the ACP harness's
+// subagent tracker (crates/buzz-acp/src/subagent.rs). Frame arrives under the
+// parent's agent tag; payload is {subagent_name, status, summary?}.
+const SUBAGENT_LIFECYCLE_KIND = "subagent_lifecycle";
+
+// Live subagent records keyed by parent pubkey (normalized). Written only by
+// `ingestSubagentLifecycleEvent` on the live path; cleared on store reset.
+// Cap mirrors the raw journal's per-agent window so a runaway delegation
+// storm can hold no more state than the events it arrived in.
+const subagentsByParent = new Map<string, SubagentStatus[]>();
+const MAX_SUBAGENTS_PER_PARENT = 100;
+const subagentLifecycleListeners = new Set<() => void>();
+// Monotonic version of subagentsByParent contents; bumped only on a real
+// fold so caches can detect same-length mutations (status/summary updates).
+let subagentsVersion = 0;
+
+/**
+ * Ingest one `subagent_lifecycle` payload for a parent agent. Returns true
+ * when the record changed (new subagent, status transition, or summary
+ * update) so the caller only notifies listeners on real changes. Parsing and
+ * fold logic live in `lib/subagentLifecycleIngest.ts` (alias-free, testable
+ * under plain node --test).
+ */
+function ingestSubagentLifecycleEvent(
+  parentPubkey: string,
+  payload: unknown,
+  timestamp: string,
+): boolean {
+  const parent = normalizePubkey(parentPubkey);
+  if (!parent) {
+    return false;
+  }
+  const parsed = parseSubagentLifecyclePayload(payload);
+  if (!parsed) {
+    return false;
+  }
+  const list = subagentsByParent.get(parent) ?? [];
+  const nextList = foldSubagentLifecycle(
+    list,
+    parent,
+    parsed,
+    Date.parse(timestamp),
+  );
+  if (!nextList) {
+    return false;
+  }
+  subagentsByParent.set(parent, nextList.slice(-MAX_SUBAGENTS_PER_PARENT));
+  subagentsVersion += 1;
+  return true;
+}
+
+/**
+ * Live subagent records across all parents (SPEC-nested-subagents). Consumed
+ * by `useSubagents` for the Agents tab tree. Returns the cached array
+ * identity when unchanged so React hooks can bail on referential equality.
+ */
+const EMPTY_SUBAGENTS: readonly SubagentStatus[] = [];
+let cachedAllSubagents: readonly SubagentStatus[] = EMPTY_SUBAGENTS;
+let cachedAllSubagentsVersion = -1;
+export function getAllSubagents(): readonly SubagentStatus[] {
+  const total = Array.from(subagentsByParent.values()).reduce(
+    (sum, list) => sum + list.length,
+    0,
+  );
+  if (total === 0) {
+    cachedAllSubagentsVersion = -1;
+    return EMPTY_SUBAGENTS;
+  }
+  // Bumped on every real fold (status transition, summary update, add) so
+  // same-length mutations still produce a fresh array reference — a length
+  // check alone would return the stale array and freeze the tree UI.
+  if (cachedAllSubagentsVersion !== subagentsVersion) {
+    cachedAllSubagents = Array.from(subagentsByParent.values()).flat();
+    cachedAllSubagentsVersion = subagentsVersion;
+  }
+  return cachedAllSubagents;
+}
+
+/**
+ * Subscribe to subagent lifecycle changes. Returns an unsubscribe function.
+ */
+export function subscribeSubagentLifecycle(listener: () => void) {
+  subagentLifecycleListeners.add(listener);
+  return () => {
+    subagentLifecycleListeners.delete(listener);
+  };
+}
+
 // Expand a decrypted observer event into its inner events when it is a batch
 // envelope; a non-batch event passes through as a single-element array. A
 // malformed envelope (no events array) degrades to the envelope itself so a
@@ -532,6 +625,20 @@ function processLiveObserverEvents(
           console.debug("Late/untracked lifecycle frame dropped:", error);
         },
       );
+    } else if (parsed.kind === SUBAGENT_LIFECYCLE_KIND) {
+      // SPEC-nested-subagents: the harness publishes lifecycle events under
+      // its own (parent) agent tag, so `agentPubkey` here IS the parent
+      // pubkey. Payload: {subagent_name, status, summary?}.
+      const updated = ingestSubagentLifecycleEvent(
+        agentPubkey,
+        parsed.payload,
+        parsed.timestamp,
+      );
+      if (updated) {
+        for (const listener of subagentLifecycleListeners) {
+          listener();
+        }
+      }
     }
   }
 
@@ -936,6 +1043,9 @@ export function resetAgentObserverStore() {
   evictionFloorByAgent.clear();
   snapshotByAgent.clear();
   archiveEventsByChannel.clear();
+  subagentsByParent.clear();
+  subagentsVersion += 1;
+  cachedAllSubagents = EMPTY_SUBAGENTS;
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
   pendingUnknownAgentFrames.length = 0;
