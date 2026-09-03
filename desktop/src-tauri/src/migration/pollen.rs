@@ -240,9 +240,10 @@ fn stock_version_updates(now: &str) -> std::collections::HashMap<String, (String
         // AGENT-HOMES-001: fizz is retired; its canonical name_pool shrank.
         // Insert Pollen's name without assuming the historical 17-entry pool.
         let insert_at = legacy_fizz.name_pool.len().min(4);
-        legacy_fizz
-            .name_pool
-            .insert(insert_at, crate::managed_agents::POLLEN_DISPLAY_NAME.to_string());
+        legacy_fizz.name_pool.insert(
+            insert_at,
+            crate::managed_agents::POLLEN_DISPLAY_NAME.to_string(),
+        );
         updates.insert(
             "builtin:fizz".to_string(),
             (persona_version(&legacy_fizz), current_fizz),
@@ -828,9 +829,8 @@ mod tests {
         // ["Fizz"], so reconstruct the historical 18-name pool this
         // migration targets explicitly instead of relying on the builtin.
         const HISTORICAL_POOL: &[&str] = &[
-            "Nectar", "Comet", "Bramble", "Clover", "Pollen", "Amber", "Daisy", "Mason",
-            "Thistle", "Waxwing", "Hive", "Meadow", "Juniper", "Aster", "Sage", "Willow",
-            "Orchard", "Buzz",
+            "Nectar", "Comet", "Bramble", "Clover", "Pollen", "Amber", "Daisy", "Mason", "Thistle",
+            "Waxwing", "Hive", "Meadow", "Juniper", "Aster", "Sage", "Willow", "Orchard", "Buzz",
         ];
         legacy_fizz.name_pool = HISTORICAL_POOL.iter().map(|s| s.to_string()).collect();
         let old_version = crate::managed_agents::persona_events::persona_content_hash(

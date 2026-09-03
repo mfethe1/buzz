@@ -289,7 +289,6 @@ mod tests {
         }
     }
 
-    
     fn fixture_record() -> ManagedAgentRecord {
         {
             let mut sample = sample_agent();
@@ -298,8 +297,7 @@ mod tests {
         }
     }
 
-    
-#[test]
+    #[test]
     fn build_agent_event_produces_correct_kind() {
         let builder = build_agent_event(&sample_agent()).unwrap();
         let keys = nostr::Keys::generate();
@@ -688,7 +686,10 @@ mod tests {
         });
         record.home = true;
         let content = agent_event_content(&record);
-        assert_eq!(content.machine_home.as_ref().unwrap().id, "device-winnie-01");
+        assert_eq!(
+            content.machine_home.as_ref().unwrap().id,
+            "device-winnie-01"
+        );
         assert!(content.home);
         let json = serde_json::to_string(&content).unwrap();
         assert!(json.contains("\"machine_home\""));

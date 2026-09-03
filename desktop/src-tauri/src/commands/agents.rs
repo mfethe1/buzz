@@ -428,11 +428,10 @@ pub async fn create_managed_agent(
             if id.is_empty() {
                 return Err("machine_home.id cannot be empty".to_string());
             }
-            if let Some(existing) = records.iter().find(|r| {
-                r.machine_home
-                    .as_ref()
-                    .is_some_and(|m| m.id == id)
-            }) {
+            if let Some(existing) = records
+                .iter()
+                .find(|r| r.machine_home.as_ref().is_some_and(|m| m.id == id))
+            {
                 return Err(format!(
                     "machine {} already has a home agent ({})",
                     id, existing.name
