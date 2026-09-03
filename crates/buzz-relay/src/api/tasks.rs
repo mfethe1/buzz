@@ -785,8 +785,10 @@ mod tests {
             format!("Nostr {encoded}")
         }
 
+        #[allow(dead_code)] // AGENT-HOMES-001: shared fixture; fields used by sibling test mods
         pub(super) struct Fixture {
             state: Arc<AppState>,
+            #[allow(dead_code)]
             pool: sqlx::PgPool,
             host: String,
             community: buzz_core::CommunityId,
@@ -912,6 +914,7 @@ mod tests {
             })
         }
 
+        #[allow(dead_code)] // AGENT-HOMES-001: retained for future integration tests
         async fn cleanup(f: &Fixture) {
             for table in ["task_events", "tasks", "channel_members", "channels"] {
                 let sql = format!("DELETE FROM {table} WHERE community_id = $1");

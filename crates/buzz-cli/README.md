@@ -86,6 +86,14 @@ buzz mem set <slug> "my-value"
 buzz mem patch <slug> --base-hash <hex> < diff.patch  # or --no-base-hash
 buzz mem rm <slug>
 
+# Durable tasks (idempotent request ingestion)
+buzz tasks create --title "Investigate failure" --source telegram \
+  --source-ref telegram:chat:thread:message --if-absent
+buzz tasks list --source-ref telegram:chat:thread:message
+buzz tasks update <task-uuid> --status in_progress
+buzz tasks comment <task-uuid> "Started implementation"
+buzz tasks summarize <task-uuid> "Verified build is ready"
+
 # Repository protection
 buzz repos protect list --id my-repo
 buzz repos protect set --id my-repo --ref refs/heads/main --push admin --no-force-push --no-delete
@@ -167,6 +175,12 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `set` | Write a memory value (use `-` for stdin) |
 | | `patch` | Apply unified diff to memory value |
 | | `rm` | Publish a tombstone to delete memory |
+| `tasks` | `list` | List/filter durable tasks |
+| | `get` | Get one task and event history |
+| | `create` | Create, or dedupe by exact `source_ref` |
+| | `update` | Change status, title, priority, assignee, or due date |
+| | `comment` | Append a semantic progress event |
+| | `summarize` | Persist one concise task summary |
 
 ## Architecture
 

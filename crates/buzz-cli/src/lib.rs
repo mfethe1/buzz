@@ -234,6 +234,9 @@ enum Cmd {
     /// Agent engram management — persistent memory per NIP-AE
     #[command(subcommand)]
     Mem(MemCmd),
+    /// Durable community work items for humans and agents
+    #[command(subcommand)]
+    Tasks(TasksCmd),
     /// Validate and canonicalize local Buzz CML task snapshots
     #[command(subcommand)]
     Cml(CmlCmd),
@@ -1987,6 +1990,76 @@ pub enum PackCmd {
     },
 }
 
+/// Durable task commands share the relay's host-derived community boundary.
+#[derive(Subcommand)]
+pub enum TasksCmd {
+    /// List visible tasks
+    List {
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        assignee: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        source_ref: Option<String>,
+        #[arg(long, default_value_t = false)]
+        include_archived: bool,
+        #[arg(long, default_value_t = 100)]
+        limit: i64,
+    },
+    /// Get one task with its append-only event history
+    Get { task: String },
+    /// Create a task
+    Create {
+        #[arg(long)]
+        title: String,
+        /// Body text; use '-' to read stdin
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long)]
+        parent: Option<String>,
+        #[arg(long)]
+        assignee: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        priority: i32,
+        /// RFC3339 due timestamp
+        #[arg(long)]
+        due_at: Option<String>,
+        #[arg(long, default_value = "cli")]
+        source: String,
+        #[arg(long)]
+        source_ref: Option<String>,
+        /// Return the existing exact source_ref match instead of creating a duplicate
+        #[arg(long, default_value_t = false, requires = "source_ref")]
+        if_absent: bool,
+    },
+    /// Update mutable task fields
+    Update {
+        task: String,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        priority: Option<i32>,
+        #[arg(long, conflicts_with = "clear_assignee")]
+        assignee: Option<String>,
+        #[arg(long, default_value_t = false)]
+        clear_assignee: bool,
+        #[arg(long, conflicts_with = "clear_due")]
+        due_at: Option<String>,
+        #[arg(long, default_value_t = false)]
+        clear_due: bool,
+    },
+    /// Append a progress/comment event; use '-' to read stdin
+    Comment { task: String, body: String },
+    /// Persist a concise summary event; use '-' to read stdin
+    Summarize { task: String, body: String },
+}
+
 /// Community moderation commands.
 ///
 /// The community (tenant) is selected by the relay host in `--relay` /
@@ -2197,6 +2270,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Media(sub) => commands::upload::dispatch_media(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
+        Cmd::Tasks(sub) => commands::tasks::dispatch(sub, &client, &cli.format).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Cml(sub) => match sub {
             CmlCmd::Validate { path } => commands::cml::cmd_validate(path.as_str()),
@@ -2404,6 +2478,7 @@ mod tests {
             "reactions",
             "repos",
             "social",
+            "tasks",
             "upload",
             "users",
             "workflows",
@@ -2617,6 +2692,7 @@ mod tests {
             ("reactions", 3),
             ("repos", 5),
             ("social", 7),
+            ("tasks", 6),
             ("upload", 1),
             ("users", 5),
             ("workflows", 8),
