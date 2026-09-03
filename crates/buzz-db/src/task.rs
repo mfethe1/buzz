@@ -608,20 +608,10 @@ mod tests {
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_owned())
     }
-
-
-
-
-
-
-
-
-
 }
 
-use buzz_datastore_tracing::datastore_span;
 use crate::Db;
-
+use buzz_datastore_tracing::datastore_span;
 
 // ---------------------------------------------------------------------------
 // Fork addition (PR #6425): Db facade methods for the task system.
@@ -640,7 +630,11 @@ impl Db {
 
     /// Read one task scoped to `community`.
     #[datastore_span(name = "get_task", system = "postgresql")]
-    pub async fn get_task(&self, community: CommunityId, id: Uuid) -> Result<crate::task::TaskRecord> {
+    pub async fn get_task(
+        &self,
+        community: CommunityId,
+        id: Uuid,
+    ) -> Result<crate::task::TaskRecord> {
         crate::task::get_task(&self.pool, community, id).await
     }
 
@@ -686,9 +680,9 @@ impl Db {
         action: buzz_core::task::TaskAction,
         body: Option<&str>,
     ) -> Result<crate::task::TaskEventRecord> {
-        crate::task::append_task_event(&self.pool, community, task_id, actor_pubkey, action, body).await
+        crate::task::append_task_event(&self.pool, community, task_id, actor_pubkey, action, body)
+            .await
     }
-
 }
 
 #[cfg(test)]
@@ -1063,4 +1057,3 @@ mod postgres_tests {
         delete_test_community(&pool, community).await;
     }
 }
-

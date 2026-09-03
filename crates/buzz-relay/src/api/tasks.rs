@@ -983,7 +983,6 @@ mod tests {
             }
         }
 
-
         pub(super) async fn private_channel_assertions(f: &Fixture) {
             let task_path = format!("/api/tasks/{}", f.task_id);
 
@@ -1109,4 +1108,3 @@ mod tests {
         }
     }
 }
-
