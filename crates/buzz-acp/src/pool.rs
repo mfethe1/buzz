@@ -3192,7 +3192,8 @@ pub async fn run_prompt_task(
                     standing_sent,
                     &pending_delivered_event_ids,
                 );
-                store_mark_events_processed(&ctx, scope.channel_id(), &pending_delivered_event_ids).await;
+                store_mark_events_processed(&ctx, scope.channel_id(), &pending_delivered_event_ids)
+                    .await;
             } else if !agent.has_system_prompt_support() {
                 agent.state.heartbeat_standing_context_sent = true;
             }
@@ -9404,7 +9405,12 @@ done"#,
                 .map(String::as_str),
             Some("stored-sid")
         );
-        let delivery = result.agent.state.deliveries.get(&SessionScope::Conversation { channel_id }).unwrap();
+        let delivery = result
+            .agent
+            .state
+            .deliveries
+            .get(&SessionScope::Conversation { channel_id })
+            .unwrap();
         assert!(delivery.standing_context_sent);
         assert!(delivery.delivered_event_ids.contains("already-done"));
         let methods = read_methods(&capture);
@@ -9525,7 +9531,9 @@ done"#,
             .await
             .unwrap();
         let mut state = SessionState::default();
-        state.sessions.insert(SessionScope::Conversation { channel_id }, "keep-sid".into());
+        state
+            .sessions
+            .insert(SessionScope::Conversation { channel_id }, "keep-sid".into());
         state.invalidate_all();
         assert!(state.sessions.is_empty());
         let binding = store

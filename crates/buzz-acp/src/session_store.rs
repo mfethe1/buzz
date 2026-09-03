@@ -303,6 +303,7 @@ pub(crate) fn unix_now_secs() -> i64 {
 }
 
 /// Best-effort processed-event gate. Store errors degrade to "not processed".
+#[cfg_attr(not(test), expect(dead_code))]
 pub(crate) async fn skip_if_already_processed(
     store: Option<&dyn SessionStore>,
     event_id: &str,

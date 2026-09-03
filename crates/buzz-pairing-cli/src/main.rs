@@ -605,8 +605,7 @@ fn resolve_identity_payload(
 ) -> Result<(Zeroizing<String>, PayloadType), CliError> {
     let (nsec_zeroized, payload_type) = resolve_payload(nsec)?;
     // Derive the pubkey from the secret key so the JSON bundle is self-consistent.
-    let sk = SecretKey::parse(&nsec_zeroized)
-        .map_err(|e| CliError::InvalidNsec(e.to_string()))?;
+    let sk = SecretKey::parse(&nsec_zeroized).map_err(|e| CliError::InvalidNsec(e.to_string()))?;
     let keys = Keys::new(sk);
     let pubkey = keys.public_key().to_hex();
     // Mobile expects an http(s) (or debug ws) URL; keep the same host:port but

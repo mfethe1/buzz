@@ -435,9 +435,9 @@ test-unit:
         # the crates above: nothing in CI runs `cargo test --workspace`, so
         # until this line existed the harness that dispatches every agent turn
         # had zero executed test coverage in CI on any platform.
-# buzz-agent: two infra-free concerns run together by executing the
+        # buzz-agent: two infra-free concerns run together by executing the
         # whole crate (lib + integration tests), because nothing in CI runs
-        # `cargo test --workspace`, so without this stanza neither the crate's
+        # `cargo test --workspace`, so without this stanza neither its
         # library tests nor its integration tests execute remotely.
         #   * model-capabilities corpus (lib): the Rust half of the
         #     cross-language drift guard. `model_capabilities.rs` embeds

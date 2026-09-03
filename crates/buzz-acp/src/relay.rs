@@ -2686,7 +2686,7 @@ async fn handle_ws_message(
                         );
                         return true;
                     }
-match classify_ok(accepted, &message) {
+                    match classify_ok(accepted, &message) {
                         OkDisposition::Stored => {
                             state.acknowledge_observer_frame(&event_id);
                             debug!(

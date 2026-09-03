@@ -11,9 +11,9 @@ mod prompt_framing;
 mod prompt_project;
 mod queue;
 mod relay;
+mod scope;
 /// Durable session-binding + processed-event store (IDs and timestamps only).
 pub mod session_store;
-mod scope;
 mod setup_mode;
 #[cfg(test)]
 mod testshell;
@@ -50,7 +50,6 @@ use pool::{
 use pool_lifecycle::PoolLifecycle;
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
-use session_store::skip_if_already_processed;
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -437,8 +436,8 @@ mod inbound_author_gate {
     /// or publish the event; replacing the call with a raw signer or a local
     /// `allowed = true` no longer type-checks.
     pub(crate) struct AuthorizedListenerEvent {
-        buzz_event: relay::BuzzEvent,
-        effective_author: String,
+        pub(crate) buzz_event: relay::BuzzEvent,
+        pub(crate) effective_author: String,
     }
 
     impl AuthorizedListenerEvent {
@@ -713,6 +712,29 @@ impl QueuedNormalListenerEvent {
         tokio::spawn(async move {
             pool::reaction_add(&rest_client, &event_id, "👀").await;
         });
+    }
+
+    /// NIP-MR durable counterpart to the cosmetic 👀 reaction: tells the
+    /// sender the mention was accepted (or declined as busy). Restored from
+    /// e219f4976 — the sync merge dropped this call site while keeping the
+    /// (now-dead) ack helpers.
+    fn ack_mention_durable(&self, rest_client: &relay::RestClient, pubkey_hex: &str) {
+        ack_mention(
+            rest_client,
+            &self.event_for_steer,
+            self.scope.channel_id(),
+            pubkey_hex,
+            if self.accepted {
+                buzz_core::kind::MENTION_ACK_STATUS_ACCEPTED
+            } else {
+                buzz_core::kind::MENTION_ACK_STATUS_DECLINED
+            },
+            if self.accepted {
+                None
+            } else {
+                Some(buzz_core::kind::MENTION_ACK_REASON_BUSY)
+            },
+        );
     }
 
     fn steer_or_interrupt(
@@ -3638,12 +3660,31 @@ async fn tokio_main() -> Result<()> {
                             else {
                                 continue;
                             };
+                            // Capture for the declined-mention ack below:
+                            // `match_subscription` consumes the event, and the
+                            // NIP-MR ack must still reach the sender when no
+                            // rule matches (sync-merge restoration of
+                            // e219f4976's call site).
+                            let declined_event = authorized_event.buzz_event.event.clone();
+                            let declined_channel = authorized_event.buzz_event.channel_id;
                             let Some(ingress) =
                                 AuthorizedNormalListenerEvent(authorized_event)
                                     .match_subscription(&rules, &pubkey_hex)
                                     .await
                             else {
                                 tracing::debug!("authorized event matched no rule — dropping");
+                                // NIP-MR: no rule matched, or a filter
+                                // expression failed closed. Either way the
+                                // agent was tagged and will not answer, so
+                                // say so rather than going quiet.
+                                ack_mention(
+                                    &ctx.rest_client,
+                                    &declined_event,
+                                    declined_channel,
+                                    &pubkey_hex,
+                                    buzz_core::kind::MENTION_ACK_STATUS_DECLINED,
+                                    Some(buzz_core::kind::MENTION_ACK_REASON_NO_MATCHING_RULE),
+                                );
                                 continue;
                             };
                             // Derive the session scope once, at admission, from
@@ -3678,6 +3719,7 @@ async fn tokio_main() -> Result<()> {
                             // guard's cleanup may race with this add, leaving a
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
                             queued.mark_seen(&ctx.rest_client);
+                            queued.ack_mention_durable(&ctx.rest_client, &pubkey_hex);
                             // Event is already queued. The authorized ingress
                             // retains its verified author, resolved scope, and
                             // event data through the optional steer/interrupt
@@ -6249,9 +6291,7 @@ mod owner_control_command_tests {
                 ControlSignal::Cancel => {
                     handle_cancel_turn_control(&payload, &mut pool, Some(&observer));
                 }
-                _ => {
-                    handle_switch_model_control(&payload, &mut pool, Some(&observer), None).await
-                }
+                _ => handle_switch_model_control(&payload, &mut pool, Some(&observer), None).await,
             }
             assert_eq!(rx.await.unwrap(), signal);
             assert_eq!(observer.snapshot()[0].payload["status"], "sent");
@@ -11364,8 +11404,8 @@ mod session_store_dedupe_tests {
 
 #[cfg(test)]
 mod session_store_idle_switch_tests {
-    use crate::scope::SessionScope;
     use super::*;
+    use crate::scope::SessionScope;
     use session_store::{ContextKey, InMemorySessionStore, SessionStore};
 
     async fn dummy_agent(channel_id: uuid::Uuid) -> OwnedAgent {
@@ -11386,10 +11426,10 @@ mod session_store_idle_switch_tests {
             goose_system_prompt_supported: None,
             protocol_version: 1,
         };
-        agent
-            .state
-            .sessions
-            .insert(SessionScope::Conversation { channel_id }, "retired-sid".into());
+        agent.state.sessions.insert(
+            SessionScope::Conversation { channel_id },
+            "retired-sid".into(),
+        );
         agent
     }
 

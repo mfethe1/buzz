@@ -1442,7 +1442,6 @@ mod postgres_tests {
         assert!(crate::deletion::EXPECTED_SCOPED_TABLES.contains(&"task_events"));
     }
 
-
     #[test]
     fn migration_lint_detects_tables_missing_community_id_by_default() {
         let sql = r#"

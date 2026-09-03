@@ -70,6 +70,11 @@ pub struct AcpRuntimeCatalogEntry {
     pub provider_env_var: Option<String>,
     /// Environment variable used to apply thinking effort, when supported.
     pub thinking_env_var: Option<String>,
+    /// Canonical effort values this harness accepts, when the harness exposes
+    /// a fixed vocabulary (Goose). `harnessNative` effort field uses this list
+    /// exclusively — `off` and all other valid Goose values are always present
+    /// when this is Goose, so `useEffortAutoClear` never deletes a valid value.
+    pub effort_canonical_values: Option<Vec<String>>,
     pub max_tokens_env_var: Option<String>,
     pub context_limit_env_var: Option<String>,
     pub max_rounds_env_var: Option<String>,
