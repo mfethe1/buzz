@@ -2,7 +2,7 @@ use super::{
     built_in_persona_records, ensure_persona_ids_are_active, ensure_persona_is_active,
     FIZZ_SYSTEM_PROMPT, HONEY_SYSTEM_PROMPT, POLLEN_SYSTEM_PROMPT,
     merge_personas, migrate_retired_personas, validate_persona_activation_change,
-    validate_persona_deletion, BUILT_IN_PERSONAS, RETIRED_PERSONAS,
+    validate_persona_deletion, RETIRED_PERSONAS,
 };
 use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
 use crate::managed_agents::AgentDefinition;
