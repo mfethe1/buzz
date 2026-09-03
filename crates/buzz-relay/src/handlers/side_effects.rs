@@ -3732,7 +3732,7 @@ mod tests {
             .sign_with_keys(&keys)
             .unwrap();
         assert_eq!(
-            extract_p_tag(&no_p).map(|b| hex::encode(b)),
+            extract_p_tag(&no_p).map(hex::encode),
             Some(signer_hex.clone()),
             "absent p tag must default to the event signer (self-join semantics)"
         );
@@ -3743,7 +3743,7 @@ mod tests {
             .sign_with_keys(&keys)
             .unwrap();
         assert_eq!(
-            extract_p_tag(&with_p).map(|b| hex::encode(b)),
+            extract_p_tag(&with_p).map(hex::encode),
             Some(third_party.to_string()),
             "explicit p tag must win over the signer default"
         );

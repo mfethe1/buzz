@@ -246,6 +246,9 @@ impl ActionSink for RelayActionSink {
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
+        // AGENT-HOMES-001: authored_text is reserved for future mention-
+        // resolution in relay-signed posts; keep the parameter, silence lint.
+        let _authored_text = authored_text;
         let author_pubkey = author_pubkey.to_owned();
         let reply_to = reply_to.map(str::to_owned);
 
