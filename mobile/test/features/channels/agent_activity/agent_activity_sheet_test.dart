@@ -13,14 +13,10 @@ import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
-import '../../../helpers/golden_shot.dart';
 import '../../../helpers/widget_helpers.dart';
 
 void main() {
   testWidgets('01 error state shows retry affordance', (tester) async {
-    await loadAppFonts();
-    setPhoneSurface(tester);
-
     final ownerKeychain = nostr.Keys.generate();
     final agentKeychain = nostr.Keys.generate();
     final session = _ScriptedRelaySession();
@@ -50,21 +46,11 @@ void main() {
     expect(find.byIcon(LucideIcons.circleX), findsOneWidget);
     expect(find.text('Try again'), findsOneWidget);
     expect(find.byIcon(LucideIcons.rotateCcw), findsOneWidget);
-
-    await captureShot(
-      tester,
-      find.byType(AgentActivitySheet),
-      '01-hw014-error-state-with-retry',
-      settle: false,
-    );
   });
 
   testWidgets('02 tapping retry re-subscribes and streams live frames again', (
     tester,
   ) async {
-    await loadAppFonts();
-    setPhoneSurface(tester);
-
     final ownerKeychain = nostr.Keys.generate();
     final agentKeychain = nostr.Keys.generate();
     final session = _ScriptedRelaySession();
@@ -94,13 +80,7 @@ void main() {
     session.gateNextSubscribe = true;
     await tester.tap(find.text('Try again'));
     await tester.pump();
-
-    await captureShot(
-      tester,
-      find.byType(AgentActivitySheet),
-      '02-hw014-post-tap-connecting',
-      settle: false,
-    );
+    expect(find.byIcon(LucideIcons.circleX), findsNothing);
 
     // Complete the re-subscribe: filter re-sent, connection opens. (This fake
     // keeps closed subscriptions in `filters`, so 2 = initial + retry.)
@@ -122,6 +102,38 @@ void main() {
 
     expect(find.byType(ListView), findsOneWidget);
     expect(find.text('Try again'), findsNothing);
+  });
+
+  testWidgets('03 no retry affordance while healthy or connecting', (
+    tester,
+  ) async {
+    final ownerKeychain = nostr.Keys.generate();
+    final agentKeychain = nostr.Keys.generate();
+    final session = _ScriptedRelaySession();
+
+    // Gate the FIRST subscribe so the sheet sits in connecting, not open.
+    session.gateNextSubscribe = true;
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: _overrides(
+          session: session,
+          nsec: ownerKeychain.nsec,
+          agentPubkey: agentKeychain.public,
+        ),
+        child: AgentActivitySheet(
+          channelId: 'test-channel',
+          agentPubkey: agentKeychain.public,
+        ),
+      ),
+    );
+    await tester.pump();
+    // Still connecting — no affordance.
+    expect(find.text('Try again'), findsNothing);
+    session.releaseSubscribe(0);
+    await tester.pump();
+    // Open and healthy — still no affordance, just the waiting empty state.
+    expect(find.text('Try again'), findsNothing);
+    expect(find.text('Waiting for activity…'), findsOneWidget);
   });
 }
 
