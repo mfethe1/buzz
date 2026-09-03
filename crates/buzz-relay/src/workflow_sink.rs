@@ -246,7 +246,6 @@ impl ActionSink for RelayActionSink {
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
-        let authored_text = authored_text.to_owned();
         let author_pubkey = author_pubkey.to_owned();
         let reply_to = reply_to.map(str::to_owned);
 
@@ -686,6 +685,7 @@ impl ActionSink for RelayActionSink {
 }
 
 /// only for targets also named in the workflow owner's stored step template.
+#[allow(dead_code)]
 fn append_workflow_mention_tags(
     tags: &mut Vec<Tag>,
     rendered_text: &str,
