@@ -1274,13 +1274,11 @@ mod tests {
     #[cfg(unix)]
     fn setup_temp_codex_acp(script_body: &str) -> (tempfile::TempDir, String) {
         use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().expect("create temp dir");
         let bin = dir.path().join("codex-acp");
         std::fs::write(&bin, script_body).expect("write script");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
             .expect("chmod script");
-
         let original_path = std::env::var("PATH").unwrap_or_default();
         let new_path = format!("{}:{}", dir.path().display(), original_path);
         std::env::set_var("PATH", &new_path);
@@ -1550,6 +1548,8 @@ mod tests {
             definition_parallelism: None,
             relay_mesh: None,
             effort_level: None,
+            machine_home: None,
+            home: false,
         };
 
         let runtime = known_acp_runtime_exact("buzz-agent");

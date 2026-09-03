@@ -223,6 +223,8 @@ fn local_agent() -> ManagedAgentRecord {
         definition_parallelism: None,
         relay_mesh: None,
         effort_level: None,
+        machine_home: None,
+        home: false,
     }
 }
 
@@ -888,6 +890,8 @@ fn inbound_managed_agent_content(
         device_id: None,
         device_label: None,
         capabilities: vec![],
+        machine_home: None,
+        home: false,
     }
 }
 

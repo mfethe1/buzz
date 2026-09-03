@@ -775,6 +775,8 @@ fn summary_fixture(
         log_path: String::new(),
         respond_to: RespondTo::OwnerOnly,
         respond_to_allowlist: Vec::new(),
+        machine_home: None,
+        home: false,
     }
 }
 

@@ -172,6 +172,10 @@ fn relay_agent_from_managed_policy(agent_pubkey: &str, event: &Event) -> Option<
         model: content
             .model
             .filter(|model| validate_capability(model).is_ok()),
+        // AGENT-HOMES-001: machine-home designation passes through
+        // owner-attested, same trust level as device fields.
+        machine_home: content.machine_home,
+        home: content.home,
     })
 }
 

@@ -421,6 +421,24 @@ pub async fn create_managed_agent(
             .lock()
             .map_err(|error| error.to_string())?;
         let mut records = load_managed_agents(&app)?;
+        // AGENT-HOMES-001: one home per machine — reject a second home
+        // agent for the same machine id before minting a new identity.
+        if let Some(home) = input.machine_home.as_ref() {
+            let id = home.id.trim();
+            if id.is_empty() {
+                return Err("machine_home.id cannot be empty".to_string());
+            }
+            if let Some(existing) = records
+                .iter()
+                .find(|r| r.machine_home.as_ref().is_some_and(|m| m.id == id))
+            {
+                return Err(format!(
+                    "machine {} already has a home agent ({})",
+                    id, existing.name
+                ));
+            }
+        }
+
         let mut runtimes = state
             .managed_agent_processes
             .lock()
@@ -725,6 +743,8 @@ pub async fn create_managed_agent(
                 relay_mesh.clone()
             },
             effort_level: None,
+            machine_home: input.machine_home.clone(),
+            home: input.machine_home.is_some(),
         };
 
         records.push(record);

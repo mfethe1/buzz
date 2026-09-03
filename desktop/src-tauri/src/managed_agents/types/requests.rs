@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::{
     default_start_on_app_launch, validate_respond_to_allowlist, AgentDefinition, BackendKind,
-    CatalogSource, RelayMeshConfig, RespondTo,
+    CatalogSource, MachineHome, RelayMeshConfig, RespondTo,
 };
 
 /// The NIP-AP behavioral group as one grouped request field.
@@ -195,6 +195,10 @@ pub struct CreateManagedAgentRequest {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default)]
     pub relay_mesh: Option<RelayMeshConfig>,
+    /// AGENT-HOMES-001: designate this agent as its machine's home. When
+    /// `Some`, the store rejects a second home for the same machine id.
+    #[serde(default)]
+    pub machine_home: Option<MachineHome>,
 }
 
 /// Patch request for updating a managed agent's mutable fields.

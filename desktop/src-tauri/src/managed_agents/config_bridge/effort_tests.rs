@@ -85,6 +85,8 @@ pub(super) fn record() -> ManagedAgentRecord {
         agent_command_override: None,
         persona_source_version: None,
         provider: None,
+        machine_home: None,
+        home: false,
     }
 }
 

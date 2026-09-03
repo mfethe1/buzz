@@ -1,8 +1,8 @@
 use super::{
     built_in_persona_records, ensure_persona_ids_are_active, ensure_persona_is_active,
-    FIZZ_SYSTEM_PROMPT, HONEY_SYSTEM_PROMPT, POLLEN_SYSTEM_PROMPT,
     merge_personas, migrate_retired_personas, validate_persona_activation_change,
-    validate_persona_deletion, RETIRED_PERSONAS,
+    validate_persona_deletion, FIZZ_SYSTEM_PROMPT, HONEY_SYSTEM_PROMPT, POLLEN_SYSTEM_PROMPT,
+    RETIRED_PERSONAS,
 };
 use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
 use crate::managed_agents::AgentDefinition;
@@ -112,9 +112,7 @@ fn merge_personas_adds_fizz_and_retires_old_builtins_for_existing_store() {
     assert!(changed);
     // AGENT-HOMES-001: fizz is retired, not injected — only the legacy
     // solo record remains, soft-retired.
-    assert!(records
-        .iter()
-        .all(|record| record.id != "builtin:fizz"));
+    assert!(records.iter().all(|record| record.id != "builtin:fizz"));
 
     let solo = records
         .iter()
@@ -404,7 +402,10 @@ fn merge_personas_fresh_store_has_no_active_builtins() {
         .iter()
         .filter(|r| r.is_builtin && r.is_active)
         .count();
-    assert_eq!(active_builtins, 0, "fresh store must have no active builtins");
+    assert_eq!(
+        active_builtins, 0,
+        "fresh store must have no active builtins"
+    );
 }
 
 #[test]
@@ -430,7 +431,11 @@ fn merge_personas_retires_fizz_honey_pollen_for_existing_store() {
             .iter()
             .find(|r| r.id == id)
             .unwrap_or_else(|| panic!("record for {id} must survive retirement"));
-        assert!(rec.display_name.ends_with("(retired)"), "{id} display_name={}", rec.display_name);
+        assert!(
+            rec.display_name.ends_with("(retired)"),
+            "{id} display_name={}",
+            rec.display_name
+        );
         assert!(!rec.is_active, "{id} must be inactive after retirement");
     }
 }

@@ -15,7 +15,6 @@ use crate::managed_agents::AcpAvailabilityStatus;
 #[test]
 fn resolves_known_avatar_for_bare_command() {
     let avatar_url = managed_agent_avatar_url("goose").expect("goose avatar should resolve");
-
     assert_eq!(avatar_url, GOOSE_AVATAR_URL);
 }
 
@@ -269,6 +268,8 @@ fn record_with(
         definition_parallelism: None,
         relay_mesh: None,
         effort_level: None,
+        machine_home: None,
+        home: false,
     }
 }
 
@@ -759,7 +760,6 @@ fn codex_adapter_availability_outdated_for_uncomparable_version() {
         .expect("write script");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
             .expect("chmod script");
-
         assert_eq!(
             codex_adapter_availability(&bin),
             AcpAvailabilityStatus::AdapterOutdated,
