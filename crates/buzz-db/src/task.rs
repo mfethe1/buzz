@@ -619,6 +619,7 @@ use buzz_datastore_tracing::datastore_span;
 // lib.rs facade stays untouched.
 // ---------------------------------------------------------------------------
 impl Db {
+    /// Creates a task in the given community (fork task-system facade).
     #[datastore_span(name = "create_task", system = "postgresql")]
     pub async fn create_task(
         &self,
