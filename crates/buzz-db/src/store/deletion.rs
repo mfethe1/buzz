@@ -637,7 +637,38 @@ pub struct DeletionStore {
 impl Db {
     /// Validate the minimum deletion fence catalog required by serving paths.
     pub async fn validate_deletion_serving_catalog(&self) -> Result<()> {
-        self.deletion_store().validate_serving_catalog().await
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Bootstrap,
+        )
+        .await?;
+        self.deletion_store()
+            .validate_serving_catalog_on(&mut connection)
+            .await
+    }
+
+    /// Validate the serving catalog inside the readiness request's absolute
+    /// deadline, attributing only the one real writer checkout to readiness.
+    pub async fn validate_deletion_serving_catalog_for_readiness(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        let mut connection = crate::observability::acquire_writer_until(
+            &self.pool,
+            crate::observability::WriterOperation::Readiness,
+            deadline,
+        )
+        .await?;
+        match tokio::time::timeout_at(
+            deadline,
+            self.deletion_store()
+                .validate_serving_catalog_on(&mut connection),
+        )
+        .await
+        {
+            Err(_) => Err(sqlx::Error::PoolTimedOut.into()),
+            Ok(result) => result,
+        }
     }
 
     /// Validate the exact live community-deletion tenant catalog for destruction.
@@ -790,13 +821,22 @@ impl DeletionStore {
 
     /// Validate the deletion catalog contract required by relay serving.
     pub async fn validate_serving_catalog(&self) -> Result<()> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Bootstrap,
+        )
+        .await?;
+        self.validate_serving_catalog_on(&mut connection).await
+    }
+
+    async fn validate_serving_catalog_on(&self, conn: &mut PgConnection) -> Result<()> {
         let runtime_columns = sqlx::query(
             "SELECT attname, format_type(atttypid, atttypmod) AS type_name, attnotnull \
              FROM pg_attribute WHERE attrelid = 'communities'::regclass \
                AND attname IN ('deletion_state', 'deletion_fence_generation', 'deleted_at') \
                AND NOT attisdropped ORDER BY attname",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?;
         let column_contract = runtime_columns
             .iter()
@@ -842,7 +882,7 @@ impl DeletionStore {
              ORDER BY table_name",
         )
         .bind(&required_table_names)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await?
         .into_iter()
         .collect();
@@ -862,7 +902,7 @@ impl DeletionStore {
             .copied()
             .map(str::to_owned)
             .collect::<BTreeSet<_>>();
-        let live_fences = self.live_fenced_tables().await?;
+        let live_fences = live_fenced_tables_on(&mut *conn).await?;
         let missing_fences = required_fences
             .difference(&live_fences)
             .cloned()
@@ -888,7 +928,7 @@ impl DeletionStore {
                       AND p.proname = 'enforce_community_tombstone' \
                       AND NOT t.tgisinternal AND t.tgenabled = 'O')",
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *conn)
         .await?;
         if !required_objects_present {
             return Err(DbError::DeletionSafety(
@@ -2367,7 +2407,12 @@ impl DeletionStore {
         lease_duration: Duration,
     ) -> Result<ServingWriteLease> {
         let lease_seconds = i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX);
-        let mut tx = self.pool.begin().await?;
+        let connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
         // The assertion owns both the shared ordering lock and the supported
         // READ COMMITTED check. The lease table is trigger-excluded, so this
         // explicit admission is its database-enforced write fence.
@@ -2431,7 +2476,12 @@ impl DeletionStore {
         lease_duration: Duration,
     ) -> Result<()> {
         let lease_seconds = i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX);
-        let mut tx = self.pool.begin().await?;
+        let connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
         lock_community_deletion_shared(&mut tx, lease.community_id).await?;
         let lease_until: Option<DateTime<Utc>> = sqlx::query_scalar(
             "UPDATE community_serving_write_leases lease \
@@ -2464,6 +2514,11 @@ impl DeletionStore {
 
     /// Release a serving side-effect lease. A stale release is harmless.
     pub async fn release_serving_write_lease(&self, lease: &ServingWriteLease) -> Result<bool> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
         let deleted = sqlx::query(
             "DELETE FROM community_serving_write_leases \
              WHERE id = $1 AND community_id = $2 AND owner = $3 AND generation = $4 \
@@ -2474,7 +2529,7 @@ impl DeletionStore {
         .bind(&lease.owner)
         .bind(lease.generation)
         .bind(lease.fence_generation)
-        .execute(&self.pool)
+        .execute(&mut *connection)
         .await?
         .rows_affected();
         Ok(deleted == 1)
@@ -2486,7 +2541,12 @@ impl DeletionStore {
     /// work remains blocked, preserving an accurate drain without abandoning an
     /// admitted remote effect.
     pub async fn verify_serving_write_lease(&self, lease: &ServingWriteLease) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        let mut tx = sqlx::Transaction::begin(connection, None).await?;
         lock_community_deletion_shared(&mut tx, lease.community_id).await?;
         let valid: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM community_serving_write_leases lease \
@@ -2518,6 +2578,11 @@ impl DeletionStore {
 
     /// Delete expired serving leases in a bounded batch.
     pub async fn reap_expired_serving_write_leases(&self, limit: i64) -> Result<u64> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await?;
         let affected = sqlx::query(
             "WITH expired AS ( \
                  SELECT id FROM community_serving_write_leases \
@@ -2527,7 +2592,7 @@ impl DeletionStore {
                USING expired WHERE lease.id = expired.id",
         )
         .bind(limit.clamp(1, 10_000))
-        .execute(&self.pool)
+        .execute(&mut *connection)
         .await?
         .rows_affected();
         Ok(affected)
@@ -2535,6 +2600,11 @@ impl DeletionStore {
 
     /// Return serving-lease counts and dead-tuple estimate for observability.
     pub async fn serving_lease_stats(&self) -> Result<ServingLeaseStats> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::Maintenance,
+        )
+        .await?;
         let row = sqlx::query(
             "SELECT count(*) FILTER (WHERE lease_until >= now())::BIGINT AS active, \
                     count(*) FILTER (WHERE lease_until < now())::BIGINT AS expired, \
@@ -2542,7 +2612,7 @@ impl DeletionStore {
                               WHERE relname = 'community_serving_write_leases'), 0) AS dead_tuples \
              FROM community_serving_write_leases",
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *connection)
         .await?;
         Ok(ServingLeaseStats {
             active: row.try_get("active")?,
@@ -2553,12 +2623,17 @@ impl DeletionStore {
 
     /// Whether a community remains active and serving-write eligible.
     pub async fn is_serving_active(&self, community: CommunityId) -> Result<bool> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
         sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 \
              AND archived_at IS NULL AND deleted_at IS NULL AND deletion_state = 'active')",
         )
         .bind(community.as_uuid())
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *connection)
         .await
         .map_err(Into::into)
     }
@@ -4022,7 +4097,7 @@ mod postgres_tests {
             .expect("won claim");
 
         let mut open_write = db
-            .begin_transaction()
+            .begin_event_write_transaction()
             .await
             .expect("open write transaction");
         sqlx::query("INSERT INTO pubkey_allowlist (community_id, pubkey) VALUES ($1, $2)")

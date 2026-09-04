@@ -7,6 +7,7 @@ import {
 } from "@/features/agents/lib/agentCardAvatar";
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
+import type { AgentAvailabilityReader } from "@/features/agents/lib/useAgentAvailability";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { hermesProfileNameFromAgent } from "@/features/agents/lib/hermesProfileBinding";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
@@ -15,6 +16,10 @@ import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { Badge } from "@/shared/ui/badge";
+import {
+  ProtectedBestieCardBadge,
+  useProtectedBestiePubkey,
+} from "@protected-feature-components";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
@@ -23,9 +28,11 @@ import { PersonaActionsMenu } from "./PersonaActionsMenu";
 import { SubagentTree } from "./SubagentTree";
 import { buildUnifiedGroups } from "./unifiedAgentGroups";
 import type { SubagentStatus } from "@/features/agents/lib/subagents";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type UnifiedAgentsSectionProps = {
   defaultModel: string;
+  getAvailability: AgentAvailabilityReader;
   actionErrorMessage: string | null;
   actionNoticeMessage: string | null;
   agents: ManagedAgent[];
@@ -77,6 +84,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     actionErrorMessage,
     actionNoticeMessage,
     defaultModel,
+    getAvailability,
     agents,
     agentsError,
     subagents = [],
@@ -105,6 +113,8 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   } = props;
 
   const isArchived = useIsArchivedPredicate();
+  const bestieRaw = useProtectedBestiePubkey(agents);
+  const bestiePubkey = bestieRaw ? normalizePubkey(bestieRaw) : null;
   const { groups, ungrouped, unknown } = React.useMemo(
     () => buildUnifiedGroups(personas, agents, isArchived),
     [personas, agents, isArchived],
@@ -168,7 +178,13 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                       : undefined
                   }
                   agent={card.agent}
+                  getAvailability={getAvailability}
                   defaultModel={defaultModel}
+                  isBestie={
+                    card.agent
+                      ? normalizePubkey(card.agent.pubkey) === bestiePubkey
+                      : false
+                  }
                   key={card.key}
                   label={card.label}
                   persona={card.persona}
@@ -191,8 +207,10 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
             <CollapsibleAgentGroup
               agents={unknown}
               collapsed={collapsed}
+              getAvailability={getAvailability}
               defaultModel={defaultModel}
               groupKey="__unknown__"
+              bestiePubkey={bestiePubkey}
               label="Unknown agents"
               restartingAgentPubkey={restartingAgentPubkey}
               startingAgentPubkey={startingAgentPubkey}
@@ -207,8 +225,10 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
             <CollapsibleAgentGroup
               agents={ungrouped}
               collapsed={collapsed}
+              getAvailability={getAvailability}
               defaultModel={defaultModel}
               groupKey="__ungrouped__"
+              bestiePubkey={bestiePubkey}
               label="Custom agents"
               restartingAgentPubkey={restartingAgentPubkey}
               startingAgentPubkey={startingAgentPubkey}
@@ -245,6 +265,8 @@ function AgentPersonaCard({
   agent,
   defaultModel,
   label,
+  isBestie,
+  getAvailability,
   persona,
   restartingAgentPubkey,
   startingAgentPubkey,
@@ -264,6 +286,8 @@ function AgentPersonaCard({
   agent: ManagedAgent | undefined;
   defaultModel: string;
   label: string;
+  isBestie: boolean;
+  getAvailability: AgentAvailabilityReader;
   persona: AgentPersona;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
@@ -279,6 +303,7 @@ function AgentPersonaCard({
   onStartAgent: (pubkey: string) => void;
   onStartPersona: (persona: AgentPersona) => void;
 }) {
+  const availability = getAvailability(agent?.pubkey);
   const title = label;
   const isActive = agent ? isManagedAgentActive(agent) : false;
   const profileQuery = useUserProfileQuery(agent?.pubkey);
@@ -317,6 +342,7 @@ function AgentPersonaCard({
             errorLabel={friendlyError}
             errorTestId={`agent-runtime-error-${agent.pubkey}`}
             isActive={isActive}
+            availability={availability}
             isRestarting={restartingAgentPubkey === agent.pubkey}
             isStarting={startingAgentPubkey === agent.pubkey}
             label={title}
@@ -345,6 +371,11 @@ function AgentPersonaCard({
       }
       avatarUrl={avatarUrl}
       dataTestId={testId}
+      footerAccessory={
+        agent ? (
+          <ProtectedBestieCardBadge agent={agent} isBestie={isBestie} />
+        ) : null
+      }
       label={title}
       modelLabel={modelLabel}
       subtitle={runtimeSubtitle || null}
@@ -374,7 +405,9 @@ function AgentPersonaCard({
 
 function StandaloneAgentCard({
   agent,
+  isBestie,
   defaultModel,
+  getAvailability,
   restartingAgentPubkey,
   startingAgentPubkey,
   onOpenAgentProfile,
@@ -382,7 +415,9 @@ function StandaloneAgentCard({
   onStartAgent,
 }: {
   agent: ManagedAgent;
+  isBestie: boolean;
   defaultModel: string;
+  getAvailability: AgentAvailabilityReader;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
   onOpenAgentProfile: (
@@ -392,6 +427,7 @@ function StandaloneAgentCard({
   onRestartAgent: (pubkey: string) => void;
   onStartAgent: (pubkey: string) => void;
 }) {
+  const availability = getAvailability(agent.pubkey);
   const title = agent.name;
   const profileQuery = useUserProfileQuery(agent.pubkey);
   const friendlyError = friendlyAgentLastError(
@@ -411,6 +447,7 @@ function StandaloneAgentCard({
           errorLabel={friendlyError}
           errorTestId={`agent-runtime-error-${agent.pubkey}`}
           isActive={isActive}
+          availability={availability}
           isRestarting={restartingAgentPubkey === agent.pubkey}
           isStarting={startingAgentPubkey === agent.pubkey}
           label={title}
@@ -428,6 +465,9 @@ function StandaloneAgentCard({
       }
       avatarUrl={profileQuery.data?.avatarUrl}
       dataTestId={`managed-agent-${agent.pubkey}`}
+      footerAccessory={
+        <ProtectedBestieCardBadge agent={agent} isBestie={isBestie} />
+      }
       label={title}
       subtitle={
         // Definition-less instance: no authored description exists, so fall
@@ -480,8 +520,10 @@ function CollapsibleAgentGroup({
   groupKey,
   label,
   agents,
+  bestiePubkey,
   collapsed,
   defaultModel,
+  getAvailability,
   restartingAgentPubkey,
   startingAgentPubkey,
   subagents,
@@ -493,8 +535,10 @@ function CollapsibleAgentGroup({
   groupKey: string;
   label: string;
   agents: ManagedAgent[];
+  bestiePubkey: string | null;
   collapsed: ReadonlySet<string>;
   defaultModel: string;
+  getAvailability: AgentAvailabilityReader;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
   subagents: readonly SubagentStatus[];
@@ -528,6 +572,8 @@ function CollapsibleAgentGroup({
             {agents.map((agent) => (
               <StandaloneAgentCard
                 agent={agent}
+                getAvailability={getAvailability}
+                isBestie={normalizePubkey(agent.pubkey) === bestiePubkey}
                 defaultModel={defaultModel}
                 key={agent.pubkey}
                 restartingAgentPubkey={restartingAgentPubkey}

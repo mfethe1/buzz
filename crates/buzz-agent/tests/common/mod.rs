@@ -19,7 +19,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex, Notify};
 
 pub struct CapturingLlm {
     pub url: String,
@@ -107,6 +107,7 @@ pub struct Harness {
     stdin: tokio::process::ChildStdin,
     stdout: BufReader<tokio::process::ChildStdout>,
     stderr: Arc<StdMutex<String>>,
+    stderr_changed: Arc<Notify>,
     next_id: i64,
 }
 
@@ -118,7 +119,7 @@ impl Harness {
     /// unset default (`reply_guard_on_by_default`) uses
     /// `spawn_with_true_env_defaults` instead.
     pub async fn spawn_with_env(base_url: &str, extra: &[(&str, &str)]) -> Self {
-        Self::spawn_with_env_inner(base_url, extra, true).await
+        Self::spawn_with_env_inner(base_url, extra, true, None).await
     }
 
     /// Like [`spawn_with_env`], but sends no reply-guard override at all — not
@@ -126,13 +127,24 @@ impl Harness {
     /// default reaches the process. Only `reply_guard_on_by_default` should
     /// call this; every other test wants `spawn_with_env` or `spawn`.
     pub async fn spawn_with_true_env_defaults(base_url: &str, extra: &[(&str, &str)]) -> Self {
-        Self::spawn_with_env_inner(base_url, extra, false).await
+        Self::spawn_with_env_inner(base_url, extra, false, None).await
+    }
+
+    /// Delay stderr collection until released, to exercise stdout/stderr ordering
+    /// without changing the child or relying on scheduler timing.
+    pub async fn spawn_with_stderr_gate(
+        base_url: &str,
+        extra: &[(&str, &str)],
+        stderr_gate: Option<oneshot::Receiver<()>>,
+    ) -> Self {
+        Self::spawn_with_env_inner(base_url, extra, true, stderr_gate).await
     }
 
     async fn spawn_with_env_inner(
         base_url: &str,
         extra: &[(&str, &str)],
         pin_reply_guard_off: bool,
+        stderr_gate: Option<oneshot::Receiver<()>>,
     ) -> Self {
         let bin = env!("CARGO_BIN_EXE_buzz-agent");
         let mut cmd = tokio::process::Command::new(bin);
@@ -160,7 +172,14 @@ impl Harness {
         let stderr = child.stderr.take().unwrap();
         let stderr_buf = Arc::new(StdMutex::new(String::new()));
         let stderr_out = Arc::clone(&stderr_buf);
+        let stderr_changed = Arc::new(Notify::new());
+        let changed = Arc::clone(&stderr_changed);
         tokio::spawn(async move {
+            if let Some(gate) = stderr_gate {
+                // Dropping the sender (e.g. on assertion failure) also unblocks
+                // collection, rather than leaving a detached reader waiting.
+                let _ = gate.await;
+            }
             let mut reader = BufReader::new(stderr);
             let mut line = String::new();
             loop {
@@ -175,6 +194,7 @@ impl Harness {
                 if let Ok(mut out) = stderr_out.lock() {
                     out.push_str(&line);
                 }
+                changed.notify_waiters();
             }
         });
         Self {
@@ -182,6 +202,7 @@ impl Harness {
             stdin,
             stdout,
             stderr: stderr_buf,
+            stderr_changed,
             next_id: 1,
         }
     }
@@ -253,8 +274,35 @@ impl Harness {
         let _ = self.child.start_kill();
     }
 
+    /// Snapshot only: receiving a response on stdout does not drain stderr.
     pub fn stderr_text(&self) -> String {
         self.stderr.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// Wait for a diagnostic in the independently collected stderr stream.
+    /// Returns the matching snapshot so subsequent assertions see its prefix.
+    pub async fn wait_for_stderr(&self, needle: &str, timeout: Duration) -> String {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let changed = self.stderr_changed.notified();
+                tokio::pin!(changed);
+                // Register before inspecting the buffer: a line collected between
+                // the snapshot and await must not become a lost wakeup.
+                changed.as_mut().enable();
+                let stderr = self.stderr_text();
+                if stderr.contains(needle) {
+                    return stderr;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "timed out waiting for stderr diagnostic {needle:?}; stderr={}",
+                self.stderr_text()
+            )
+        })
     }
 }
 

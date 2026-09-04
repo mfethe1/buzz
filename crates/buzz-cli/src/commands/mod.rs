@@ -5,6 +5,7 @@ pub mod cml;
 pub mod dms;
 pub mod emoji;
 pub mod feed;
+pub mod gifs;
 pub mod issues;
 pub mod mem;
 pub mod messages;
