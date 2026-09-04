@@ -523,6 +523,14 @@ pub struct CliArgs {
     /// or message content.
     #[arg(long = "session-store", env = "BUZZ_ACP_SESSION_STORE")]
     pub session_store_path: Option<PathBuf>,
+    /// Unix-seconds replay floor for the startup watermark. A publish-first
+    /// mention send publishes the triggering message and then spawns this
+    /// harness, passing the send timestamp here so the first REQ replays past
+    /// that message however long the spawn takes. Floors older than 15 minutes
+    /// are clamped to 15 minutes before startup; floors in the future are
+    /// ignored (the watermark stays at startup time).
+    #[arg(long, env = "BUZZ_ACP_REPLAY_FLOOR")]
+    pub replay_floor: Option<u64>,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -615,6 +623,12 @@ pub struct Config {
     /// Path to the durable session-binding store. `None` keeps bindings and
     /// processed-event dedupe in memory only.
     pub session_store_path: Option<PathBuf>,
+    /// Optional unix-seconds replay floor for the startup watermark
+    /// (`--replay-floor` / `BUZZ_ACP_REPLAY_FLOOR`), set by a publish-first
+    /// mention send so the first REQ replays past the already-published
+    /// triggering message. Clamped where consumed — see
+    /// `startup_watermark_with_floor`.
+    pub replay_floor_unix: Option<u64>,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -1198,6 +1212,7 @@ impl Config {
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
             session_store_path: args.session_store_path,
+            replay_floor_unix: args.replay_floor,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1578,6 +1593,7 @@ mod tests {
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
             session_store_path: None,
+            replay_floor_unix: None,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
