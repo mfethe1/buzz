@@ -20,7 +20,10 @@ import {
 import { useChannelSortPreference } from "@/features/sidebar/lib/useChannelSortPreference";
 import { useSidebarScrollLock } from "@/features/sidebar/lib/useSidebarScrollLock";
 import { isSidebarBackgroundTarget } from "@/features/sidebar/lib/sidebarBackgroundTarget";
-import { useSidebarActivityOverflow } from "@/features/sidebar/lib/useSidebarActivityOverflow";
+import {
+  sidebarOverflowUnreadLabel,
+  useSidebarUnreadOverflow,
+} from "@/features/sidebar/lib/useSidebarUnreadOverflow";
 import {
   CreateSectionDialog,
   DeleteSectionAlertDialog,
@@ -38,7 +41,6 @@ import {
   MoreUnreadButton,
   preferredUnreadTarget,
 } from "@/features/sidebar/ui/MoreUnreadButton";
-import { unreadCountLabel } from "@/shared/ui/UnreadPill";
 import { SidebarSection } from "@/features/sidebar/ui/SidebarSection";
 import {
   ChannelGroupSection,
@@ -96,6 +98,7 @@ export function AppSidebar({
   selectedView,
   unreadChannelCounts,
   unreadChannelIds,
+  highPriorityUnreadChannelIds,
   previewActivityChannelIds,
   communities,
   onAddCommunity,
@@ -152,10 +155,22 @@ export function AppSidebar({
   const showSidebarUpdateCard =
     canShowSidebarUpdateCard && !isSidebarUpdateCardDismissed;
   const [dmActionsMenuOpen, setDmActionsMenuOpen] = React.useState(false);
+  const allDirectMessages = React.useMemo(
+    () => channels.filter((channel) => channel.channelType === "dm"),
+    [channels],
+  );
+  const directMessages = useProtectedVisibleDirectMessages(
+    allDirectMessages,
+    currentPubkey,
+  );
+  const dmChannelIds = React.useMemo(
+    () => new Set(directMessages.map(({ id }) => id)),
+    [directMessages],
+  );
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useSidebarScrollLock(scrollRef);
   // biome-ignore format: keep compact to stay within file size limit
-  const { scrollToChannel, scrollToNextAbove, scrollToNextBelow, unreadAboveCount, unreadBelowCount, unreadMessageBelowChannelIds, unreadAboveLabel, unreadBelowLabel } = useSidebarActivityOverflow({ activeWorkingByChannelId, previewActivityChannelIds, scrollRef, unreadChannelIds });
+  const { hasHighPriorityAbove, hasHighPriorityBelow, scrollToChannel, scrollToNextAbove, scrollToNextBelow, unreadAboveCount, unreadBelowCount, unreadMessageBelowChannelIds } = useSidebarUnreadOverflow({ dmChannelIds, highPriorityUnreadChannelIds, previewActivityChannelIds, scrollRef, unreadChannelIds });
 
   React.useEffect(() => {
     const scrollElement = scrollRef.current;
@@ -369,14 +384,6 @@ export function AppSidebar({
       ),
     [channels, sortModeFor],
   );
-  const allDirectMessages = React.useMemo(
-    () => channels.filter((channel) => channel.channelType === "dm"),
-    [channels],
-  );
-  const directMessages = useProtectedVisibleDirectMessages(
-    allDirectMessages,
-    currentPubkey,
-  );
   const isSelectedDirectMessage =
     selectedView === "channel" &&
     directMessages.some((channel) => channel.id === selectedChannelId);
@@ -541,7 +548,8 @@ export function AppSidebar({
           {unreadAboveCount > 0 ? (
             <MoreUnreadButton
               count={unreadAboveCount}
-              label={unreadAboveLabel ?? unreadCountLabel(unreadAboveCount)}
+              emphasis={hasHighPriorityAbove ? "primary" : "default"}
+              label={sidebarOverflowUnreadLabel(unreadAboveCount)}
               onClick={scrollToNextAbove}
               position="top"
               testId="sidebar-more-unread-above"
@@ -602,7 +610,6 @@ export function AppSidebar({
                       onToggleCollapsed={() => toggleCollapsedGroup("starred")}
                       selectedChannelId={selectedChannelId}
                       title="Starred"
-                      unreadChannelCounts={unreadChannelCounts}
                       unreadChannelIds={unreadChannelIds}
                       mutedChannelIds={mutedChannelIds}
                       onMuteChannel={onMuteChannel}
@@ -636,7 +643,6 @@ export function AppSidebar({
                         isActiveChannel={selectedView === "channel"}
                         activeWorkingByChannelId={activeWorkingByChannelId}
                         selectedChannelId={selectedChannelId}
-                        unreadChannelCounts={unreadChannelCounts}
                         unreadChannelIds={unreadChannelIds}
                         sections={channelSections}
                         assignments={channelAssignments}
@@ -707,7 +713,6 @@ export function AppSidebar({
                       onToggleCollapsed={() => toggleCollapsedGroup("channels")}
                       selectedChannelId={selectedChannelId}
                       title="Channels"
-                      unreadChannelCounts={unreadChannelCounts}
                       unreadChannelIds={unreadChannelIds}
                       sections={channelSections}
                       assignments={channelAssignments}
@@ -746,7 +751,6 @@ export function AppSidebar({
                       onToggleCollapsed={() => toggleCollapsedGroup("forums")}
                       selectedChannelId={selectedChannelId}
                       title="Forums"
-                      unreadChannelCounts={unreadChannelCounts}
                       unreadChannelIds={unreadChannelIds}
                       mutedChannelIds={mutedChannelIds}
                       onMuteChannel={onMuteChannel}
@@ -816,7 +820,8 @@ export function AppSidebar({
               bottomClassName="bottom-full"
               count={unreadBelowCount}
               dmPreviews={unreadDmPreviewsBelow}
-              label={unreadBelowLabel ?? unreadCountLabel(unreadBelowCount)}
+              emphasis={hasHighPriorityBelow ? "primary" : "default"}
+              label={sidebarOverflowUnreadLabel(unreadBelowCount)}
               onClick={() =>
                 nextUnreadDmBelowId
                   ? scrollToChannel(nextUnreadDmBelowId)
