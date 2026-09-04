@@ -278,56 +278,60 @@ void main() {
     );
   });
 
-  testWidgets('captureShot survives a comparator that does real file I/O', (
-    tester,
-  ) async {
-    // Regression guard for a bug this file used to be blind to. Handed raw
-    // bytes, matchesGoldenFile awaits the golden comparator OUTSIDE runAsync,
-    // and the real LocalFileComparator reads and writes with dart:io futures
-    // that never complete inside a widget test's fake-async zone — so
-    // `flutter test --update-goldens` hung forever instead of writing a PNG,
-    // while every assertion here stayed green against the in-memory stub.
-    //
-    // The explicit timeout matters as much as the assertions: flutter_test
-    // disables per-test timeouts by default, so a regression would otherwise
-    // hang CI indefinitely rather than fail it.
-    final tempDir = Directory.systemTemp.createTempSync('golden_shot_selftest');
-    final previousComparator = goldenFileComparator;
-    final comparator = _RealIoGoldens(tempDir);
-    goldenFileComparator = comparator;
-    resetShotDigests();
-    addTearDown(() {
-      goldenFileComparator = previousComparator;
+  testWidgets(
+    'captureShot survives a comparator that does real file I/O',
+    (tester) async {
+      // Regression guard for a bug this file used to be blind to. Handed raw
+      // bytes, matchesGoldenFile awaits the golden comparator OUTSIDE runAsync,
+      // and the real LocalFileComparator reads and writes with dart:io futures
+      // that never complete inside a widget test's fake-async zone — so
+      // `flutter test --update-goldens` hung forever instead of writing a PNG,
+      // while every assertion here stayed green against the in-memory stub.
+      //
+      // The explicit timeout matters as much as the assertions: flutter_test
+      // disables per-test timeouts by default, so a regression would otherwise
+      // hang CI indefinitely rather than fail it.
+      final tempDir = Directory.systemTemp.createTempSync(
+        'golden_shot_selftest',
+      );
+      final previousComparator = goldenFileComparator;
+      final comparator = _RealIoGoldens(tempDir);
+      goldenFileComparator = comparator;
       resetShotDigests();
-      tempDir.deleteSync(recursive: true);
-    });
+      addTearDown(() {
+        goldenFileComparator = previousComparator;
+        resetShotDigests();
+        tempDir.deleteSync(recursive: true);
+      });
 
-    setPhoneSurface(tester);
-    await tester.pumpWidget(
-      _swatch(
-        const Text(
-          'Buzz',
-          style: TextStyle(
-            fontFamily: 'Inter',
-            fontSize: 28,
-            color: Colors.black,
+      setPhoneSurface(tester);
+      await tester.pumpWidget(
+        _swatch(
+          const Text(
+            'Buzz',
+            style: TextStyle(
+              fontFamily: 'Inter',
+              fontSize: 28,
+              color: Colors.black,
+            ),
           ),
         ),
-      ),
-    );
+      );
 
-    await captureShot(tester, find.byKey(_shotKey), 'real-comparator');
+      await captureShot(tester, find.byKey(_shotKey), 'real-comparator');
 
-    final written = comparator.fileFor(
-      Uri.parse('goldens/real-comparator.png'),
-    );
-    expect(
-      written.existsSync(),
-      isTrue,
-      reason: 'captureShot produced no PNG at ${written.path}',
-    );
-    // PNG magic number — proves a real image landed, not a truncated write.
-    expect(written.readAsBytesSync().take(4), <int>[0x89, 0x50, 0x4e, 0x47]);
-    expect(written.lengthSync(), greaterThan(500));
-  }, timeout: const Timeout(Duration(seconds: 60)));
+      final written = comparator.fileFor(
+        Uri.parse('goldens/real-comparator.png'),
+      );
+      expect(
+        written.existsSync(),
+        isTrue,
+        reason: 'captureShot produced no PNG at ${written.path}',
+      );
+      // PNG magic number — proves a real image landed, not a truncated write.
+      expect(written.readAsBytesSync().take(4), <int>[0x89, 0x50, 0x4e, 0x47]);
+      expect(written.lengthSync(), greaterThan(500));
+    },
+    timeout: const Timeout(Duration(seconds: 60)),
+  );
 }
