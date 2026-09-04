@@ -1,0 +1,248 @@
+/*
+ * Dialogica Solutions — brand theme.
+ *
+ * Mirrors the first-party Buzz theme mechanism: `dialogica` / `dialogica-dark`
+ * are theme aliases that reuse a bundled Shiki palette for code highlighting
+ * while overriding the app's semantic design tokens with the Dialogica brand
+ * system. ThemeProvider toggles `data-dialogica` on <html> when either theme
+ * is active (mirroring `data-buzz-sidebar`).
+ *
+ * Source of truth: https://design.dialogicasolutions.com — `colors_and_type.css`
+ * from the official brand kit. Hex values there are converted to the HSL
+ * triplet format Buzz's tokens use (`H S% L%`, consumed via `hsl(var(--token))`).
+ *
+ * Contrast: every foreground/background pairing below was measured against
+ * WCAG 2.1. Two brand pairings fail and are deliberately NOT used as-is:
+ *   - white on --signal-500  = 2.38:1  -> CTA text uses --signal-ink (6.35:1)
+ *   - --signal-500 on paper  = 2.28:1  -> links use --navy-500      (6.44:1)
+ * Signal cyan is reserved for fills, focus rings, and dark-mode accents where
+ * it measures 10.19:1 on navy.
+ */
+
+/* ---------- Brand webfonts ---------- */
+@font-face {
+  font-family: "Merriweather";
+  src: url("/fonts/dialogica/Merriweather-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Merriweather";
+  src: url("/fonts/dialogica/Merriweather-Italic.ttf") format("truetype");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Merriweather";
+  src: url("/fonts/dialogica/Merriweather-LightItalic.ttf") format("truetype");
+  font-weight: 300;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Merriweather";
+  src: url("/fonts/dialogica/Merriweather-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Merriweather";
+  src: url("/fonts/dialogica/Merriweather-Black.ttf") format("truetype");
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Nunito Sans";
+  src: url("/fonts/dialogica/NunitoSans-Variable.ttf")
+    format("truetype-variations");
+  font-weight: 200 1000;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Nunito Sans";
+  src: url("/fonts/dialogica/NunitoSans-Italic-Variable.ttf")
+    format("truetype-variations");
+  font-weight: 200 1000;
+  font-style: italic;
+  font-display: swap;
+}
+
+/*
+ * Raw brand palette. Exposed as hex for logo/gradient work and as HSL triplets
+ * for the semantic tokens below. Unlayered so they win over the layered
+ * defaults in `theme.css` without `!important`, matching the Buzz gradient.
+ */
+:root[data-dialogica] {
+  --dg-navy-950: 225 70% 7.84%;
+  --dg-navy-900: 225.8 65.52% 11.37%;
+  --dg-navy-800: 227.1 60% 16.67%;
+  --dg-navy-700: 226 53.57% 21.96%;
+  --dg-navy-600: 227.7 48.15% 31.76%;
+  --dg-navy-500: 227 42.36% 44.9%;
+  --dg-navy-400: 228.1 40.95% 58.82%;
+  --dg-navy-300: 227.5 38.1% 75.29%;
+  --dg-navy-200: 228 39.68% 87.65%;
+  --dg-navy-100: 226.2 41.94% 93.92%;
+  --dg-navy-050: 225 57.14% 97.25%;
+
+  --dg-paper: 45 33.33% 97.65%;
+  --dg-paper-2: 46.7 27.27% 93.53%;
+  --dg-white: 0 0% 100%;
+
+  --dg-ink-900: 225.8 65.52% 11.37%;
+  --dg-ink-700: 225.8 30.16% 24.71%;
+  --dg-ink-500: 225.4 16.89% 42.94%;
+  --dg-ink-400: 225.9 17% 60.78%;
+  --dg-ink-300: 225.9 18.68% 82.16%;
+  --dg-ink-200: 229.1 24.44% 91.18%;
+  --dg-ink-100: 231.4 30.43% 95.49%;
+
+  --dg-signal-500: 187.9 100% 41.57%;
+  --dg-signal-400: 187.5 85.95% 52.55%;
+  --dg-signal-600: 188.3 100% 33.92%;
+  --dg-signal-100: 190.3 81.4% 91.57%;
+  --dg-signal-ink: 192 78.95% 11.18%;
+
+  --dg-foil-gold: 39.8 46.8% 60.2%;
+  --dg-success: 150.8 45.35% 33.73%;
+  --dg-warning: 42.7 88.72% 38.24%;
+  --dg-danger: 3.2 71.29% 40.98%;
+
+  /* Brand gradient stops, reused by the sidebar canvas. */
+  --dg-gradient-light-top: #f4f6fc;
+  --dg-gradient-light-bottom: #e9ecf6;
+  --dg-gradient-dark-top: #111c44;
+  --dg-gradient-dark-bottom: #060d22;
+
+  /* Brand type. Merriweather is the display serif; Nunito Sans carries body. */
+  --dg-font-display: "Merriweather", Georgia, "Times New Roman", serif;
+  --dg-font-sans: "Nunito Sans", "Helvetica Neue", Inter, system-ui, sans-serif;
+}
+
+/* ---------- Light: paper ground, navy ink ---------- */
+:root[data-dialogica] {
+  --background: var(--dg-paper);
+  --foreground: var(--dg-ink-900);
+  --card: var(--dg-white);
+  --card-foreground: var(--dg-ink-900);
+  --popover: var(--dg-white);
+  --popover-foreground: var(--dg-ink-900);
+
+  /* Navy leads; it measures 6.44:1 on paper where cyan measures 2.28:1. */
+  --primary: var(--dg-navy-900);
+  --primary-foreground: var(--dg-white);
+  --secondary: var(--dg-navy-100);
+  --secondary-foreground: var(--dg-navy-800);
+  --muted: var(--dg-ink-100);
+  --muted-foreground: var(--dg-ink-500);
+  --accent: var(--dg-signal-100);
+  --accent-foreground: var(--dg-signal-ink);
+
+  --destructive: var(--dg-danger);
+  --destructive-foreground: var(--dg-white);
+  --border: var(--dg-ink-200);
+  --input: var(--dg-ink-200);
+  --ring: var(--dg-signal-500);
+
+  --chart-1: var(--dg-navy-500);
+  --chart-2: var(--dg-signal-500);
+  --chart-3: var(--dg-navy-300);
+  --chart-4: var(--dg-foil-gold);
+  --chart-5: var(--dg-success);
+
+  --sidebar: var(--dg-navy-050);
+  --sidebar-background: var(--dg-navy-050);
+  --sidebar-foreground: var(--dg-ink-700);
+  --sidebar-primary: var(--dg-navy-900);
+  --sidebar-primary-foreground: var(--dg-white);
+  --sidebar-active: var(--sidebar-primary);
+  --sidebar-active-foreground: var(--sidebar-primary-foreground);
+  --sidebar-accent: var(--dg-navy-100);
+  --sidebar-accent-foreground: var(--dg-navy-800);
+  --sidebar-border: var(--dg-navy-200);
+  --sidebar-ring: var(--dg-signal-500);
+}
+
+/* ---------- Dark: deep navy ground, cyan accent ---------- */
+:root[data-dialogica].dark {
+  --background: var(--dg-navy-900);
+  --foreground: 0 0% 100%;
+  --card: var(--dg-navy-800);
+  --card-foreground: 0 0% 100%;
+  --popover: var(--dg-navy-800);
+  --popover-foreground: 0 0% 100%;
+
+  /* On navy, signal cyan measures 10.19:1 — it leads in dark mode. */
+  --primary: var(--dg-signal-400);
+  --primary-foreground: var(--dg-signal-ink);
+  --secondary: var(--dg-navy-700);
+  --secondary-foreground: 0 0% 100%;
+  --muted: var(--dg-navy-700);
+  --muted-foreground: var(--dg-navy-300);
+  --accent: var(--dg-navy-700);
+  --accent-foreground: var(--dg-signal-400);
+
+  --destructive: 3.2 71.29% 55%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 0 0% 100% / 10%;
+  --input: var(--dg-navy-700);
+  --ring: var(--dg-signal-400);
+
+  --chart-1: var(--dg-signal-400);
+  --chart-2: var(--dg-navy-300);
+  --chart-3: var(--dg-foil-gold);
+  --chart-4: var(--dg-navy-400);
+  --chart-5: var(--dg-signal-100);
+
+  --sidebar: var(--dg-navy-950);
+  --sidebar-background: var(--dg-navy-950);
+  --sidebar-foreground: var(--dg-navy-300);
+  --sidebar-primary: var(--dg-signal-400);
+  --sidebar-primary-foreground: var(--dg-signal-ink);
+  --sidebar-accent: var(--dg-navy-800);
+  --sidebar-accent-foreground: 0 0% 100%;
+  --sidebar-border: 0 0% 100% / 8%;
+  --sidebar-ring: var(--dg-signal-400);
+}
+
+/* Brand typography: Merriweather for headings, Nunito Sans for body. */
+:root[data-dialogica] body {
+  font-family: var(--dg-font-sans);
+}
+
+:root[data-dialogica] h1,
+:root[data-dialogica] h2,
+:root[data-dialogica] h3 {
+  font-family: var(--dg-font-display);
+  letter-spacing: -0.02em;
+}
+
+/*
+ * Sidebar canvas gradient.
+ *
+ * The gradient layers (`.buzz-theme-gradient-layer-*`) are always rendered by
+ * `BuzzThemeSurfaces.tsx`, but every rule that paints them is gated behind
+ * `:root[data-buzz-sidebar]`. ThemeProvider therefore sets `data-buzz-sidebar`
+ * for Dialogica too, so the existing, WKWebView-safe two-layer machinery is
+ * reused verbatim; only the gradient stop variables are re-pointed at brand
+ * navy. Overriding the same `--buzz-gradient-*` custom properties the Buzz
+ * rules already read means no duplicate paint rules and no `!important`.
+ */
+:root[data-dialogica] {
+  --buzz-gradient-light-top: var(--dg-gradient-light-top);
+  --buzz-gradient-light-bottom: var(--dg-gradient-light-bottom);
+  --buzz-gradient-dark-top: var(--dg-gradient-dark-top);
+  --buzz-gradient-dark-bottom: var(--dg-gradient-dark-bottom);
+  --buzz-gradient-top: var(--dg-gradient-light-top);
+  --buzz-gradient-bottom: var(--dg-gradient-light-bottom);
+}
+
+:root[data-dialogica].dark {
+  --buzz-gradient-top: var(--dg-gradient-dark-top);
+  --buzz-gradient-bottom: var(--dg-gradient-dark-bottom);
+}

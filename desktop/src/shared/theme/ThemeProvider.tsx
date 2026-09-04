@@ -248,20 +248,52 @@ export function isBuzzTheme(themeName: string): boolean {
 }
 
 /**
+ * Whether a theme is one of the Dialogica Solutions brand themes.
+ *
+ * Like the Buzz themes, these ship a fixed brand accent rather than a
+ * user-selectable one, so the accent picker is pinned and hidden for them too.
+ */
+export function isDialogicaTheme(themeName: string): boolean {
+  return themeName === "dialogica" || themeName === "dialogica-dark";
+}
+
+/**
+ * The accent each Dialogica theme is pinned to.
+ *
+ * Buzz pins its brand themes to {@link NEUTRAL_ACCENT}; Dialogica pins to a real
+ * brand hex instead, because the accent drives `--primary` / `--ring` (written
+ * inline, so it outranks the brand stylesheet). The two are split by mode on
+ * measured WCAG contrast: signal cyan is 10.19:1 on navy-900 but only 2.28:1 on
+ * paper, so light mode leads with navy-500 (6.44:1) and reserves cyan for the
+ * focus ring and fills.
+ */
+const DIALOGICA_ACCENTS: Record<string, string> = {
+  dialogica: "#4257a3", // --navy-500, 6.44:1 on paper
+  "dialogica-dark": "#1ed4ee", // --signal-400, 10.19:1 on navy-900
+};
+
+/**
  * Resolve the accent to actually apply for a theme: Buzz themes are pinned to
- * the neutral accent; every other theme uses the stored/selected accent.
+ * the neutral accent, Dialogica themes to their brand accent, and every other
+ * theme uses the stored/selected accent.
  */
 function resolveEffectiveAccent(
   themeName: string,
   accentColor: string,
 ): string {
-  return isBuzzTheme(themeName) ? NEUTRAL_ACCENT : accentColor;
+  if (isBuzzTheme(themeName)) return NEUTRAL_ACCENT;
+  return DIALOGICA_ACCENTS[themeName] ?? accentColor;
 }
 
 /** Toggle the Buzz-specific gradient marker independently from glass. */
 function applyBuzzSidebar(themeName: string) {
   const root = document.documentElement;
-  if (isBuzzTheme(themeName)) {
+  const dialogica = isDialogicaTheme(themeName);
+  // Dialogica reuses the Buzz gradient machinery: every rule that paints the
+  // `.buzz-theme-gradient-layer-*` surfaces is gated behind `data-buzz-sidebar`,
+  // so the brand themes set it too and only re-point the `--buzz-gradient-*`
+  // stops (see `shared/styles/globals/dialogica.css`).
+  if (isBuzzTheme(themeName) || dialogica) {
     root.setAttribute("data-buzz-sidebar", "");
     // Keep the concrete Buzz variant on the root as well as the generic
     // marker. The gradient stylesheet matches this attribute directly, which
@@ -271,6 +303,13 @@ function applyBuzzSidebar(themeName: string) {
   } else {
     root.removeAttribute("data-buzz-sidebar");
     root.removeAttribute("data-buzz-theme");
+  }
+  // Scope the Dialogica token overrides. Set last so it survives the branch
+  // above, and mirrors `data-buzz-theme` for WKWebView repaint invalidation.
+  if (dialogica) {
+    root.setAttribute("data-dialogica", "");
+  } else {
+    root.removeAttribute("data-dialogica");
   }
 }
 

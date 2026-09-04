@@ -65,7 +65,7 @@ const THEMES = await palettes();
 
 test("every shipped theme is censused", () => {
   assert.equal(THEMES.length, SYNTAX_THEMES.length);
-  assert.equal(THEMES.length, 62);
+  assert.equal(THEMES.length, 64);
 });
 
 test("wordmark holds contrast and chroma across the whole sweep, not just at the stops", () => {

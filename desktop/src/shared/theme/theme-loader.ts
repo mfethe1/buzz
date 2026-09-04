@@ -35,11 +35,30 @@ export const BUZZ_THEME_NAME = "buzz";
  */
 export const BUZZ_DARK_THEME_NAME = "buzz-dark";
 
+/**
+ * Dialogica Solutions brand theme names. These follow the same alias pattern as
+ * {@link BUZZ_THEME_NAME}: they are not bundled Shiki themes, so they borrow the
+ * GitHub Light / GitHub Dark palettes for code highlighting while
+ * `shared/styles/globals/dialogica.css` overrides the app's semantic tokens with
+ * the official Dialogica brand system (navy / paper / signal cyan, Merriweather
+ * + Nunito Sans). Source of truth: https://design.dialogicasolutions.com
+ */
+export const DIALOGICA_THEME_NAME = "dialogica";
+
+/** The dark-mode counterpart to {@link DIALOGICA_THEME_NAME}. */
+export const DIALOGICA_DARK_THEME_NAME = "dialogica-dark";
+
 /** The Shiki bundle Buzz borrows its base palette from. */
 export const BUZZ_BASE_THEME: SyntaxThemeName = "github-light";
 
 /** The Shiki bundle Buzz Dark borrows its base palette from. */
 export const BUZZ_DARK_BASE_THEME: SyntaxThemeName = "github-dark";
+
+/** The Shiki bundle the Dialogica light theme borrows its base palette from. */
+export const DIALOGICA_BASE_THEME: SyntaxThemeName = "github-light";
+
+/** The Shiki bundle the Dialogica dark theme borrows its base palette from. */
+export const DIALOGICA_DARK_BASE_THEME: SyntaxThemeName = "github-dark";
 
 /**
  * Resolve a theme name to the real Shiki bundled theme it maps to.
@@ -55,15 +74,20 @@ export const BUZZ_DARK_BASE_THEME: SyntaxThemeName = "github-dark";
 export function resolveShikiThemeName(name: string): SyntaxThemeName {
   if (name === BUZZ_THEME_NAME) return BUZZ_BASE_THEME;
   if (name === BUZZ_DARK_THEME_NAME) return BUZZ_DARK_BASE_THEME;
+  if (name === DIALOGICA_THEME_NAME) return DIALOGICA_BASE_THEME;
+  if (name === DIALOGICA_DARK_THEME_NAME) return DIALOGICA_DARK_BASE_THEME;
   return name as SyntaxThemeName;
 }
 
 // Available themes. "buzz" is a Buzz-branded theme that reuses the
-// github-light palette plus a sidebar gradient; the rest are the Shiki
-// bundled syntax themes, alphabetically sorted.
+// github-light palette plus a sidebar gradient; "dialogica" is the Dialogica
+// Solutions brand theme built the same way; the rest are the Shiki bundled
+// syntax themes, alphabetically sorted.
 export const SYNTAX_THEMES = [
   "buzz",
   "buzz-dark",
+  "dialogica",
+  "dialogica-dark",
   "andromeeda",
   "aurora-x",
   "ayu-dark",
@@ -132,6 +156,7 @@ export type SyntaxThemeName = (typeof SYNTAX_THEMES)[number];
 // for themes that haven't been loaded yet.
 export const LIGHT_THEMES: ReadonlySet<SyntaxThemeName> = new Set([
   "buzz",
+  "dialogica",
   "catppuccin-latte",
   "everforest-light",
   "github-light",
@@ -161,6 +186,10 @@ const themeImports: Record<
   buzz: () => import("shiki/themes/github-light.mjs"),
   // Buzz Dark reuses the github-dark palette; dark gradient applied separately.
   "buzz-dark": () => import("shiki/themes/github-dark.mjs"),
+  // Dialogica reuses the same GitHub palettes for code highlighting; the brand
+  // tokens and gradient live in `shared/styles/globals/dialogica.css`.
+  dialogica: () => import("shiki/themes/github-light.mjs"),
+  "dialogica-dark": () => import("shiki/themes/github-dark.mjs"),
   andromeeda: () => import("shiki/themes/andromeeda.mjs"),
   "aurora-x": () => import("shiki/themes/aurora-x.mjs"),
   "ayu-dark": () => import("shiki/themes/ayu-dark.mjs"),
@@ -241,6 +270,8 @@ export const THEME_PAIRS: ReadonlyMap<SyntaxThemeName, SyntaxThemeName> =
     // Light → Dark
     // Buzz is the first-party pair; keep it first so it leads every category.
     ["buzz", "buzz-dark"],
+    // Dialogica brand pair, registered the same way so "Follow system" works.
+    ["dialogica", "dialogica-dark"],
     ["catppuccin-latte", "catppuccin-mocha"],
     ["everforest-light", "everforest-dark"],
     ["github-light", "github-dark"],
@@ -260,6 +291,7 @@ export const THEME_PAIRS: ReadonlyMap<SyntaxThemeName, SyntaxThemeName> =
     ["vitesse-light", "vitesse-dark"],
     // Dark → Light (reverse mappings)
     ["buzz-dark", "buzz"],
+    ["dialogica-dark", "dialogica"],
     ["catppuccin-mocha", "catppuccin-latte"],
     ["everforest-dark", "everforest-light"],
     ["github-dark", "github-light"],
@@ -387,14 +419,50 @@ export interface ThemeInfo {
   terminalPalette: TerminalPalette;
 }
 
+/**
+ * Brand chrome colors for the Dialogica themes.
+ *
+ * The app's semantic tokens are *derived* from a theme's editor background /
+ * foreground by `createThemeVars`, then written to `:root` as inline styles.
+ * Inline styles outrank any stylesheet, so a CSS-only brand theme would have
+ * its `--background` / `--foreground` / `--primary` silently overridden by the
+ * borrowed Shiki palette. Seeding the derivation with the brand hexes here is
+ * what makes the whole system — chrome, terminal palette, and the settings
+ * preview tiles, which all read `extractThemeInfo` — resolve to Dialogica.
+ *
+ * Values are the official brand hexes: navy-900 / paper / ink-500 for light and
+ * navy-900 / white / navy-300 for dark. Code syntax highlighting is unaffected
+ * and keeps the GitHub token colors the themes alias.
+ */
+const DIALOGICA_CHROME: Record<
+  string,
+  { bg: string; fg: string; comment: string }
+> = {
+  [DIALOGICA_THEME_NAME]: {
+    bg: "#fbfaf7", // --paper
+    fg: "#0a1330", // --ink-900 (17.51:1 on paper)
+    comment: "#5b6480", // --ink-500 (5.62:1 on paper)
+  },
+  [DIALOGICA_DARK_THEME_NAME]: {
+    bg: "#0a1330", // --navy-900
+    fg: "#ffffff", // 18.28:1 on navy-900
+    comment: "#a8b2d8", // --navy-300 (8.73:1 on navy-900)
+  },
+};
+
 export function extractThemeInfo(
   themeName: string,
   theme: ThemeRegistrationRaw,
 ): ThemeInfo {
+  const brand = DIALOGICA_CHROME[themeName];
   const bg =
-    (theme.colors?.["editor.background"] as string | undefined) || "#1e1e1e";
+    brand?.bg ??
+    (theme.colors?.["editor.background"] as string | undefined) ??
+    "#1e1e1e";
   const fg =
-    (theme.colors?.["editor.foreground"] as string | undefined) || "#d4d4d4";
+    brand?.fg ??
+    (theme.colors?.["editor.foreground"] as string | undefined) ??
+    "#d4d4d4";
   const gitColors = extractGitColors(
     theme.colors as Record<string, string> | undefined,
   );
@@ -402,10 +470,12 @@ export function extractThemeInfo(
     name: themeName,
     bg,
     fg,
-    comment: extractCommentColor(
-      theme.settings as ReadonlyArray<ThemeSetting> | undefined,
-      fg,
-    ),
+    comment:
+      brand?.comment ??
+      extractCommentColor(
+        theme.settings as ReadonlyArray<ThemeSetting> | undefined,
+        fg,
+      ),
     ...gitColors,
     terminalPalette: extractTerminalPalette(theme),
   };
