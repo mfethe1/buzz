@@ -28,6 +28,7 @@ import { PersonaActionsMenu } from "./PersonaActionsMenu";
 import { SubagentTree } from "./SubagentTree";
 import { buildUnifiedGroups } from "./unifiedAgentGroups";
 import type { SubagentStatus } from "@/features/agents/lib/subagents";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type UnifiedAgentsSectionProps = {
   defaultModel: string;
@@ -112,7 +113,8 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   } = props;
 
   const isArchived = useIsArchivedPredicate();
-  const bestiePubkey = useProtectedBestiePubkey(agents)?.toLowerCase() ?? null;
+  const bestieRaw = useProtectedBestiePubkey(agents);
+  const bestiePubkey = bestieRaw ? normalizePubkey(bestieRaw) : null;
   const { groups, ungrouped, unknown } = React.useMemo(
     () => buildUnifiedGroups(personas, agents, isArchived),
     [personas, agents, isArchived],
@@ -178,7 +180,11 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                   agent={card.agent}
                   getAvailability={getAvailability}
                   defaultModel={defaultModel}
-                  isBestie={card.agent?.pubkey.toLowerCase() === bestiePubkey}
+                  isBestie={
+                    card.agent
+                      ? normalizePubkey(card.agent.pubkey) === bestiePubkey
+                      : false
+                  }
                   key={card.key}
                   label={card.label}
                   persona={card.persona}
@@ -567,7 +573,7 @@ function CollapsibleAgentGroup({
               <StandaloneAgentCard
                 agent={agent}
                 getAvailability={getAvailability}
-                isBestie={agent.pubkey.toLowerCase() === bestiePubkey}
+                isBestie={normalizePubkey(agent.pubkey) === bestiePubkey}
                 defaultModel={defaultModel}
                 key={agent.pubkey}
                 restartingAgentPubkey={restartingAgentPubkey}

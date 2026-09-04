@@ -1161,10 +1161,9 @@ mod tests {
     use super::{
         channel_id_from_event, cmd_get_thread, cmd_send_message, event_mention_pubkeys,
         find_root_from_tags, format_events, match_profiles_by_name, merge_message_mentions,
-        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
-        read_link_preview_json, resolve_names_to_pubkeys, resolve_thread_target,
-        thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
-        MAX_LINK_PREVIEW_JSON_BYTES,
+        missing_members, normalize_explicit_mentions, parse_member_pubkeys, read_link_preview_json,
+        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
+        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid, MAX_LINK_PREVIEW_JSON_BYTES,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,

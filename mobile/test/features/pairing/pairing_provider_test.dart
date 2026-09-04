@@ -142,26 +142,33 @@ void main() {
     // guard is relaxed in debug builds to support local/LAN relay development.
     // The production guard is exercised by pairing_provider_test.dart's
     // non-debug cases and _isPrivateHost unit coverage below.
-    test('accepts private IP relay URLs in debug mode (local relay dev)', () async {
-      container = createContainer();
+    test(
+      'accepts private IP relay URLs in debug mode (local relay dev)',
+      () async {
+        container = createContainer();
 
-      for (final ip in [
-        '10.0.0.1',
-        '172.16.0.1',
-        '192.168.1.1',
-        '169.254.169.254',
-      ]) {
-        final code = _encodePairingCode(relayUrl: 'http://$ip:3000');
-        await container.read(pairingProvider.notifier).pair(code);
-        final state = container.read(pairingProvider);
-        // In debug mode the private-IP guard is relaxed (local relay dev), so
-        // validation proceeds past _validateRelayUrl and fails later at payload
-        // parsing — proving the SSRF guard was NOT the rejection reason.
-        expect(state.status, PairingStatus.error, reason: 'should not pair $ip');
-        expect(state.errorMessage, contains('missing nsec'));
-        container.read(pairingProvider.notifier).reset();
-      }
-    });
+        for (final ip in [
+          '10.0.0.1',
+          '172.16.0.1',
+          '192.168.1.1',
+          '169.254.169.254',
+        ]) {
+          final code = _encodePairingCode(relayUrl: 'http://$ip:3000');
+          await container.read(pairingProvider.notifier).pair(code);
+          final state = container.read(pairingProvider);
+          // In debug mode the private-IP guard is relaxed (local relay dev), so
+          // validation proceeds past _validateRelayUrl and fails later at payload
+          // parsing — proving the SSRF guard was NOT the rejection reason.
+          expect(
+            state.status,
+            PairingStatus.error,
+            reason: 'should not pair $ip',
+          );
+          expect(state.errorMessage, contains('missing nsec'));
+          container.read(pairingProvider.notifier).reset();
+        }
+      },
+    );
 
     test('rejects non-http/https schemes', () async {
       container = createContainer();
