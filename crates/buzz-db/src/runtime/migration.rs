@@ -703,8 +703,9 @@ mod postgres_tests {
         migrations.sort_by_key(|migration| migration.version);
 
         // upstream carries 44 (0032-0034 and 0040 adopted from our PRs);
-        // fork adds 0046_task_system (PR #6425 pending upstream).
-        assert_eq!(migrations.len(), 45);
+        // fork adds 0046_task_system (PR #6425 pending upstream) and
+        // 0047_agent_machine_homes (AGENT-HOMES-001 PR-3).
+        assert_eq!(migrations.len(), 46);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
