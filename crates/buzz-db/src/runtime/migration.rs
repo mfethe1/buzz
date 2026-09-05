@@ -708,9 +708,11 @@ mod postgres_tests {
         // 0046_task_system (PR #6425 pending upstream),
         // 0047_agent_machine_homes (AGENT-HOMES-001 PR-3),
         // 0048_community_brand_color (REG-10; renumbered from 0037, which is
-        // upstream-owned relay_admin_action_lease), and 0049 structured task
-        // history. All stay additive for existing deployments.
-        assert_eq!(migrations.len(), 50);
+        // upstream-owned relay_admin_action_lease), 0049 structured task
+        // history, and 0052_agent_capability_grants (AGENT-HOMES-001 PR-4,
+        // renumbered from 0048 because the fork already took that slot).
+        // All stay additive for existing deployments.
+        assert_eq!(migrations.len(), 51);
         assert_eq!(migrations[44].version, 45);
         assert_eq!(migrations[45].version, 46);
         assert_eq!(migrations[46].version, 47);
@@ -723,6 +725,14 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("CREATE TABLE storage_accounting_snapshots"));
+        // Per-machine capability grants: authored as 0048 on the PR-4 branch,
+        // renumbered to 0052 because trunk had already shipped 0048 as the
+        // community brand color and 0050 is reserved by feat/HW-017.
+        assert_eq!(migrations[50].version, 52);
+        assert!(migrations[50]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE agent_capability_grants"));
         let task_changes = migrations[48].sql.as_str();
 
         // Slot 46 is CHECKSUM-FROZEN to the fork's task system.
