@@ -385,10 +385,11 @@ NostrEvent _observerEvent({
 }
 
 class _GoldenRelaySession extends RelaySessionNotifier {
-  final List<NostrFilter> filters = [];
   final List<void Function(NostrEvent)> _listeners = [];
   final List<void Function(String message)> _closedListeners = [];
-  final List<Completer<void>> _subscribeGates = [];
+
+  /// When set, the next [subscribe] never resolves, freezing the sheet in its
+  /// connecting state so capture 02 can photograph it.
   bool gateNextSubscribe = false;
 
   @override
@@ -400,19 +401,15 @@ class _GoldenRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
   }) async {
-    filters.add(filter);
     if (gateNextSubscribe) {
       gateNextSubscribe = false;
-      final gate = Completer<void>();
-      _subscribeGates.add(gate);
-      await gate.future;
+      await Completer<void>().future;
     }
     _listeners.add(onEvent);
     if (onClosed != null) {
       _closedListeners.add(onClosed);
     }
     return () {
-      filters.remove(filter);
       _listeners.remove(onEvent);
       if (onClosed != null) {
         _closedListeners.remove(onClosed);
@@ -432,13 +429,6 @@ class _GoldenRelaySession extends RelaySessionNotifier {
     }
     _listeners.clear();
     _closedListeners.clear();
-  }
-
-  void releaseSubscribe(int index) {
-    final gate = _subscribeGates[index];
-    if (!gate.isCompleted) {
-      gate.complete();
-    }
   }
 }
 
