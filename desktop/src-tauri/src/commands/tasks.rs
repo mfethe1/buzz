@@ -55,6 +55,7 @@ pub struct ChannelTask {
     pub done_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub revision: i64,
 }
 
 impl ChannelTask {
@@ -75,6 +76,7 @@ impl ChannelTask {
             done_at: value["done_at"].as_i64(),
             created_at: value["created_at"].as_i64().unwrap_or_default(),
             updated_at: value["updated_at"].as_i64().unwrap_or_default(),
+            revision: value["revision"].as_i64().unwrap_or_default(),
         }
     }
 }
@@ -223,9 +225,13 @@ pub async fn tasks_set_status(
     state: State<'_, AppState>,
     task_id: String,
     status: String,
+    expected_revision: Option<i64>,
 ) -> Result<ChannelTask, String> {
     let path = format!("{TASKS_PATH}/{task_id}");
-    let payload = serde_json::json!({ "status": status });
+    let mut payload = serde_json::json!({ "status": status });
+    if let Some(rev) = expected_revision {
+        payload["expected_revision"] = serde_json::json!(rev);
+    }
     let value = tasks_request(
         state.inner(),
         reqwest::Method::PATCH,
@@ -254,10 +260,14 @@ pub async fn tasks_set_assignee(
     state: State<'_, AppState>,
     task_id: String,
     assignee: Option<String>,
+    expected_revision: Option<i64>,
 ) -> Result<ChannelTask, String> {
     let path = format!("{TASKS_PATH}/{task_id}");
     // serde_json::Value::Null is emitted for `None` — the unassign case.
-    let payload = serde_json::json!({ "assignee": assignee });
+    let mut payload = serde_json::json!({ "assignee": assignee });
+    if let Some(rev) = expected_revision {
+        payload["expected_revision"] = serde_json::json!(rev);
+    }
     let value = tasks_request(
         state.inner(),
         reqwest::Method::PATCH,

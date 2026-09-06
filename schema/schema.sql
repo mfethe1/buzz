@@ -1225,6 +1225,7 @@ CREATE TABLE tasks (
     archived_at        TIMESTAMPTZ,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revision           INT         NOT NULL DEFAULT 0,
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_tasks_done_at_matches_status
         CHECK ((status = 'done') = (done_at IS NOT NULL)),
@@ -1251,6 +1252,21 @@ CREATE INDEX idx_tasks_community_channel ON tasks (community_id, channel_id)
     WHERE channel_id IS NOT NULL;
 CREATE INDEX idx_tasks_community_parent ON tasks (community_id, parent_task_id)
     WHERE parent_task_id IS NOT NULL;
+
+-- HW-017: monotonic revision counter for optimistic concurrency on PATCH.
+CREATE OR REPLACE FUNCTION bump_task_revision()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.revision := OLD.revision + 1;
+    NEW.updated_at := NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_tasks_revision
+    BEFORE UPDATE ON tasks
+    FOR EACH ROW
+    EXECUTE FUNCTION bump_task_revision();
 
 -- Append-only lifecycle and comment log; also the read model behind the
 -- human-visible task feed, hence the (community, time) feed index.

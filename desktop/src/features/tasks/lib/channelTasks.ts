@@ -23,6 +23,8 @@ export type ChannelTask = {
   doneAt: number | null;
   createdAt: number;
   updatedAt: number;
+  /** HW-017: monotonic revision counter for optimistic concurrency. */
+  revision: number;
 };
 
 /** One source community's outcome in the My-Tasks fan-in. */

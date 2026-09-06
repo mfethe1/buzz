@@ -222,6 +222,7 @@ pub async fn dispatch(
             clear_assignee,
             due_at,
             clear_due,
+            expected_revision,
         } => {
             let task = uuid("task", &task)?;
             let mut payload = Map::new();
@@ -243,6 +244,9 @@ pub async fn dispatch(
                 payload.insert("due_at".into(), Value::Null);
             } else if let Some(value) = due_at {
                 payload.insert("due_at".into(), Value::String(value));
+            }
+            if let Some(value) = expected_revision {
+                payload.insert("expected_revision".into(), json!(value));
             }
             if payload.is_empty() {
                 return Err(CliError::Usage(

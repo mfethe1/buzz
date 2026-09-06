@@ -36,7 +36,7 @@ macro_rules! task_columns {
     () => {
         "community_id, id, channel_id, created_by_pubkey, assignee_pubkey, \
          parent_task_id, title, body, status, priority, source, source_ref, \
-         due_at, done_at, archived_at, created_at, updated_at"
+         due_at, done_at, archived_at, created_at, updated_at, revision"
     };
 }
 
@@ -82,6 +82,9 @@ pub struct TaskRecord {
     pub created_at: DateTime<Utc>,
     /// Last-modification timestamp.
     pub updated_at: DateTime<Utc>,
+    /// Monotonic revision counter for optimistic concurrency (HW-017).
+    /// Increments on every UPDATE via trigger; 0 on a fresh row.
+    pub revision: i32,
 }
 
 /// One entry in a task's append-only history.
@@ -168,6 +171,11 @@ pub struct TaskPatch {
     pub due_at: Option<Option<DateTime<Utc>>>,
     /// New assignee, or `Some(None)` to unassign.
     pub assignee_pubkey: Option<Option<Vec<u8>>>,
+    /// Optimistic concurrency guard (HW-017): the revision the caller
+    /// believes the task is at. If the row's `revision` does not match,
+    /// `update_task` returns [`DbError::StaleRevision`] without writing.
+    /// `None` skips the guard (backward-compatible with pre-HW-017 clients).
+    pub expected_revision: Option<i32>,
 }
 
 impl TaskPatch {
@@ -178,6 +186,7 @@ impl TaskPatch {
             && self.priority.is_none()
             && self.due_at.is_none()
             && self.assignee_pubkey.is_none()
+            && self.expected_revision.is_none()
     }
 }
 
@@ -204,6 +213,7 @@ fn parse_task_row(row: &sqlx::postgres::PgRow) -> Result<TaskRecord> {
         archived_at: row.try_get("archived_at")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+        revision: row.try_get("revision")?,
     })
 }
 
@@ -420,6 +430,21 @@ pub async fn update_task(
     .ok_or_else(|| DbError::NotFound(format!("task {id}")))?;
     let current = parse_task_row(&current)?;
 
+    // HW-017: optimistic concurrency guard. If the caller supplied an
+    // expected revision, it must match the row's current revision or the
+    // PATCH is rejected before any write. A mismatch means another writer
+    // committed since the caller last fetched the task; letting the stale
+    // write proceed would silently clobber their change.
+    if let Some(expected) = patch.expected_revision {
+        if expected != current.revision {
+            return Err(DbError::StaleRevision {
+                task_id: id,
+                expected,
+                actual: current.revision,
+            });
+        }
+    }
+
     let new_status = patch.status.unwrap_or(current.status);
     let new_title = patch.title.clone().unwrap_or_else(|| current.title.clone());
     let new_priority = patch.priority.unwrap_or(current.priority);
@@ -438,7 +463,7 @@ pub async fn update_task(
 
     let row = sqlx::query(concat!(
         "UPDATE tasks SET status = $3, title = $4, priority = $5, due_at = $6, \
-                          assignee_pubkey = $7, done_at = $8, updated_at = NOW() \
+                          assignee_pubkey = $7, done_at = $8 \
          WHERE community_id = $1 AND id = $2 \
          RETURNING ",
         task_columns!()
