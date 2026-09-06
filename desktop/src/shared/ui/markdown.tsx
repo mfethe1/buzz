@@ -48,13 +48,10 @@ import { ImageLightboxZoomControls } from "./markdown/ImageLightboxZoomControls"
 import {
   CODE_BLOCK_CLASS,
   extractLanguage,
-  MarkdownCodeBlock,
   SyntaxHighlightedCode,
 } from "./markdown/CodeBlock";
 import { EntityLinkAnchor, useOpenEntityLink } from "./markdown/entityLinks";
-import { parseWidget, WIDGET_FENCE_LANGUAGE } from "./markdown/widgets/schema";
-import { widgetFenceText } from "./markdown/widgets/fenceText";
-import { WidgetView } from "./markdown/widgets/WidgetView";
+import { MarkdownFence } from "./markdown/widgets/MarkdownFence";
 import { ExternalLinkAnchor } from "./markdown/ExternalLinkAnchor";
 import { FileCard } from "./markdown/FileCard";
 import {
@@ -1557,15 +1554,7 @@ export function createMarkdownComponents(
           language = extractLanguage(child.props.className);
         }
       });
-      if (language === WIDGET_FENCE_LANGUAGE) {
-        const parsed = parseWidget(widgetFenceText(children));
-        // Invalid payloads fall through to a plain code block on purpose: a
-        // malformed or unknown widget must stay readable, never blank.
-        if (parsed.ok) return <WidgetView widget={parsed.widget} />;
-      }
-      return (
-        <MarkdownCodeBlock language={language}>{children}</MarkdownCodeBlock>
-      );
+      return <MarkdownFence language={language}>{children}</MarkdownFence>;
     },
     strong: ({ children }) => (
       <strong className="font-semibold">{children}</strong>
