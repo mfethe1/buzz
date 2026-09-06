@@ -1,4 +1,4 @@
-import * as React from "react";
+import type * as React from "react";
 
 import { MarkdownCodeBlock } from "../CodeBlock";
 import { widgetFenceText } from "./fenceText";
