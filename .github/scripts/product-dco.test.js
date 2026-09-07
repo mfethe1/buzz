@@ -2,6 +2,8 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
 const { hasAuthorSignoff, verify } = require("./product-dco.js");
 
 const BASE = "a".repeat(40);
@@ -157,4 +159,86 @@ test("provider errors propagate rather than authorize an empty result", async ()
   const data = harness();
   data.github.paginate = async () => { throw new Error("API unavailable"); };
   await assert.rejects(verify(data), /API unavailable/);
+});
+
+const workflow = readFileSync(path.join(__dirname, "../workflows/product-dco.yml"), "utf8");
+
+function workflowScript(name) {
+  const section = workflow.split(`      - name: ${name}\n`)[1]?.split("      - name:")[0];
+  const body = section?.split("          script: |\n")[1];
+  assert.ok(body, `missing runtime script: ${name}`);
+  const source = body.split("\n").filter((line) => line.startsWith("            ")).map((line) => line.slice(12)).join("\n");
+  return new (Object.getPrototypeOf(async function () {}).constructor)("github", "context", "core", "require", "process", source);
+}
+
+test("trusted workflow pins base evaluator and publishes its own exact-head context", () => {
+  assert.match(workflow, /^  pull_request_target:$/m);
+  assert.doesNotMatch(workflow, /^  pull_request:$/m);
+  assert.match(workflow, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
+  assert.match(workflow, /path: trusted-dco/);
+  assert.doesNotMatch(workflow, /ref:.*head|persist-credentials: true|contents: write|pull-requests: write/);
+  assert.ok(workflow.indexOf("Retain exact-change DCO evidence") < workflow.indexOf("Publish final result"));
+  const ci = readFileSync(path.join(__dirname, "../workflows/ci.yml"), "utf8").split("  product-qualification:")[1];
+  assert.match(ci, /path: trusted-qualification/);
+  assert.match(ci, /run: python3 trusted-qualification\/scripts\/product-qualification\.py/);
+  assert.match(ci, /QUALIFICATION_EVALUATOR_SHA:.*pull_request\.base\.sha.*github\.event\.before/);
+});
+
+test("actual trusted workflow never imports candidate verifier and fails its unsigned head", async () => {
+  const data = harness();
+  data.commits[0].commit.message = "Unsigned candidate change";
+  const files = new Map();
+  const updates = [];
+  const outputs = new Map();
+  const failures = [];
+  const core = { setOutput: (key, value) => outputs.set(key, value), setFailed: (message) => failures.push(message) };
+  data.github.rest.checks = {
+    create: async (request) => {
+      assert.equal(request.name, "Product DCO");
+      assert.equal(request.head_sha, HEAD);
+      assert.equal(request.status, "in_progress");
+      return { data: { id: 42 } };
+    },
+    update: async (request) => updates.push(request),
+  };
+  const runtime = { env: { RUNNER_TEMP: "/runner-temp", DCO_EVALUATOR_SHA: BASE,
+    DCO_CHECK_ID: "42", DCO_JOB_STATUS: "success" } };
+  const importTrusted = (name) => {
+    if (name === "./trusted-dco/.github/scripts/product-dco.js") return { verify };
+    if (name === "node:path") return path;
+    if (name === "node:fs") return {
+      writeFileSync: (name, content) => files.set(name, content),
+      readFileSync: (name) => { if (!files.has(name)) throw Error("missing receipt"); return files.get(name); },
+    };
+    throw Error(`Candidate or unexpected module import: ${name}`);
+  };
+  for (const name of ["Start check on the exact candidate head", "Verify every commit's author sign-off",
+    "Publish final result after refreshing PR identity"]) {
+    await workflowScript(name)(data.github, data.context, core, importTrusted, runtime);
+  }
+  assert.equal(outputs.get("check_id"), 42);
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].conclusion, "failure");
+  assert.equal(updates[0].check_run_id, 42);
+  assert.ok(failures.length);
+});
+
+test("actual publisher rejects stale tuple, absent receipt, wrong evaluator, and failed evidence upload", async () => {
+  for (const scenario of ["success", "new-base", "new-head", "missing", "wrong-evaluator", "failed-job"]) {
+    const data = harness();
+    const receipt = await verify(data);
+    const updates = [];
+    data.github.rest.checks = { update: async (request) => updates.push(request) };
+    if (scenario === "new-base") data.latest.base.sha = TESTED;
+    if (scenario === "new-head") data.latest.head.sha = TESTED;
+    if (scenario === "wrong-evaluator") receipt.evaluator_sha = HEAD;
+    const runtime = { env: { RUNNER_TEMP: "/runner-temp", DCO_CHECK_ID: "42",
+      DCO_JOB_STATUS: scenario === "failed-job" ? "failure" : "success" } };
+    const importData = (name) => name === "node:path" ? path : {
+      readFileSync: () => { if (scenario === "missing") throw Error("missing"); return JSON.stringify(receipt); },
+    };
+    await workflowScript("Publish final result after refreshing PR identity")(
+      data.github, data.context, { setFailed: () => {} }, importData, runtime);
+    assert.equal(updates[0].conclusion, scenario === "success" ? "success" : "failure", scenario);
+  }
 });
