@@ -8925,7 +8925,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     #[tokio::test]
     async fn test_send_prompt_result_clears_steer_rx_on_early_return() {
         let acp = AcpClient::spawn(
-            "bash",
+            &crate::testshell::posix_shell_command(),
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
             false,
@@ -8986,7 +8986,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     #[tokio::test]
     async fn test_send_prompt_result_is_noop_when_steer_rx_already_consumed() {
         let acp = AcpClient::spawn(
-            "bash",
+            &crate::testshell::posix_shell_command(),
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
             false,
