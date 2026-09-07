@@ -2600,7 +2600,39 @@ mod postgres_tests {
             .await
             .expect("insert community-b event");
 
-        let batch = claim_due_match_batch(&pool, 16, Utc::now() + chrono::Duration::minutes(1))
+        // Anchor ordering to the database clock: a remote PostgreSQL server
+        // need not agree with the test runner's clock. Keep every due time in
+        // the past so the real SQL now() predicate needs no sleeps.
+        let database_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&pool)
+            .await
+            .expect("read database clock");
+        let queued = sqlx::query(
+            "UPDATE push_match_queue SET next_attempt_at = CASE \
+             WHEN community_id = $1 THEN $3::timestamptz - INTERVAL '3 minutes' \
+             ELSE $3::timestamptz - INTERVAL '2 minutes' END \
+             WHERE community_id IN ($1, $2)",
+        )
+        .bind(community_a.as_uuid())
+        .bind(community_b.as_uuid())
+        .bind(database_now)
+        .execute(&pool)
+        .await
+        .expect("set deterministic due order");
+        assert_eq!(queued.rows_affected(), 4);
+        let b_due: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT next_attempt_at FROM push_match_queue WHERE community_id = $1 AND event_id = $2",
+        )
+        .bind(community_b.as_uuid())
+        .bind(b_event.id.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("read persisted community-b due time");
+        let retry_at = b_due + chrono::Duration::minutes(1);
+        assert!(retry_at < database_now, "retry must already be due");
+        let lease_until = database_now + chrono::Duration::minutes(1);
+
+        let batch = claim_due_match_batch(&pool, 16, lease_until)
             .await
             .expect("claim first batch")
             .expect("batch present");
@@ -2617,6 +2649,13 @@ mod postgres_tests {
             .iter()
             .map(|job| job.event.event.id.as_bytes().to_vec())
             .collect();
+        let mut actual_ids = claimed_ids.clone();
+        actual_ids.sort();
+        a_ids.sort();
+        assert_eq!(
+            actual_ids, a_ids,
+            "claim every community-a event exactly once"
+        );
         // A stale fence must not complete or retry anything.
         assert_eq!(
             complete_match_batch(&pool, batch.community, Uuid::new_v4(), &claimed_ids)
@@ -2630,13 +2669,14 @@ mod postgres_tests {
                 batch.community,
                 Uuid::new_v4(),
                 &claimed_ids,
-                Utc::now()
+                retry_at
             )
             .await
             .expect("stale retry"),
-            0
+            0,
+            "a stale retry claim must not change queued jobs"
         );
-        // Complete two under the real fence, retry the third immediately.
+        // Complete two under the real fence, retry the third after B but still due.
         assert_eq!(
             complete_match_batch(&pool, batch.community, batch.claim_id, &claimed_ids[..2])
                 .await
@@ -2649,7 +2689,7 @@ mod postgres_tests {
                 batch.community,
                 batch.claim_id,
                 &claimed_ids[2..],
-                Utc::now()
+                retry_at
             )
             .await
             .expect("retry one"),
@@ -2658,12 +2698,16 @@ mod postgres_tests {
 
         // The retried job is claimable again, but its retry time is later
         // than community B's untouched row, so B's batch comes first.
-        let second = claim_due_match_batch(&pool, 16, Utc::now() + chrono::Duration::minutes(1))
+        let second = claim_due_match_batch(&pool, 16, lease_until)
             .await
             .expect("claim community-b batch")
             .expect("community-b batch present");
-        assert_eq!(second.community, community_b);
+        assert_eq!(
+            second.community, community_b,
+            "untouched community-b job must precede the retried community-a job"
+        );
         assert_eq!(second.jobs.len(), 1);
+        assert_eq!(second.jobs[0].event.event.id, b_event.id);
         assert_eq!(
             complete_match_batch(
                 &pool,
@@ -2677,13 +2721,17 @@ mod postgres_tests {
         );
 
         // Then the retried community-a job, on its second attempt.
-        let third = claim_due_match_batch(&pool, 16, Utc::now() + chrono::Duration::minutes(1))
+        let third = claim_due_match_batch(&pool, 16, lease_until)
             .await
             .expect("claim retried job")
             .expect("retried job present");
         assert_eq!(third.community, community_a);
         assert_eq!(third.jobs.len(), 1);
         assert_eq!(third.jobs[0].attempt, 2);
+        assert_eq!(
+            third.jobs[0].event.event.id.as_bytes().as_slice(),
+            claimed_ids[2].as_slice()
+        );
         assert_eq!(
             complete_match_batch(
                 &pool,
