@@ -32,6 +32,8 @@ use s3::error::S3Error;
 use s3::{Bucket, Region};
 use sha2::{Digest, Sha256};
 
+mod probe_deadline;
+
 /// Opaque object-store ETag (used for `If-Match` on pointer CAS).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ETag(pub String);
@@ -101,7 +103,7 @@ pub enum StoreError {
 
 /// Configuration for `GitStore::run_conformance_probe`.
 ///
-/// Defaults: 32-way concurrency, 3 rounds. The probe is a deployment gate —
+/// Defaults: 32-way concurrency, 3 rounds, 120 seconds total. The probe is a deployment gate —
 /// run at startup, fail-closed. See `docs/git-on-object-storage.md` §Conformance.
 #[derive(Debug, Clone)]
 pub struct ProbeConfig {
@@ -109,6 +111,8 @@ pub struct ProbeConfig {
     pub race_width: usize,
     /// How many rounds to run each race phase.
     pub race_rounds: usize,
+    /// Deadline for the entire probe, including every race and cleanup request.
+    pub total_timeout: std::time::Duration,
 }
 
 impl Default for ProbeConfig {
@@ -116,6 +120,7 @@ impl Default for ProbeConfig {
         Self {
             race_width: 32,
             race_rounds: 3,
+            total_timeout: std::time::Duration::from_secs(120),
         }
     }
 }
@@ -149,7 +154,7 @@ pub struct ProbeReport {
 #[derive(Debug, thiserror::Error)]
 #[error("conformance probe failed in phase '{phase}' (round {round}, key {key}): {reason}")]
 pub struct ProbeFailure {
-    /// One of `sequential`, `if_match_race`, `if_none_match_race`, `etag_consistency`.
+    /// One of `config`, `deadline`, `sequential`, `if_match_race`, `if_none_match_race`, `etag_consistency`.
     pub phase: &'static str,
     /// Round index (0-based) when this phase ran multiple rounds.
     pub round: usize,
@@ -573,7 +578,10 @@ impl GitStore {
     /// 4. **`etag_consistency`** — round-trip an ETag from `get_pointer` into
     ///    `put_pointer(IfMatch(...))` and assert `Won`. Tests that the token
     ///    is opaque and stable between read and CAS.
-    pub async fn run_conformance_probe(&self, cfg: ProbeConfig) -> Result<ProbeReport, StoreError> {
+    async fn run_conformance_probe_inner(
+        &self,
+        cfg: ProbeConfig,
+    ) -> Result<ProbeReport, StoreError> {
         use std::sync::Arc;
         if cfg.race_width < 2 || cfg.race_rounds == 0 {
             return Err(ProbeFailure {
@@ -1183,6 +1191,7 @@ mod probe {
             .run_conformance_probe(ProbeConfig {
                 race_width: 8,
                 race_rounds: 2,
+                ..ProbeConfig::default()
             })
             .await
             .expect("conformance probe");

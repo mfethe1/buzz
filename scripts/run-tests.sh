@@ -144,6 +144,11 @@ run_unit_tests() {
 
   run_test_step "buzz-relay side-effects helper tests" \
     cargo test -p buzz-relay --lib handlers::side_effects::tests:: -- --nocapture
+
+  # Mirror the startup deadline regressions in the nextest lane. Their HTTP
+  # backend is bound to an ephemeral loopback port; no external services needed.
+  run_test_step "buzz-relay storage admission deadline tests" \
+    cargo test -p buzz-relay --lib api::git::store::probe_deadline::tests:: -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------
