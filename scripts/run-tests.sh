@@ -130,7 +130,8 @@ run_unit_tests() {
   # as a fake agent (no relay, no database). Mirrors the nextest path in
   # `just test-unit` — the two lists must stay in step.
 # ACP author-gate and queue tests are pure unit tests. Keep this fallback in
-  # step with `just test-unit`; ignored lifecycle tests run elsewhere.  run_test_step "buzz-acp unit tests" \
+  # step with `just test-unit`; ignored lifecycle tests run elsewhere.
+  run_test_step "buzz-acp unit tests" \
     cargo test -p buzz-acp --lib -- --nocapture
 
   # Mirror the three infra-free relay handler modules in `just test-unit`'s
