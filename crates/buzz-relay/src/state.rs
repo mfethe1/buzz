@@ -355,6 +355,41 @@ impl ConnectionManager {
             .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
     }
 
+    /// Snapshot authenticated connections in one community as
+    /// `(conn_id, pubkey_bytes)` pairs.
+    ///
+    /// Collects the data without holding any DashMap guard, so the caller can
+    /// safely `await` (e.g. for a channel-access DB check) between this call
+    /// and the subsequent sends. A connection that has not completed NIP-42
+    /// authentication has no `authenticated_pubkey` and is excluded — an
+    /// unauthenticated connection must not receive task invalidation frames.
+    pub fn authenticated_connections_in_community(
+        &self,
+        community_id: CommunityId,
+    ) -> Vec<(Uuid, Vec<u8>)> {
+        self.connections
+            .iter()
+            .filter_map(|entry| {
+                if entry.community_id != community_id {
+                    return None;
+                }
+                let pubkey = entry.authenticated_pubkey.read().ok()?.clone()?;
+                Some((*entry.key(), pubkey))
+            })
+            .collect()
+    }
+
+    /// Best-effort send a control frame to a connection's priority control
+    /// channel. Returns `false` if the connection is gone or the control
+    /// channel is full — the caller treats this as advisory (the client's
+    /// next focus/refetch recovers).
+    pub fn try_send_control_frame(&self, conn_id: Uuid, frame: WsMessage) -> bool {
+        let Some(entry) = self.connections.get(&conn_id) else {
+            return false;
+        };
+        entry.ctrl_tx.try_send(frame).is_ok()
+    }
+
     /// Disconnect every live connection authenticated as `pubkey` **in
     /// `community`**, delivering a final `OK false` frame carrying `reason`
     /// before closing.
@@ -1408,6 +1443,63 @@ impl AppState {
             .await?;
         self.accessible_channels_cache.insert(key, result.clone());
         Ok(result)
+    }
+
+    /// Fan out a level-triggered `BUZZ_TASKS_SYNC_REQUIRED` signal to every
+    /// live, authenticated connection in `community_id` that can see
+    /// `channel_id`. No task content is carried — only the channel UUID the
+    /// client already knows it's viewing.
+    ///
+    /// Two-step: (1) snapshot connections without holding DashMap guards, (2)
+    /// await the channel-access check per distinct pubkey, then send the frame
+    /// to authorized connections only. Unauthenticated connections are
+    /// excluded by the snapshot itself. Best-effort — a full or gone control
+    /// channel is silently skipped (the client's next focus/refetch recovers).
+    pub async fn invalidate_tasks_for_channel(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) {
+        let conns = self
+            .conn_manager
+            .authenticated_connections_in_community(community_id);
+        if conns.is_empty() {
+            return;
+        }
+
+        // Deduplicate by pubkey — multiple connections from the same user
+        // share one access check.
+        let mut seen_pubkeys: HashMap<Vec<u8>, Vec<Uuid>> = HashMap::new();
+        for (conn_id, pubkey) in &conns {
+            seen_pubkeys
+                .entry(pubkey.clone())
+                .or_default()
+                .push(*conn_id);
+        }
+
+        let frame = WsMessage::Text(
+            crate::protocol::RelayMessage::tasks_sync_required(&channel_id).into(),
+        );
+
+        for (pubkey, conn_ids) in seen_pubkeys {
+            let accessible = self
+                .get_accessible_channel_ids_cached(community_id, &pubkey)
+                .await;
+            let Ok(channels) = accessible else {
+                // DB error: fail safe — skip this pubkey's connections.
+                metrics::counter!("buzz_tasks_invalidation_access_errors_total").increment(1);
+                continue;
+            };
+            if !channels.contains(&channel_id) {
+                continue;
+            }
+            for conn_id in conn_ids {
+                if !self.conn_manager.try_send_control_frame(conn_id, frame.clone()) {
+                    metrics::counter!("buzz_tasks_invalidation_dropped_total").increment(1);
+                }
+            }
+        }
+        metrics::counter!("buzz_tasks_invalidation_fanout_total").increment(1);
     }
 
     /// Channel visibility string. Caches only `private` (10s); never caches a

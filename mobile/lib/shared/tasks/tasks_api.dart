@@ -255,3 +255,18 @@ final tasksApiProvider = Provider<TasksApi>((ref) {
     nsec: config.nsec,
   );
 });
+
+/// A monotonic signal bumped whenever the relay sends a
+/// `BUZZ_TASKS_SYNC_REQUIRED` frame. Widgets that display task lists watch
+/// this and combine it with their fetch key to trigger a refetch.
+class TasksSyncSignalNotifier extends Notifier<int> {
+  @override
+  int build() => 0;
+
+  void bump() => state++;
+}
+
+final tasksSyncSignalProvider =
+    NotifierProvider<TasksSyncSignalNotifier, int>(
+  TasksSyncSignalNotifier.new,
+);

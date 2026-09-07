@@ -237,6 +237,14 @@ pub fn run() {
         .manage(channel_head_cache::ChannelHeadCacheStore::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+
+            // Give the native relay client a handle so its socket loop can emit
+            // Tauri events for relay extension frames (BUZZ_TASKS_SYNC_REQUIRED).
+            {
+                let relay_client = app.state::<native_relay_client::NativeRelayClient>();
+                tauri::async_runtime::block_on(relay_client.set_app_handle(app_handle.clone()));
+            }
+
             #[cfg(target_os = "macos")]
             {
                 tray_menu::init(&app_handle)?;

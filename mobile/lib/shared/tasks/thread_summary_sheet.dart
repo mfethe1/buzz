@@ -258,9 +258,12 @@ class _SummaryTaskPicker extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final api = ref.read(tasksApiProvider);
+    // Watch the relay's BUZZ_TASKS_SYNC_REQUIRED signal for cross-client
+    // invalidation.
+    final syncSignal = ref.watch(tasksSyncSignalProvider);
     final tasks = useMemoized(
       () => api.listTasks(channelId: channelId, limit: 20),
-      [channelId],
+      [channelId, syncSignal],
     );
     final snapshot = useFuture(tasks);
 

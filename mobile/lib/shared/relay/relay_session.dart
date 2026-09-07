@@ -19,6 +19,7 @@ import 'relay_provider.dart';
 import 'relay_rate_limit_gate.dart';
 import 'relay_session_types.dart';
 import 'relay_socket.dart';
+import '../tasks/tasks_api.dart';
 
 export 'relay_session_types.dart';
 
@@ -640,6 +641,17 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         });
   }
 
+  /// Handle `BUZZ_TASKS_SYNC_REQUIRED`: the relay advises that tasks in a
+  /// channel changed and the client should refetch through the authorized HTTP
+  /// API. Bump the [tasksSyncSignalProvider] so watching widgets refetch.
+  void _handleTasksSyncRequired(List<dynamic> data) {
+    if (!_socketConnected) return;
+    // The frame carries only a channel UUID (no task content). We don't need
+    // to read it here — the signal is channel-agnostic; each watching widget
+    // already keys its fetch on the channel it is displaying.
+    ref.read(tasksSyncSignalProvider.notifier).bump();
+  }
+
   NostrFilter _replayFilter(_LiveSubscription subscription) {
     final since = subscription.lastSeenCreatedAt;
     return since == null
@@ -665,6 +677,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         _handleOk(data);
       case 'BUZZ_SYNC_REQUIRED':
         _handleSyncRequired(data);
+      case 'BUZZ_TASKS_SYNC_REQUIRED':
+        _handleTasksSyncRequired(data);
     }
   }
 

@@ -312,6 +312,15 @@ pub async fn create_task(
         .await
         .map_err(|error| map_task_error("create task", error))?;
 
+    // Level-triggered invalidation (same as update_task).
+    let community_id = tenant.community();
+    let channel_id = task.channel_id;
+    tokio::spawn(async move {
+        if let Some(ch) = channel_id {
+            state.invalidate_tasks_for_channel(community_id, ch).await;
+        }
+    });
+
     Ok(Json(task_json(&task)))
 }
 
@@ -464,6 +473,19 @@ pub async fn update_task(
         .await
         .map_err(|error| map_task_error("update task", error))?;
 
+    // Level-triggered invalidation: fan out a BUZZ_TASKS_SYNC_REQUIRED signal
+    // to every live, authenticated connection that can see this channel. The
+    // signal carries only the channel_id — no task content. Best-effort and
+    // non-blocking on the response path; a dropped signal is recovered by the
+    // client's next focus/refetch.
+    let community_id = tenant.community();
+    let channel_id = task.channel_id;
+    tokio::spawn(async move {
+        if let Some(ch) = channel_id {
+            state.invalidate_tasks_for_channel(community_id, ch).await;
+        }
+    });
+
     Ok(Json(task_json(&task)))
 }
 
@@ -528,6 +550,15 @@ pub async fn append_task_event(
         )
         .await
         .map_err(|error| map_task_error("append task event", error))?;
+
+    // Level-triggered invalidation (same as update_task).
+    let community_id = tenant.community();
+    let channel_id = task.channel_id;
+    tokio::spawn(async move {
+        if let Some(ch) = channel_id {
+            state.invalidate_tasks_for_channel(community_id, ch).await;
+        }
+    });
 
     Ok(Json(task_event_json(&event)))
 }

@@ -44,6 +44,13 @@ pub enum RelayMessage {
         /// The number of matching events.
         count: u64,
     },
+    /// Buzz extension: level-triggered task invalidation. The relay is
+    /// advising the client that tasks in `channel_id` changed and it should
+    /// refetch through the authorized HTTP API. No task content is carried.
+    TasksSyncRequired {
+        /// UUID of the channel whose task list changed.
+        channel_id: String,
+    },
 }
 
 /// The relay's response to a published event (NIP-01 `OK` message).
@@ -159,6 +166,14 @@ pub fn parse_relay_message(text: &str) -> Result<RelayMessage, WsClientError> {
                 subscription_id: sub_id,
                 count,
             })
+        }
+        "BUZZ_TASKS_SYNC_REQUIRED" => {
+            let channel_id = arr
+                .get(1)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| WsClientError::UnexpectedMessage(text.to_string()))?
+                .to_string();
+            Ok(RelayMessage::TasksSyncRequired { channel_id })
         }
         other => Err(WsClientError::UnexpectedMessage(format!(
             "unknown message type: {other}"

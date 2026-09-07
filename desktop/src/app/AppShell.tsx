@@ -66,6 +66,7 @@ import {
 import { useCommunityEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
 import { useArchiveSync } from "@/features/local-archive/useArchiveSync";
 import { useArchiveAgentMetricsBridge } from "@/features/local-archive/useArchiveAgentMetricsBridge";
+import { useTaskSyncBridge } from "@/features/tasks/lib/useChannelTasks";
 import { useObserverArchiveReconciliation } from "@/features/local-archive/useObserverArchiveSeed";
 import { useAgentMetricArchiveSeed } from "@/features/local-archive/useAgentMetricArchiveSeed";
 import { useProfileQuery } from "@/features/profile/hooks";
@@ -218,6 +219,9 @@ export function AppShell() {
   // The archive batch now persists in Rust, so the agent-metrics invalidation
   // signal arrives as a Tauri event rather than an in-process call.
   useArchiveAgentMetricsBridge();
+  // Bridge the relay's BUZZ_TASKS_SYNC_REQUIRED extension frame to react-query
+  // cache invalidation so task lists stay fresh across clients.
+  useTaskSyncBridge();
   // Kind 44200 is relay-persisted (durable) and stays deferred: missed
   // startup frames can be replayed, so there's no ordering constraint.
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;

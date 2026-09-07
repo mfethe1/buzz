@@ -1,13 +1,15 @@
 /**
  * REG-15: react-query hooks over the channel-task commands.
  *
- * Tasks are request/response by system property (the relay does no fanout on
- * task mutation and tasks are not nostr events — fire-#28 Q2), so these rely
- * on react-query's refetch-on-window-focus for freshness instead of a
- * subscription that cannot exist at any layer.
+ * Tasks are request/response by system property, so these rely on react-query's
+ * refetch-on-window-focus for freshness. The relay additionally emits a
+ * `BUZZ_TASKS_SYNC_REQUIRED` extension frame on task mutations; `useTaskSyncBridge`
+ * below bridges that Tauri event into targeted cache invalidation so other
+ * clients viewing the same channel see updates promptly without a manual refresh.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
+import { listen } from "@tauri-apps/api/event";
 
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
@@ -88,4 +90,32 @@ export function useSetChannelTaskStatus() {
       void queryClient.invalidateQueries({ queryKey: myWorkspaceTasksKey });
     },
   });
+}
+
+/**
+ * Bridge the relay's `BUZZ_TASKS_SYNC_REQUIRED` extension frame (delivered as a
+ * Tauri event from the native socket loop) into targeted react-query
+ * invalidation. The frame carries only a channel UUID — no task content — so
+ * we invalidate the channel's task query and the workspace task list; both
+ * refetch through the authorized HTTP API on the next render.
+ *
+ * Mount this once at the app root (alongside `useArchiveAgentMetricsBridge`).
+ */
+export function useTaskSyncBridge(): void {
+  const queryClient = useQueryClient();
+  React.useEffect(() => {
+    const unlisten = listen<string>("tasks-sync-required", (event) => {
+      const channelId = event.payload;
+      // Invalidate the specific channel's task list…
+      void queryClient.invalidateQueries({
+        queryKey: channelTasksKey(channelId),
+      });
+      // …and the consolidated workspace task list, since a task in this
+      // channel may appear there too.
+      void queryClient.invalidateQueries({ queryKey: myWorkspaceTasksKey });
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, [queryClient]);
 }

@@ -26,6 +26,7 @@ use std::{
 
 use buzz_ws_client_pkg::{NostrWsConnection, RelayMessage};
 use nostr::{Event, Keys};
+use tauri::Emitter;
 use tokio::{
     sync::{mpsc, oneshot, Mutex},
     time::Instant,
@@ -81,9 +82,20 @@ pub(crate) struct MatchedEvent {
 /// Only the archive lifecycle may replace the installed scope, and only while
 /// holding [`crate::archive::sync::ArchiveOwnership`]; see [`Self::session`]
 /// for why finite callers get a non-destructive lease instead.
-#[derive(Default)]
 pub(crate) struct NativeRelayClient {
     current: Mutex<Option<ManagedSession>>,
+    /// Set from `.setup()` so the socket loop can emit Tauri events when the
+    /// relay sends extension frames (e.g. `BUZZ_TASKS_SYNC_REQUIRED`).
+    app_handle: Mutex<Option<tauri::AppHandle>>,
+}
+
+impl Default for NativeRelayClient {
+    fn default() -> Self {
+        Self {
+            current: Mutex::new(None),
+            app_handle: Mutex::new(None),
+        }
+    }
 }
 
 struct ManagedSession {
@@ -132,6 +144,12 @@ impl Drop for SessionLease {
 }
 
 impl NativeRelayClient {
+    /// Called from `.setup()` to give the socket loop a handle for emitting
+    /// Tauri events on relay extension frames (e.g. `BUZZ_TASKS_SYNC_REQUIRED`).
+    pub(crate) async fn set_app_handle(&self, app_handle: tauri::AppHandle) {
+        *self.app_handle.lock().await = Some(app_handle);
+    }
+
     /// Installs the session for `scope`, shutting down whatever scope held the
     /// slot. Destructive on entry, so every caller must already hold proof it
     /// is the current owner — today that is
@@ -145,7 +163,8 @@ impl NativeRelayClient {
         if let Some(previous) = current.take() {
             previous.session.shutdown();
         }
-        let session = start_managed(relay_url, keys, None);
+        let app_handle = self.app_handle.lock().await.clone();
+        let session = start_managed(relay_url, keys, None, app_handle);
         *current = Some(ManagedSession {
             scope,
             session: Arc::clone(&session),
@@ -187,12 +206,12 @@ impl NativeRelayClient {
                 }
             } else {
                 SessionLease {
-                    session: start_managed(relay_url, keys, None),
+                    session: start_managed(relay_url, keys, None, None),
                     private: true,
                 }
             };
         }
-        let session = start_managed(relay_url, keys, None);
+        let session = start_managed(relay_url, keys, None, None);
         *current = Some(ManagedSession {
             scope,
             session: Arc::clone(&session),
@@ -233,6 +252,11 @@ pub(crate) struct RelaySession {
     /// backpressure required by live-only (`limit: 0`) subscriptions: dropping
     /// an event here cannot be repaired by replaying it later.
     archive_events: Arc<Mutex<Option<mpsc::Sender<MatchedEvent>>>>,
+    /// Copied from `NativeRelayClient` at session creation so the socket loop
+    /// can emit Tauri events for relay extension frames without holding a
+    /// reference to the client. `None` for private (finite-request) sessions
+    /// and in tests.
+    app_handle: Option<tauri::AppHandle>,
     wake: mpsc::Sender<()>,
     cancel: CancellationToken,
 }
@@ -389,17 +413,23 @@ pub(crate) async fn start(
     keys: Keys,
     auth_tag: Option<nostr::Tag>,
 ) -> (Arc<RelaySession>, mpsc::Receiver<MatchedEvent>) {
-    let session = start_managed(relay_url, keys, auth_tag);
+    let session = start_managed(relay_url, keys, auth_tag, None);
     let events = session.attach_archive().await;
     (session, events)
 }
 
-fn start_managed(relay_url: String, keys: Keys, auth_tag: Option<nostr::Tag>) -> Arc<RelaySession> {
+fn start_managed(
+    relay_url: String,
+    keys: Keys,
+    auth_tag: Option<nostr::Tag>,
+    app_handle: Option<tauri::AppHandle>,
+) -> Arc<RelaySession> {
     let (wake, wake_rx) = mpsc::channel(1);
     let session = Arc::new(RelaySession {
         state: Arc::new(Mutex::new(SessionState::default())),
         requests: Arc::new(Mutex::new(HashMap::new())),
         archive_events: Arc::new(Mutex::new(None)),
+        app_handle,
         wake,
         cancel: CancellationToken::new(),
     });
@@ -648,6 +678,15 @@ async fn run_connection(
                         // replacement EOSE then finds it open.
                         if !was_open {
                             let _ = session.wake.try_send(());
+                        }
+                    }
+                    Ok(RelayMessage::TasksSyncRequired { ref channel_id }) => {
+                        // Level-triggered task invalidation: emit a Tauri event
+                        // so the frontend can invalidate its React Query cache
+                        // for the affected channel and refetch through the
+                        // authorized HTTP API.
+                        if let Some(ref app_handle) = session.app_handle {
+                            let _ = app_handle.emit("tasks-sync-required", channel_id);
                         }
                     }
                     Ok(_) => {}

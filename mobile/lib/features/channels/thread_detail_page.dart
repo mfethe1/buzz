@@ -724,6 +724,9 @@ class ThreadDetailPage extends HookConsumerWidget {
     // purpose: one fetch on open plus one after a create, no polling and no
     // live subscription.
     final taskChipRefreshTick = useState(0);
+    // Watch the relay's BUZZ_TASKS_SYNC_REQUIRED signal so the chip refetches
+    // when another client mutates tasks in this channel.
+    final tasksSyncSignal = ref.watch(tasksSyncSignalProvider);
     final linkedTaskSnapshot = useFuture(
       useMemoized(() async {
         try {
@@ -739,7 +742,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         // The same `threadHeadId ?? rootId` expression the composer writes as
         // `source_ref` and the summarize button already passes below, so the
         // match is exact by construction rather than heuristic.
-      }, [channelId, threadHead.id, taskChipRefreshTick.value]),
+      }, [channelId, threadHead.id, taskChipRefreshTick.value, tasksSyncSignal]),
     );
     // An inaccessible channel returns [] from the relay's accessible-channel
     // post-filter, which renders identically to "no task" — the chip must not
