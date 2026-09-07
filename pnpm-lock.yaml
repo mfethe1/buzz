@@ -20,9 +20,15 @@ importers:
         specifier: ^0.5.19
         version: 0.5.20(tailwindcss@4.3.0)
     devDependencies:
+      '@actions/expressions':
+        specifier: 0.3.61
+        version: 0.3.61
       '@biomejs/biome':
         specifier: ^2.4.6
         version: 2.4.16
+      yaml:
+        specifier: 2.9.0
+        version: 2.9.0
 
   admin-web:
     dependencies:
@@ -412,6 +418,10 @@ packages:
 
   '@acemir/cssom@0.9.31':
     resolution: {integrity: sha512-ZnR3GSaH+/vJ0YlHau21FjfLYjMpYVIzTD8M8vIEQvIGxeOXyXdzCI140rrCY862p/C/BbzWsjc1dgnM9mkoTA==}
+
+  '@actions/expressions@0.3.61':
+    resolution: {integrity: sha512-Ig+tXELvTjlqxQAWBQnLNn2dPpNraLMdSnT+vDzDPmJtbNUhIAH/Z9kVT8pZ8UtJi9vUGs8hwHE8JFJmbOnLEA==}
+    engines: {node: '>= 20'}
 
   '@adobe/css-tools@4.5.0':
     resolution: {integrity: sha512-6OzddxPio9UiWTCemp4N8cYLV2ZN1ncRnV1cVGtve7dhPOtRkleRyx32GQCYSwDYgaHU3USMm84tNsvKzRCa1Q==}
@@ -3768,6 +3778,8 @@ packages:
 snapshots:
 
   '@acemir/cssom@0.9.31': {}
+
+  '@actions/expressions@0.3.61': {}
 
   '@adobe/css-tools@4.5.0': {}
 
