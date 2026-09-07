@@ -703,8 +703,15 @@ mod postgres_tests {
         migrations.sort_by_key(|migration| migration.version);
 
         // upstream carries 44 (0032-0034 and 0040 adopted from our PRs);
-        // fork adds 0046_task_system (PR #6425 pending upstream).
-        assert_eq!(migrations.len(), 45);
+        // fork adds 0046_task_system (PR #6425 pending upstream) and 0047
+        // structured task history. Both stay additive for existing deployments.
+        assert_eq!(migrations.len(), 46);
+        assert_eq!(migrations[44].version, 46);
+        assert_eq!(migrations[45].version, 47);
+        let task_changes = migrations[45].sql.as_str();
+        assert!(task_changes.contains("ALTER TABLE task_events ADD COLUMN changes JSONB"));
+        assert!(task_changes.contains("ALTER COLUMN created_at SET DEFAULT clock_timestamp()"));
+        assert!(!migrations[44].sql.as_str().contains("ADD COLUMN changes"));
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
