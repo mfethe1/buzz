@@ -96,7 +96,7 @@ run_unit_tests() {
     cargo test -p buzz-acp -- --nocapture
 
   # buzz-db migrator/lint unit tests (no infra): guard the embedded-migrator
-  # invariant (exactly the consolidated 0001; cutover/backfill stays an operator
+  # invariant (the complete checked-in additive migration set; cutover/backfill stays an operator
   # script, not startup state) and the tenant-scoping lints. The Postgres-backed
   # buzz-db tests are #[ignore]d; nothing here (or in integration mode below,
   # which runs `cargo test -p buzz-db` without --ignored) runs them — they need a
@@ -125,14 +125,6 @@ run_unit_tests() {
   # `just test-unit` — the two lists must stay in step.
   run_test_step "buzz-agent unit tests" \
     cargo test -p buzz-agent --lib -- --nocapture
-
-  # buzz-acp harness unit tests: in-process, fixtures spawn a local POSIX shell
-  # as a fake agent (no relay, no database). Mirrors the nextest path in
-  # `just test-unit` — the two lists must stay in step.
-# ACP author-gate and queue tests are pure unit tests. Keep this fallback in
-  # step with `just test-unit`; ignored lifecycle tests run elsewhere.
-  run_test_step "buzz-acp unit tests" \
-    cargo test -p buzz-acp --lib -- --nocapture
 
   # Mirror the three infra-free relay handler modules in `just test-unit`'s
   # nextest expression. Keep the side-effects filter pinned to `::tests::` so

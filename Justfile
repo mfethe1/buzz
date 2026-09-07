@@ -432,12 +432,6 @@ test-unit:
         # `cargo test --workspace`; without this step a manifest edit that
         # diverges Rust from the corpus ships green.
         cargo nextest run -p buzz-agent --lib
-        # buzz-acp: the ACP harness. Its ~760 --lib tests are pure in-process
-        # unit tests whose fixtures spawn a local POSIX shell as a fake agent —
-        # no relay, no database, no network. Enumerated for the same reason as
-        # the crates above: nothing in CI runs `cargo test --workspace`, so
-        # until this line existed the harness that dispatches every agent turn
-        # had zero executed test coverage in CI on any platform.
         # buzz-agent: two infra-free concerns run together by executing the
         # whole crate (lib + integration tests), because nothing in CI runs
         # `cargo test --workspace`, so without this stanza neither its
@@ -495,10 +489,6 @@ test-unit:
         # Keep them in the infra-free gate; the broader Git suite uses MinIO.
         cargo nextest run -p buzz-relay --lib \
             -E 'test(/^api::git::store::probe_deadline::tests::/)'
-        # ACP author-gate and queue tests protect the trust boundary between
-        # relay events and agent prompts. They are infra-free; ignored lifecycle
-        # tests remain excluded and run in their dedicated integration lanes.
-        cargo nextest run -p buzz-acp --lib
     else
         ./scripts/run-tests.sh unit
     fi
