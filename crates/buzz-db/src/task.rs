@@ -180,13 +180,18 @@ pub struct TaskPatch {
 
 impl TaskPatch {
     /// Whether the patch asks for any change at all.
+    ///
+    /// `expected_revision` is deliberately NOT counted: it is a precondition on
+    /// a change, not a change. Counting it would let a body carrying only
+    /// `expected_revision` pass the relay's "patch must change at least one
+    /// field" check and reach `update_task`, which would then restate every
+    /// column at its current value — a write with no requested change.
     pub fn is_empty(&self) -> bool {
         self.status.is_none()
             && self.title.is_none()
             && self.priority.is_none()
             && self.due_at.is_none()
             && self.assignee_pubkey.is_none()
-            && self.expected_revision.is_none()
     }
 }
 
@@ -977,6 +982,221 @@ mod postgres_tests {
         assert_eq!(reopened.done_at, None);
 
         delete_test_community(&pool, community).await;
+    }
+
+    /// HW-017: the revision counter must advance on real change and hold still
+    /// on a semantic no-op. If a restated value bumped the revision, every
+    /// other client's `expected_revision` would be invalidated by a write that
+    /// changed nothing, manufacturing spurious 409s on idempotent retries.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn revision_advances_on_real_change_and_holds_on_a_semantic_noop() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let creator = make_test_user(&pool, community, 0x51).await;
+
+        let task = create_task(
+            &pool,
+            community,
+            NewTask {
+                created_by_pubkey: Some(creator.clone()),
+                title: "revision probe".to_owned(),
+                ..NewTask::default()
+            },
+        )
+        .await
+        .expect("create task");
+        assert_eq!(task.revision, 0, "a fresh task starts at revision 0");
+
+        let bumped = update_task(
+            &pool,
+            community,
+            task.id,
+            &TaskPatch {
+                status: Some(TaskStatus::InProgress),
+                ..TaskPatch::default()
+            },
+            Some(&creator),
+        )
+        .await
+        .expect("real change");
+        assert_eq!(bumped.revision, 1, "a real change bumps exactly once");
+
+        // Restate the values the row already holds. The trigger fires, but the
+        // whole-row comparison sees no payload change, so revision must hold.
+        let restated = update_task(
+            &pool,
+            community,
+            task.id,
+            &TaskPatch {
+                status: Some(TaskStatus::InProgress),
+                title: Some("revision probe".to_owned()),
+                ..TaskPatch::default()
+            },
+            Some(&creator),
+        )
+        .await
+        .expect("semantic no-op");
+        assert_eq!(
+            restated.revision, 1,
+            "a semantic no-op must NOT bump the revision"
+        );
+        assert_eq!(
+            restated.updated_at, bumped.updated_at,
+            "a semantic no-op must not touch updated_at either"
+        );
+
+        let bumped_again = update_task(
+            &pool,
+            community,
+            task.id,
+            &TaskPatch {
+                title: Some("renamed".to_owned()),
+                ..TaskPatch::default()
+            },
+            Some(&creator),
+        )
+        .await
+        .expect("second real change");
+        assert_eq!(
+            bumped_again.revision, 2,
+            "the counter still advances after a no-op"
+        );
+
+        delete_test_community(&pool, community).await;
+    }
+
+    /// HW-017: the guard itself. A patch built from a stale snapshot must be
+    /// rejected with `StaleRevision` and must leave the row untouched.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_stale_expected_revision_is_rejected_and_changes_nothing() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let creator = make_test_user(&pool, community, 0x52).await;
+
+        let task = create_task(
+            &pool,
+            community,
+            NewTask {
+                created_by_pubkey: Some(creator.clone()),
+                title: "contended".to_owned(),
+                ..NewTask::default()
+            },
+        )
+        .await
+        .expect("create task");
+
+        // Writer A reads revision 0 and commits, moving the row to revision 1.
+        let winner = update_task(
+            &pool,
+            community,
+            task.id,
+            &TaskPatch {
+                title: Some("writer A won".to_owned()),
+                expected_revision: Some(task.revision),
+                ..TaskPatch::default()
+            },
+            Some(&creator),
+        )
+        .await
+        .expect("writer A commits against a fresh snapshot");
+        assert_eq!(winner.revision, 1);
+
+        // Writer B still holds the revision-0 snapshot. Its write must lose.
+        let error = update_task(
+            &pool,
+            community,
+            task.id,
+            &TaskPatch {
+                title: Some("writer B clobbers".to_owned()),
+                expected_revision: Some(task.revision),
+                ..TaskPatch::default()
+            },
+            Some(&creator),
+        )
+        .await
+        .expect_err("a stale write must not silently win");
+        match error {
+            DbError::StaleRevision {
+                task_id,
+                expected,
+                actual,
+            } => {
+                assert_eq!(task_id, task.id);
+                assert_eq!(expected, 0, "the snapshot writer B read");
+                assert_eq!(actual, 1, "the revision the row actually carries");
+            }
+            other => panic!("expected StaleRevision, got {other:?}"),
+        }
+
+        // The rejection must be total: writer A's value survives intact.
+        let after = get_task(&pool, community, task.id).await.expect("re-fetch");
+        assert_eq!(
+            after.title, "writer A won",
+            "the losing write must not have applied any field"
+        );
+        assert_eq!(after.revision, 1, "a rejected write must not bump");
+
+        // Re-fetching and retrying against the current revision succeeds.
+        let retried = update_task(
+            &pool,
+            community,
+            task.id,
+            &TaskPatch {
+                title: Some("writer B retried".to_owned()),
+                expected_revision: Some(after.revision),
+                ..TaskPatch::default()
+            },
+            Some(&creator),
+        )
+        .await
+        .expect("retry against the current revision");
+        assert_eq!(retried.title, "writer B retried");
+        assert_eq!(retried.revision, 2);
+
+        // A patch that omits `expected_revision` keeps the previous
+        // last-write-wins behaviour, so existing clients are unaffected.
+        let unguarded = update_task(
+            &pool,
+            community,
+            task.id,
+            &TaskPatch {
+                title: Some("unguarded still works".to_owned()),
+                ..TaskPatch::default()
+            },
+            Some(&creator),
+        )
+        .await
+        .expect("an unguarded patch is still accepted");
+        assert_eq!(unguarded.revision, 3);
+
+        delete_test_community(&pool, community).await;
+    }
+
+    /// HW-017: a body carrying only `expected_revision` asks for no change, so
+    /// `is_empty` must report it as empty. Otherwise it passes the relay's
+    /// "patch must change at least one field" gate and reaches the database as
+    /// a write that restates every column.
+    #[test]
+    fn a_guard_only_patch_is_empty() {
+        assert!(
+            TaskPatch {
+                expected_revision: Some(7),
+                ..TaskPatch::default()
+            }
+            .is_empty(),
+            "expected_revision is a precondition, not a requested change"
+        );
+        assert!(
+            !TaskPatch {
+                title: Some("real".to_owned()),
+                expected_revision: Some(7),
+                ..TaskPatch::default()
+            }
+            .is_empty(),
+            "a guarded real change is not empty"
+        );
     }
 
     #[tokio::test]

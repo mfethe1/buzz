@@ -1257,8 +1257,19 @@ CREATE INDEX idx_tasks_community_parent ON tasks (community_id, parent_task_id)
 CREATE OR REPLACE FUNCTION bump_task_revision()
 RETURNS TRIGGER AS $$
 BEGIN
-    NEW.revision := OLD.revision + 1;
-    NEW.updated_at := NOW();
+    -- Bump ONLY when the row's payload actually changed. An idempotent
+    -- restate still fires a BEFORE UPDATE trigger; bumping there would
+    -- invalidate every other client's `expected_revision` for a write that
+    -- changed nothing, manufacturing spurious 409s. The derived columns are
+    -- normalised to OLD first so the whole-row comparison sees only
+    -- caller-supplied payload, and comparing the whole row means a future
+    -- column on `tasks` is guarded automatically.
+    NEW.revision := OLD.revision;
+    NEW.updated_at := OLD.updated_at;
+    IF NEW IS DISTINCT FROM OLD THEN
+        NEW.revision := OLD.revision + 1;
+        NEW.updated_at := NOW();
+    END IF;
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
