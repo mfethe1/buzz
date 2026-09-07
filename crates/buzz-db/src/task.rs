@@ -18,7 +18,9 @@
 //! transition neither of them made.
 
 use buzz_core::task::{status_change_action, TaskAction, TaskStatus};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row as _, Transaction};
 use uuid::Uuid;
 
@@ -43,7 +45,7 @@ macro_rules! task_columns {
 /// Columns selected for every [`TaskEventRecord`].
 macro_rules! task_event_columns {
     () => {
-        "id, task_id, actor_pubkey, action, from_status, to_status, body, created_at"
+        "id, task_id, actor_pubkey, action, from_status, to_status, body, changes, created_at"
     };
 }
 
@@ -101,6 +103,8 @@ pub struct TaskEventRecord {
     pub to_status: Option<TaskStatus>,
     /// Comment or summary text.
     pub body: Option<String>,
+    /// Structured before/after values, absent for legacy events and comments.
+    pub changes: Option<Value>,
     /// When it happened.
     pub created_at: DateTime<Utc>,
 }
@@ -130,6 +134,19 @@ pub struct NewTask {
     pub due_at: Option<DateTime<Utc>>,
 }
 
+/// Exclusive boundary for newest-modified-first task pagination.
+///
+/// The full timestamp precision and id tie-breaker must both survive the wire.
+/// This is a live keyset, not a snapshot: tasks modified between pages move
+/// ahead of the cursor and can be found by refreshing the first page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskCursor {
+    /// Last task's modification timestamp, with database precision.
+    pub updated_at: DateTime<Utc>,
+    /// Last task's id, breaking equal-timestamp ties.
+    pub id: Uuid,
+}
+
 /// Filters for [`list_tasks`]. `None` means "do not filter on this field".
 #[derive(Debug, Clone, Default)]
 pub struct TaskFilter {
@@ -147,6 +164,11 @@ pub struct TaskFilter {
     pub source_ref: Option<String>,
     /// Include archived tasks. Archived tasks are hidden by default.
     pub include_archived: bool,
+    /// Caller-visible channels, applied before the limit. `Some([])` permits
+    /// only channel-less tasks; `None` leaves visibility to a trusted caller.
+    pub visible_channel_ids: Option<Vec<Uuid>>,
+    /// Return rows strictly after this boundary in newest-modified order.
+    pub before: Option<TaskCursor>,
     /// Maximum rows to return.
     pub limit: i64,
 }
@@ -219,32 +241,35 @@ fn parse_task_event_row(row: &sqlx::postgres::PgRow) -> Result<TaskEventRecord> 
         from_status: from_status.as_deref().map(parse_status).transpose()?,
         to_status: to_status.as_deref().map(parse_status).transpose()?,
         body: row.try_get("body")?,
+        changes: row.try_get("changes")?,
         created_at: row.try_get("created_at")?,
     })
 }
 
-/// Append one row to a task's history inside an open transaction.
-///
-/// `transition` carries the `(from, to)` pair for
-/// [`TaskAction::StatusChanged`] and is `None` for every other action — the
-/// two ends are only ever meaningful together, so they travel together.
+#[derive(Default)]
+struct TaskEventContent<'a> {
+    transition: Option<(TaskStatus, TaskStatus)>,
+    body: Option<&'a str>,
+    changes: Option<Value>,
+}
+
+/// Append a history row in the same transaction as its task mutation.
 async fn insert_task_event(
     tx: &mut Transaction<'_, Postgres>,
     community: CommunityId,
     task_id: Uuid,
     actor_pubkey: Option<&[u8]>,
     action: TaskAction,
-    transition: Option<(TaskStatus, TaskStatus)>,
-    body: Option<&str>,
+    content: TaskEventContent<'_>,
 ) -> Result<TaskEventRecord> {
-    let (from_status, to_status) = match transition {
+    let (from_status, to_status) = match content.transition {
         Some((from, to)) => (Some(from), Some(to)),
         None => (None, None),
     };
     let row = sqlx::query(concat!(
         "INSERT INTO task_events \
-           (community_id, task_id, actor_pubkey, action, from_status, to_status, body) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+           (community_id, task_id, actor_pubkey, action, from_status, to_status, body, changes) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
          RETURNING ",
         task_event_columns!()
     ))
@@ -254,7 +279,8 @@ async fn insert_task_event(
     .bind(action.as_str())
     .bind(from_status.map(|status| status.as_str()))
     .bind(to_status.map(|status| status.as_str()))
-    .bind(body)
+    .bind(content.body)
+    .bind(content.changes)
     .fetch_one(&mut **tx)
     .await?;
     parse_task_event_row(&row)
@@ -300,8 +326,15 @@ pub async fn create_task(
         task.id,
         new_task.created_by_pubkey.as_deref(),
         TaskAction::Created,
-        None,
-        None,
+        TaskEventContent {
+            changes: Some(json!({
+                "title": {"from": null, "to": task.title},
+                "assignee": {"from": null, "to": task.assignee_pubkey.as_ref().map(hex::encode)},
+                "priority": {"from": null, "to": task.priority},
+                "due_at": {"from": null, "to": task.due_at},
+            })),
+            ..TaskEventContent::default()
+        },
     )
     .await?;
 
@@ -354,6 +387,18 @@ pub async fn list_tasks(
     }
     if !filter.include_archived {
         builder.push(" AND archived_at IS NULL");
+    }
+    if let Some(channels) = &filter.visible_channel_ids {
+        builder.push(" AND (channel_id IS NULL OR channel_id = ANY(");
+        builder.push_bind(channels);
+        builder.push("))");
+    }
+    if let Some(cursor) = &filter.before {
+        builder.push(" AND (updated_at, id) < (");
+        builder.push_bind(cursor.updated_at);
+        builder.push(", ");
+        builder.push_bind(cursor.id);
+        builder.push(")");
     }
     builder.push(" ORDER BY updated_at DESC, id DESC LIMIT ");
     builder.push_bind(filter.limit);
@@ -423,7 +468,12 @@ pub async fn update_task(
     let new_status = patch.status.unwrap_or(current.status);
     let new_title = patch.title.clone().unwrap_or_else(|| current.title.clone());
     let new_priority = patch.priority.unwrap_or(current.priority);
-    let new_due_at = patch.due_at.unwrap_or(current.due_at);
+    // PostgreSQL stores microseconds; normalize before comparison so a client
+    // retry with nanoseconds neither inflates history nor records phantom digits.
+    let new_due_at = patch
+        .due_at
+        .unwrap_or(current.due_at)
+        .map(|value| value.trunc_subsecs(6));
     let new_assignee = patch
         .assignee_pubkey
         .clone()
@@ -436,9 +486,19 @@ pub async fn update_task(
         None
     };
 
+    if new_status == current.status
+        && new_title == current.title
+        && new_priority == current.priority
+        && new_due_at == current.due_at
+        && new_assignee == current.assignee_pubkey
+    {
+        tx.commit().await?;
+        return Ok(current);
+    }
+
     let row = sqlx::query(concat!(
         "UPDATE tasks SET status = $3, title = $4, priority = $5, due_at = $6, \
-                          assignee_pubkey = $7, done_at = $8, updated_at = NOW() \
+                          assignee_pubkey = $7, done_at = $8, updated_at = clock_timestamp() \
          WHERE community_id = $1 AND id = $2 \
          RETURNING ",
         task_columns!()
@@ -462,8 +522,10 @@ pub async fn update_task(
             id,
             actor_pubkey,
             action,
-            Some((current.status, new_status)),
-            None,
+            TaskEventContent {
+                transition: Some((current.status, new_status)),
+                ..TaskEventContent::default()
+            },
         )
         .await?;
     }
@@ -474,8 +536,11 @@ pub async fn update_task(
             id,
             actor_pubkey,
             TaskAction::TitleChanged,
-            None,
-            Some(&new_title),
+            TaskEventContent {
+                body: Some(&new_title),
+                changes: Some(json!({"title": {"from": current.title, "to": new_title}})),
+                ..TaskEventContent::default()
+            },
         )
         .await?;
     }
@@ -486,10 +551,43 @@ pub async fn update_task(
             id,
             actor_pubkey,
             TaskAction::Assigned,
-            None,
-            None,
+            TaskEventContent {
+                changes: Some(json!({"assignee": {
+                    "from": current.assignee_pubkey.as_ref().map(hex::encode),
+                    "to": new_assignee.as_ref().map(hex::encode),
+                }})),
+                ..TaskEventContent::default()
+            },
         )
         .await?;
+    }
+
+    for (action, changes) in [
+        (
+            TaskAction::PriorityChanged,
+            (new_priority != current.priority)
+                .then(|| json!({"priority": {"from": current.priority, "to": new_priority}})),
+        ),
+        (
+            TaskAction::DueAtChanged,
+            (new_due_at != current.due_at)
+                .then(|| json!({"due_at": {"from": current.due_at, "to": new_due_at}})),
+        ),
+    ] {
+        if let Some(changes) = changes {
+            insert_task_event(
+                &mut tx,
+                community,
+                id,
+                actor_pubkey,
+                action,
+                TaskEventContent {
+                    changes: Some(changes),
+                    ..TaskEventContent::default()
+                },
+            )
+            .await?;
+        }
     }
 
     tx.commit().await?;
@@ -529,8 +627,10 @@ pub async fn append_task_event(
         task_id,
         actor_pubkey,
         action,
-        None,
-        body,
+        TaskEventContent {
+            body,
+            ..TaskEventContent::default()
+        },
     )
     .await
     .map_err(|error| match &error {
@@ -588,25 +688,6 @@ mod tests {
             columns.len(),
             "duplicate column in projection"
         );
-    }
-
-    // ── Live-Postgres integration coverage ──────────────────────────────────
-    //
-    // `#[ignore]`d, exactly like every other Postgres-backed test in this
-    // crate: `just test-unit` runs `-p buzz-db --lib`, which skips them, and
-    // `just test` (Docker Postgres + Redis) is what turns them on. Run one
-    // directly with:
-    //
-    //     cargo test -p buzz-db --lib crate::task::tests -- --ignored
-    //
-    // against a database that has migration 0033 applied.
-
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
-
-    pub(super) fn test_database_url() -> String {
-        std::env::var("BUZZ_TEST_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| TEST_DB_URL.to_owned())
     }
 }
 
@@ -687,374 +768,5 @@ impl Db {
 }
 
 #[cfg(test)]
-mod postgres_tests {
-    use super::tests::test_database_url;
-    use super::*;
-    async fn setup_pool() -> PgPool {
-        PgPool::connect(&test_database_url())
-            .await
-            .expect("connect to test DB")
-    }
-
-    async fn make_test_community(pool: &PgPool) -> CommunityId {
-        let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(id)
-            .bind(format!("task-test-{}.example", id.simple()))
-            .execute(pool)
-            .await
-            .expect("insert test community");
-        CommunityId::from_uuid(id)
-    }
-
-    async fn make_test_user(pool: &PgPool, community: CommunityId, seed: u8) -> Vec<u8> {
-        let pubkey = vec![seed; 32];
-        crate::user::ensure_user(pool, community, &pubkey)
-            .await
-            .expect("ensure test user");
-        pubkey
-    }
-
-    async fn delete_test_community(pool: &PgPool, community: CommunityId) {
-        for table in ["task_events", "tasks", "users"] {
-            sqlx::query(sqlx::AssertSqlSafe(format!(
-                "DELETE FROM {table} WHERE community_id = $1"
-            )))
-            .bind(community.as_uuid())
-            .execute(pool)
-            .await
-            .expect("delete test rows");
-        }
-        sqlx::query("DELETE FROM communities WHERE id = $1")
-            .bind(community.as_uuid())
-            .execute(pool)
-            .await
-            .expect("delete test community");
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn create_then_list_then_get_round_trips_a_task_and_its_history() {
-        let pool = setup_pool().await;
-        let community = make_test_community(&pool).await;
-        let creator = make_test_user(&pool, community, 0x11).await;
-
-        let created = create_task(
-            &pool,
-            community,
-            NewTask {
-                created_by_pubkey: Some(creator.clone()),
-                title: "ship the task system".to_owned(),
-                body: Some("phase 1".to_owned()),
-                priority: 5,
-                source: Some("claude".to_owned()),
-                ..NewTask::default()
-            },
-        )
-        .await
-        .expect("create task");
-
-        assert_eq!(created.title, "ship the task system");
-        assert_eq!(created.status, TaskStatus::Todo);
-        assert_eq!(created.priority, 5);
-        assert_eq!(created.done_at, None);
-        assert_eq!(
-            created.created_by_pubkey.as_deref(),
-            Some(creator.as_slice())
-        );
-
-        let listed = list_tasks(
-            &pool,
-            community,
-            &TaskFilter {
-                limit: 10,
-                ..TaskFilter::default()
-            },
-        )
-        .await
-        .expect("list tasks");
-        assert_eq!(listed, vec![created.clone()]);
-
-        let fetched = get_task(&pool, community, created.id)
-            .await
-            .expect("get task");
-        assert_eq!(fetched, created);
-
-        // create_task commits the task and its opening history entry together.
-        let events = list_task_events(&pool, community, created.id)
-            .await
-            .expect("list events");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].action, TaskAction::Created);
-
-        delete_test_community(&pool, community).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn a_task_is_findable_by_its_source_ref() {
-        let pool = setup_pool().await;
-        let community = make_test_community(&pool).await;
-        let creator = make_test_user(&pool, community, 0x21).await;
-
-        let wanted = create_task(
-            &pool,
-            community,
-            NewTask {
-                created_by_pubkey: Some(creator.clone()),
-                title: "from the thread we care about".to_owned(),
-                source: Some("app".to_owned()),
-                source_ref: Some("thread-head-aaa".to_owned()),
-                ..NewTask::default()
-            },
-        )
-        .await
-        .expect("create linked task");
-
-        let other = create_task(
-            &pool,
-            community,
-            NewTask {
-                created_by_pubkey: Some(creator.clone()),
-                title: "from a different thread".to_owned(),
-                source: Some("app".to_owned()),
-                source_ref: Some("thread-head-bbb".to_owned()),
-                ..NewTask::default()
-            },
-        )
-        .await
-        .expect("create unrelated task");
-
-        // Exact equality: the reader queries the same key the writer wrote.
-        let found = list_tasks(
-            &pool,
-            community,
-            &TaskFilter {
-                source_ref: Some("thread-head-aaa".to_owned()),
-                limit: 10,
-                ..TaskFilter::default()
-            },
-        )
-        .await
-        .expect("list by source_ref");
-        assert_eq!(found, vec![wanted.clone()]);
-
-        // An unknown reference is an empty page, never an error and never a
-        // fallback to "everything".
-        let missing = list_tasks(
-            &pool,
-            community,
-            &TaskFilter {
-                source_ref: Some("thread-head-does-not-exist".to_owned()),
-                limit: 10,
-                ..TaskFilter::default()
-            },
-        )
-        .await
-        .expect("list unknown source_ref");
-        assert!(missing.is_empty());
-
-        // Omitting the filter must keep today's behaviour: both tasks.
-        let unfiltered = list_tasks(
-            &pool,
-            community,
-            &TaskFilter {
-                limit: 10,
-                ..TaskFilter::default()
-            },
-        )
-        .await
-        .expect("list unfiltered");
-        assert_eq!(unfiltered.len(), 2);
-        assert!(unfiltered.contains(&wanted));
-        assert!(unfiltered.contains(&other));
-
-        delete_test_community(&pool, community).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn a_status_change_sets_done_at_and_appends_exactly_one_event() {
-        let pool = setup_pool().await;
-        let community = make_test_community(&pool).await;
-        let creator = make_test_user(&pool, community, 0x22).await;
-
-        let task = create_task(
-            &pool,
-            community,
-            NewTask {
-                created_by_pubkey: Some(creator.clone()),
-                title: "finish it".to_owned(),
-                ..NewTask::default()
-            },
-        )
-        .await
-        .expect("create task");
-
-        let done = update_task(
-            &pool,
-            community,
-            task.id,
-            &TaskPatch {
-                status: Some(TaskStatus::Done),
-                ..TaskPatch::default()
-            },
-            Some(&creator),
-        )
-        .await
-        .expect("mark done");
-        assert_eq!(done.status, TaskStatus::Done);
-        assert!(
-            done.done_at.is_some(),
-            "done_at is derived from the status, not supplied by the caller"
-        );
-
-        let events = list_task_events(&pool, community, task.id)
-            .await
-            .expect("list events");
-        assert_eq!(events.len(), 2, "created + status_changed");
-        assert_eq!(events[1].action, TaskAction::StatusChanged);
-        assert_eq!(events[1].from_status, Some(TaskStatus::Todo));
-        assert_eq!(events[1].to_status, Some(TaskStatus::Done));
-
-        // Restating the same status is idempotent: no second event.
-        update_task(
-            &pool,
-            community,
-            task.id,
-            &TaskPatch {
-                status: Some(TaskStatus::Done),
-                ..TaskPatch::default()
-            },
-            Some(&creator),
-        )
-        .await
-        .expect("restate done");
-        let events = list_task_events(&pool, community, task.id)
-            .await
-            .expect("list events again");
-        assert_eq!(events.len(), 2, "restating a status must append nothing");
-
-        // Reopening clears done_at, keeping chk_tasks_done_at_matches_status
-        // satisfiable.
-        let reopened = update_task(
-            &pool,
-            community,
-            task.id,
-            &TaskPatch {
-                status: Some(TaskStatus::Todo),
-                ..TaskPatch::default()
-            },
-            Some(&creator),
-        )
-        .await
-        .expect("reopen");
-        assert_eq!(reopened.done_at, None);
-
-        delete_test_community(&pool, community).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn a_task_id_is_invisible_to_another_community() {
-        let pool = setup_pool().await;
-        let owner = make_test_community(&pool).await;
-        let stranger = make_test_community(&pool).await;
-        let creator = make_test_user(&pool, owner, 0x33).await;
-
-        let task = create_task(
-            &pool,
-            owner,
-            NewTask {
-                created_by_pubkey: Some(creator),
-                title: "tenant-private".to_owned(),
-                ..NewTask::default()
-            },
-        )
-        .await
-        .expect("create task");
-
-        // The bare id is not a capability: presented against another tenant it
-        // reads as absent, never as the owner's row.
-        assert!(matches!(
-            get_task(&pool, stranger, task.id).await,
-            Err(DbError::NotFound(_))
-        ));
-        assert!(matches!(
-            append_task_event(
-                &pool,
-                stranger,
-                task.id,
-                None,
-                TaskAction::Commented,
-                Some("leak?")
-            )
-            .await,
-            Err(DbError::NotFound(_))
-        ));
-
-        delete_test_community(&pool, owner).await;
-        delete_test_community(&pool, stranger).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn a_task_keeps_at_most_one_persisted_summary() {
-        let pool = setup_pool().await;
-        let community = make_test_community(&pool).await;
-        let actor = make_test_user(&pool, community, 0x44).await;
-
-        let task = create_task(
-            &pool,
-            community,
-            NewTask {
-                created_by_pubkey: Some(actor.clone()),
-                title: "summarize me".to_owned(),
-                ..NewTask::default()
-            },
-        )
-        .await
-        .expect("create task");
-
-        append_task_event(
-            &pool,
-            community,
-            task.id,
-            Some(&actor),
-            TaskAction::SummaryPersisted,
-            Some("first summary"),
-        )
-        .await
-        .expect("first summary");
-
-        let second = append_task_event(
-            &pool,
-            community,
-            task.id,
-            Some(&actor),
-            TaskAction::SummaryPersisted,
-            Some("second summary"),
-        )
-        .await;
-        assert!(
-            matches!(second, Err(DbError::InvalidData(_))),
-            "the partial unique index must reject a second summary, got {second:?}"
-        );
-
-        // Ordinary comments stay unbounded.
-        for _ in 0..2 {
-            append_task_event(
-                &pool,
-                community,
-                task.id,
-                Some(&actor),
-                TaskAction::Commented,
-                Some("a comment"),
-            )
-            .await
-            .expect("comment");
-        }
-
-        delete_test_community(&pool, community).await;
-    }
-}
+#[path = "task/postgres_tests.rs"]
+mod postgres_tests;
