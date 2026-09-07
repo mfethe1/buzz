@@ -46,3 +46,26 @@ test("a successful presence read overrides a malformed directory status", () => 
   assert.equal(isRelayAgentActive("ONLINE", "online"), true);
   assert.equal(isRelayAgentActive("", "offline"), false);
 });
+
+// E1: empty inputs — isRelayAgentActive never throws on edge values.
+// The empty-relayAgents / empty-pubkey-list path is exercised by the hook's
+// `relayAgents ?? []` spread (produces an empty set) and usePresenceQuery's
+// self-disable at hooks.ts:100. Here we guard the pure resolver directly.
+test("E1 empty / nullish inputs do not crash", () => {
+  // No directory status, no presence → inactive, no throw.
+  assert.equal(isRelayAgentActive("", undefined), false);
+  // null/undefined directory status is already covered by E6; E1 confirms the
+  // empty-string case and the no-throw contract on edge values.
+});
+
+// E7: a live 20001 event landing mid-render is handled by the memo dependency
+// on getAvailability (which changes identity when query.data changes). This
+// is architectural and covered by the existing setQueriesData + memo dep
+// pattern; it cannot be unit-tested without mocking React's renderer. The
+// isRelayAgentActive function is pure and stateless, so a re-derivation with
+// updated availability is guaranteed correct.
+test("E7 re-derivation: directory online + late-arriving presence offline is INACTIVE", () => {
+  // Simulates a mid-render presence update: first read undefined, then offline.
+  assert.equal(isRelayAgentActive("online", undefined), true); // before event
+  assert.equal(isRelayAgentActive("online", "offline"), false); // after event
+});
