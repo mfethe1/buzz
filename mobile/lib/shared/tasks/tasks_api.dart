@@ -150,7 +150,7 @@ class TasksApi {
       if (status != null) 'status': status.wireValue,
       if (title != null) 'title': title.trim(),
       'priority': ?priority,
-      if (expectedRevision != null) 'expected_revision': expectedRevision,
+      'expected_revision': ?expectedRevision,
     };
     final decoded = await _send('PATCH', _uri('/api/tasks/$taskId'), payload);
     return Task.fromJson(_asObject(decoded));
