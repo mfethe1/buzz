@@ -1,0 +1,94 @@
+name: Product DCO
+
+# The workflow and evaluator both come from the trusted PR base. Commit
+# messages are API data; candidate code is never checked out or executed.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+concurrency:
+  group: product-dco-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+
+jobs:
+  product-dco:
+    name: Evaluate Product DCO
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Start check on the exact candidate head
+        id: check
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const expected = context.payload.pull_request;
+            const { data: live } = await github.rest.pulls.get({ ...context.repo, pull_number: expected.number });
+            if (live.head.sha !== expected.head.sha || live.base.sha !== expected.base.sha || live.state !== 'open') {
+              throw new Error('Pull request changed before DCO verification');
+            }
+            const { data: check } = await github.rest.checks.create({
+              ...context.repo, name: 'Product DCO', head_sha: expected.head.sha, status: 'in_progress',
+              details_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });
+            core.setOutput('check_id', check.id);
+      - name: Checkout trusted evaluator only
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted-dco
+          persist-credentials: false
+      - name: Verify every commit's author sign-off
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          DCO_EVALUATOR_SHA: ${{ github.event.pull_request.base.sha }}
+        with:
+          script: |
+            const { verify } = require('./trusted-dco/.github/scripts/product-dco.js');
+            const { writeFileSync } = require('node:fs');
+            const { join } = require('node:path');
+            const receipt = await verify({ github, context: { ...context, evaluatorSha: process.env.DCO_EVALUATOR_SHA } });
+            writeFileSync(join(process.env.RUNNER_TEMP, 'product-dco.json'), JSON.stringify(receipt, null, 2));
+            if (!receipt.qualified) core.setFailed('One or more commits lacks its author sign-off');
+      - name: Retain exact-change DCO evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: product-dco-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/product-dco.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish final result after refreshing PR identity
+        if: ${{ always() && steps.check.outputs.check_id != '' }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          DCO_CHECK_ID: ${{ steps.check.outputs.check_id }}
+          DCO_JOB_STATUS: ${{ job.status }}
+        with:
+          script: |
+            const { readFileSync } = require('node:fs');
+            const { join } = require('node:path');
+            const expected = context.payload.pull_request;
+            let qualified = false;
+            try {
+              const receipt = JSON.parse(readFileSync(join(process.env.RUNNER_TEMP, 'product-dco.json'), 'utf8'));
+              const { data: live } = await github.rest.pulls.get({ ...context.repo, pull_number: expected.number });
+              qualified = process.env.DCO_JOB_STATUS === 'success' && receipt.qualified === true &&
+                receipt.repository === `${context.repo.owner}/${context.repo.repo}` && receipt.pull_request === expected.number &&
+                receipt.head_sha === expected.head.sha && receipt.base_sha === expected.base.sha &&
+                receipt.evaluator_sha === expected.base.sha && live.head.sha === expected.head.sha &&
+                live.base.sha === expected.base.sha && live.state === 'open';
+            } catch {
+              // Missing evaluator, API failures, and missing evidence all deny.
+            }
+            await github.rest.checks.update({
+              ...context.repo, check_run_id: Number(process.env.DCO_CHECK_ID), status: 'completed',
+              conclusion: qualified ? 'success' : 'failure',
+              output: { title: qualified ? 'All commits signed off' : 'DCO verification failed',
+                summary: `PR ${expected.number}; base ${expected.base.sha}; head ${expected.head.sha}.` },
+            });
+            if (!qualified) core.setFailed('Product DCO did not qualify this exact change');

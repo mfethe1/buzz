@@ -12,6 +12,8 @@ on:
         required: true
         type: boolean
     outputs:
+      desktop_windows_result:
+        value: ${{ jobs.results.outputs.desktop_windows_result }}
       desktop_result:
         value: ${{ jobs.results.outputs.desktop_result }}
 
@@ -234,11 +236,12 @@ jobs:
   results:
     name: Results
     if: ${{ always() }}
-    needs: [desktop]
+    needs: [desktop, desktop-windows-build]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
     outputs:
+      desktop_windows_result: ${{ needs.desktop-windows-build.result }}
       desktop_result: ${{ needs.desktop.result }}
     steps:
       - run: echo "Captured Desktop job results"

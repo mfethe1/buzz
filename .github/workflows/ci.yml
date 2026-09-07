@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: [main, release]
+    branches: [main, release, product/main]
   pull_request:
 
 concurrency:
@@ -114,6 +114,10 @@ jobs:
           scripts/test-rust-cache-contract-regressions.sh
       - name: CI required-context isolation contract
         run: scripts/test-ci-required-context-isolation.sh
+      - name: Product DCO regressions
+        run: node --test .github/scripts/product-dco.test.js
+      - name: Product qualification regressions
+        run: python3 scripts/test-product-qualification.py
       - name: File size policy
         run: just file-size-check
 
@@ -224,7 +228,7 @@ jobs:
   mobile-swift-domain:
     name: Mobile Swift Domain
     needs: [changes]
-    if: needs.changes.outputs.mobile == 'true'
+    if: github.event_name == 'push' || needs.changes.outputs.mobile == 'true'
     uses: ./.github/workflows/_ci-clients.yml
     with:
       web: ${{ needs.changes.outputs.web == 'true' }}
@@ -407,3 +411,32 @@ jobs:
         env:
           RESULT: ${{ needs.security-domain.outputs.security_result }}
         run: test "$RESULT" = success
+
+  product-qualification:
+    name: Product Qualification
+    # Required globally: the evaluator decides which paths may legitimately skip.
+    if: ${{ always() }}
+    needs: [changes, dead-token-guard, rust, rust-cross-compile-domain, desktop-domain, desktop-macos-domain, relay-artifacts-domain, relay-domain, postgres-domain, clients, mobile-swift-domain, security-domain]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          path: trusted-qualification
+          persist-credentials: false
+      - name: Qualify actual CI results
+        env:
+          QUALIFICATION_EVALUATOR_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          QUALIFICATION_NEEDS: ${{ toJSON(needs) }}
+        run: python3 trusted-qualification/scripts/product-qualification.py --output "${{ runner.temp }}/product-qualification.json"
+      - name: Retain exact-change qualification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: product-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/product-qualification.json
+          if-no-files-found: error
+          retention-days: 30
