@@ -708,9 +708,11 @@ CREATE TABLE moderation_reports (
     -- Exactly one target class per row: target_kind is authoritative and the
     -- matching column (only) is populated. Queue/action code never guesses.
     CHECK (
-        (target_kind = 'event'  AND target_event_id IS NOT NULL AND target_pubkey IS NULL     AND target_blob_sha256 IS NULL) OR
-        (target_kind = 'pubkey' AND target_event_id IS NULL     AND target_pubkey IS NOT NULL AND target_blob_sha256 IS NULL) OR
-        (target_kind = 'blob'   AND target_event_id IS NULL     AND target_pubkey IS NULL     AND target_blob_sha256 IS NOT NULL)
+        -- pgschema 1.7.4 omits CHECKs containing IS NOT NULL. Equivalent
+        -- num_nonnulls predicates retain this invariant in fresh bootstraps.
+        (target_kind = 'event'  AND num_nonnulls(target_event_id) = 1 AND target_pubkey IS NULL AND target_blob_sha256 IS NULL) OR
+        (target_kind = 'pubkey' AND target_event_id IS NULL AND num_nonnulls(target_pubkey) = 1 AND target_blob_sha256 IS NULL) OR
+        (target_kind = 'blob'   AND target_event_id IS NULL AND target_pubkey IS NULL AND num_nonnulls(target_blob_sha256) = 1)
     ),
     -- Same-community channel provenance (channels are soft-deleted, never
     -- hard-deleted, so this FK cannot dangle).
@@ -880,7 +882,7 @@ CREATE TABLE push_leases (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (community_id, author, installation_id),
     UNIQUE (community_id, source_event_id),
-    CHECK ((active AND app_profile IS NOT NULL AND endpoint_hash IS NOT NULL AND endpoint_grant IS NOT NULL AND max_class IS NOT NULL AND subscriptions IS NOT NULL)
+    CHECK ((active AND num_nonnulls(app_profile, endpoint_hash, endpoint_grant, max_class, subscriptions) = 5)
         OR (NOT active AND app_profile IS NULL AND endpoint_hash IS NULL AND endpoint_grant IS NULL AND max_class IS NULL AND subscriptions IS NULL))
 );
 CREATE UNIQUE INDEX push_leases_endpoint_unique
@@ -1244,7 +1246,7 @@ CREATE TABLE tasks (
     revision           INT         NOT NULL DEFAULT 0,
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_tasks_done_at_matches_status
-        CHECK ((status = 'done') = (done_at IS NOT NULL)),
+        CHECK ((status = 'done') = (num_nonnulls(done_at) = 1)),
     CONSTRAINT chk_tasks_not_own_parent CHECK (parent_task_id IS DISTINCT FROM id),
     CONSTRAINT chk_tasks_created_by_len
         CHECK (created_by_pubkey IS NULL OR length(created_by_pubkey) = 32),
@@ -1388,7 +1390,7 @@ CREATE TABLE community_deletion_requests (
     aborted_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     CHECK ((blocked_at IS NULL) = (blocked_reason IS NULL)),
-    CHECK ((stage = 'aborted') = (aborted_at IS NOT NULL)),
+    CHECK ((stage = 'aborted') = (num_nonnulls(aborted_at) = 1)),
     CHECK ((aborted_at IS NULL) = (aborted_by IS NULL)),
     CHECK ((aborted_at IS NULL) = (abort_reason IS NULL)),
     CHECK ((inventory_frozen_at IS NULL) = (inventory_digest IS NULL)),
@@ -1483,8 +1485,8 @@ CREATE TABLE community_deletion_checkpoints (
     completed_at TIMESTAMPTZ,
     PRIMARY KEY (request_id, sequence),
     UNIQUE (request_id, stage, unit_key),
-    CHECK ((status = 'completed') = (completed_at IS NOT NULL)),
-    CHECK ((status = 'failed') = (error IS NOT NULL))
+    CHECK ((status = 'completed') = (num_nonnulls(completed_at) = 1)),
+    CHECK ((status = 'failed') = (num_nonnulls(error) = 1))
 );
 
 -- Frozen destructive key list, chunked out of the request row so a large
