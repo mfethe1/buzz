@@ -8069,9 +8069,14 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let ch = Uuid::new_v4();
         let ta = thread_scope(ch, &"a".repeat(64));
         let tb = thread_scope(ch, &"b".repeat(64));
-        let acp = AcpClient::spawn("bash", &["-c".into(), "sleep 10".into()], &[], false)
-            .await
-            .expect("spawn dummy ACP");
+        let acp = AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".into(), "sleep 10".into()],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn dummy ACP");
         let mut agent = OwnedAgent {
             index: 0,
             acp,
@@ -8151,9 +8156,14 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     /// An idle agent (slot 0) holding a provider session for `scope`, so
     /// `has_session_for(scope)` is true.
     async fn idle_agent_with_session(index: usize, scope: SessionScope) -> OwnedAgent {
-        let acp = AcpClient::spawn("bash", &["-c".into(), "sleep 10".into()], &[], false)
-            .await
-            .expect("spawn dummy ACP");
+        let acp = AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".into(), "sleep 10".into()],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn dummy ACP");
         let mut agent = OwnedAgent {
             index,
             acp,
@@ -9203,7 +9213,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     #[tokio::test]
     async fn test_send_prompt_result_clears_steer_rx_on_early_return() {
         let acp = AcpClient::spawn(
-            "bash",
+            &crate::testshell::posix_shell_command(),
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
             false,
@@ -9264,7 +9274,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     #[tokio::test]
     async fn test_send_prompt_result_is_noop_when_steer_rx_already_consumed() {
         let acp = AcpClient::spawn(
-            "bash",
+            &crate::testshell::posix_shell_command(),
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
             false,
@@ -9846,9 +9856,14 @@ done"#,
             quoted = quoted,
             body = script,
         );
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), wrapped], &[], false)
-            .await
-            .expect("spawn capture agent");
+        let acp = AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".to_string(), wrapped],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn capture agent");
         (acp, capture)
     }
 
@@ -10968,9 +10983,14 @@ done"#,
   printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
-            .await
-            .expect("spawn wire-capture ACP");
+        let acp = AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".into(), script],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn wire-capture ACP");
         let agent = OwnedAgent {
             index: 0,
             acp,
@@ -11400,9 +11420,14 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
-            .await
-            .expect("spawn effort ACP script")
+        AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".to_string(), script],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn effort ACP script")
     }
 
     fn captured_config_options(obs: &observer::ObserverHandle) -> serde_json::Value {
@@ -11571,9 +11596,14 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"sessionId":"sess-1","configO
 IFS= read -r _effort
 exit 0"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
-            .await
-            .expect("spawn transport-exit ACP script");
+        let acp = AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".to_string(), script],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn transport-exit ACP script");
         let mut agent = effort_agent(acp, Some("high"));
 
         let ctx = make_prompt_context_no_owner();
@@ -11660,9 +11690,14 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
-            .await
-            .expect("spawn switch ACP script")
+        AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".to_string(), script],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn switch ACP script")
     }
 
     fn capture(obs: &observer::ObserverHandle) -> serde_json::Value {
@@ -12110,9 +12145,14 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
-            .await
-            .expect("spawn switch ACP script")
+        AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".to_string(), script],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn switch ACP script")
     }
 
     /// F3: an applied switch must cache `models` from the POST-switch snapshot,
