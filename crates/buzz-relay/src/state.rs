@@ -3209,4 +3209,237 @@ pub(crate) mod tests {
             other => panic!("expected a restart close frame, got {other:?}"),
         }
     }
+
+    /// Two authenticated connections in one community: one pubkey can see
+    /// `channel_id`, the other cannot.  `invalidate_tasks_for_channel` must
+    /// deliver exactly one `BUZZ_TASKS_SYNC_REQUIRED` frame to the authorized
+    /// connection's control channel and **zero** frame bytes to the
+    /// unauthorized connection.  This is the non-leak invariant: an
+    /// inaccessible client must not observe that *any* task changed.
+    #[tokio::test]
+    async fn invalidate_tasks_for_channel_delivers_only_to_authorized() {
+        let state = test_state().await;
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xCAFE));
+        let channel_id = Uuid::from_u128(42);
+
+        // Two distinct pubkeys in the same community.
+        let pubkey_authorized = vec![0xA1u8; 32];
+        let pubkey_denied = vec![0xB2u8; 32];
+
+        // Pre-populate the accessible-channels cache so
+        // `get_accessible_channel_ids_cached` returns from cache without
+        // touching the (unreachable) DB.
+        state.accessible_channels_cache.insert(
+            (community, pubkey_authorized.clone()),
+            vec![channel_id],
+        );
+        state.accessible_channels_cache.insert(
+            (community, pubkey_denied.clone()),
+            vec![Uuid::from_u128(99)], // a different channel
+        );
+
+        // Register two connections in the same community.
+        let conn_authorized = Uuid::new_v4();
+        let conn_denied = Uuid::new_v4();
+
+        let (tx_a, _rx_a) = mpsc::channel::<WsMessage>(8);
+        let (ctrl_tx_a, mut ctrl_rx_a) = mpsc::channel::<WsMessage>(8);
+        let (tx_b, _rx_b) = mpsc::channel::<WsMessage>(8);
+        let (ctrl_tx_b, mut ctrl_rx_b) = mpsc::channel::<WsMessage>(8);
+
+        state.conn_manager.register(
+            conn_authorized,
+            tx_a,
+            ctrl_tx_a,
+            None,
+            CancellationToken::new(),
+            community,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+        state.conn_manager.register(
+            conn_denied,
+            tx_b,
+            ctrl_tx_b,
+            None,
+            CancellationToken::new(),
+            community,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+
+        // Authenticate both connections — unauthenticated ones are excluded
+        // by the snapshot.
+        state
+            .conn_manager
+            .set_authenticated_pubkey(conn_authorized, pubkey_authorized.clone());
+        state
+            .conn_manager
+            .set_authenticated_pubkey(conn_denied, pubkey_denied.clone());
+
+        // Fire the invalidation.
+        state.invalidate_tasks_for_channel(community, channel_id).await;
+
+        // Authorized connection receives exactly one control frame.
+        let frame_a = ctrl_rx_a
+            .try_recv()
+            .expect("authorized connection must receive the invalidation frame");
+        match frame_a {
+            WsMessage::Text(t) => {
+                let v: serde_json::Value = serde_json::from_str(&t)
+                    .expect("frame is valid JSON");
+                assert_eq!(
+                    v[0], "BUZZ_TASKS_SYNC_REQUIRED",
+                    "frame head is the task-sync signal"
+                );
+                assert_eq!(
+                    v[1], channel_id.to_string(),
+                    "frame carries the channel UUID and nothing else"
+                );
+            }
+            other => panic!("expected text frame, got {other:?}"),
+        }
+        assert!(
+            ctrl_rx_a.try_recv().is_err(),
+            "exactly one frame — no duplicate delivery"
+        );
+
+        // Unauthorized connection receives ZERO frame bytes.
+        assert!(
+            ctrl_rx_b.try_recv().is_err(),
+            "unauthorized connection must receive zero frame bytes — non-leak invariant"
+        );
+    }
+
+    /// An unauthenticated connection in the same community must not receive
+    /// the invalidation frame — the snapshot excludes it before the
+    /// access-check phase.
+    #[tokio::test]
+    async fn invalidate_tasks_for_channel_excludes_unauthenticated_connections() {
+        let state = test_state().await;
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xBEEF));
+        let channel_id = Uuid::from_u128(7);
+
+        let pubkey = vec![0xC3u8; 32];
+        state
+            .accessible_channels_cache
+            .insert((community, pubkey.clone()), vec![channel_id]);
+
+        let conn_auth = Uuid::new_v4();
+        let conn_unauth = Uuid::new_v4();
+
+        let (tx1, _rx1) = mpsc::channel::<WsMessage>(8);
+        let (ctrl_tx1, mut ctrl_rx1) = mpsc::channel::<WsMessage>(8);
+        let (tx2, _rx2) = mpsc::channel::<WsMessage>(8);
+        let (ctrl_tx2, mut ctrl_rx2) = mpsc::channel::<WsMessage>(8);
+
+        state.conn_manager.register(
+            conn_auth,
+            tx1,
+            ctrl_tx1,
+            None,
+            CancellationToken::new(),
+            community,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+        // Second connection: same community, but never authenticated.
+        state.conn_manager.register(
+            conn_unauth,
+            tx2,
+            ctrl_tx2,
+            None,
+            CancellationToken::new(),
+            community,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+        state
+            .conn_manager
+            .set_authenticated_pubkey(conn_auth, pubkey);
+
+        state.invalidate_tasks_for_channel(community, channel_id).await;
+
+        // Authenticated + authorized connection gets the frame.
+        assert!(
+            ctrl_rx1.try_recv().is_ok(),
+            "authenticated authorized connection receives the frame"
+        );
+        // Unauthenticated connection gets nothing.
+        assert!(
+            ctrl_rx2.try_recv().is_err(),
+            "unauthenticated connection is excluded by the snapshot — zero frame bytes"
+        );
+    }
+
+    /// A connection in a *different* community must not receive the
+    /// invalidation frame — the snapshot is community-scoped.
+    #[tokio::test]
+    async fn invalidate_tasks_for_channel_is_fenced_to_the_community() {
+        let state = test_state().await;
+        let community_a = CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
+        let community_b = CommunityId::from_uuid(Uuid::from_u128(0xBBBB));
+        let channel_a = Uuid::from_u128(1);
+
+        let pubkey = vec![0xD4u8; 32];
+        state
+            .accessible_channels_cache
+            .insert((community_a, pubkey.clone()), vec![channel_a]);
+        state
+            .accessible_channels_cache
+            .insert((community_b, pubkey.clone()), vec![channel_a]);
+
+        let conn_a = Uuid::new_v4();
+        let conn_b = Uuid::new_v4();
+
+        let (tx_a, _rx_a) = mpsc::channel::<WsMessage>(8);
+        let (ctrl_tx_a, mut ctrl_rx_a) = mpsc::channel::<WsMessage>(8);
+        let (tx_b, _rx_b) = mpsc::channel::<WsMessage>(8);
+        let (ctrl_tx_b, mut ctrl_rx_b) = mpsc::channel::<WsMessage>(8);
+
+        state.conn_manager.register(
+            conn_a,
+            tx_a,
+            ctrl_tx_a,
+            None,
+            CancellationToken::new(),
+            community_a,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+        state.conn_manager.register(
+            conn_b,
+            tx_b,
+            ctrl_tx_b,
+            None,
+            CancellationToken::new(),
+            community_b,
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+        state
+            .conn_manager
+            .set_authenticated_pubkey(conn_a, pubkey.clone());
+        state
+            .conn_manager
+            .set_authenticated_pubkey(conn_b, pubkey.clone());
+
+        // Invalidate in community A only.
+        state.invalidate_tasks_for_channel(community_a, channel_a).await;
+
+        assert!(
+            ctrl_rx_a.try_recv().is_ok(),
+            "community A connection receives the frame"
+        );
+        assert!(
+            ctrl_rx_b.try_recv().is_err(),
+            "community B connection receives zero frame bytes — tenant fence holds"
+        );
+    }
 }
