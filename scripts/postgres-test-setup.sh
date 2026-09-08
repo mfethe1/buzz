@@ -70,4 +70,6 @@ if ! "$psql" --dbname="$template_database" --set=ON_ERROR_STOP=1 \
 fi
 rm -f "$schema_log"
 
+"$workspace_root/scripts/postgres-test-check-parity.sh"
+
 printf 'BUZZ_POSTGRES_DESIRED_TEMPLATE=%s\n' "$template_database" >>"$NEXTEST_ENV"
