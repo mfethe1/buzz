@@ -70,10 +70,12 @@ class RelaySocket {
     _state = SocketState.connecting;
 
     try {
-      _channel = IOWebSocketChannel.connect(
-        Uri.parse(_wsUrl),
-        pingInterval: debugPingInterval,
-      );
+      final uri = Uri.parse(_wsUrl);
+      // Browser WebSockets own protocol-level ping/pong. Native clients retain
+      // the explicit ping timeout used to detect an unresponsive relay.
+      _channel = kIsWeb
+          ? WebSocketChannel.connect(uri)
+          : IOWebSocketChannel.connect(uri, pingInterval: debugPingInterval);
       await _channel!.ready;
     } catch (e) {
       _state = SocketState.disconnected;
