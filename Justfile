@@ -501,6 +501,10 @@ test-unit:
         # unit job either.
         cargo nextest run -p buzz-relay --lib \
             -E '(test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/)'
+        # Task notification/privacy and reconnect controls are infra-free here;
+        # the ignored signed HTTP/WebSocket flow runs in the PostgreSQL profile.
+        cargo nextest run -p buzz-relay -p buzz-ws-client --lib \
+            -E '(package(buzz-relay) and (test(/^api::tasks::tests::/) + test(/^state::task_invalidation::tests::/) + test(/^protocol::tests::/))) or package(buzz-ws-client)'
         # ACP author-gate and queue tests protect the trust boundary between
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.        cargo nextest run -p buzz-acp --lib
