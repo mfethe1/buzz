@@ -82,7 +82,9 @@ class _WorkTaskCreateSheet extends HookConsumerWidget {
         identical(ref.read(taskAssigneeDirectoryProvider), directory);
 
     Future<void> create() async {
-      if (!enabled) return;
+      // Two invocations can share one built callback before the next frame.
+      // Read the live guard now; the first invocation acquires it synchronously.
+      if (!stillCurrent() || busy.value || uncertain.value) return;
       final taskTitle = title.text.trim();
       if (taskTitle.isEmpty || taskTitleLength(taskTitle) > maxTaskTitleChars) {
         error.value = 'Enter a title with 1–200 characters.';

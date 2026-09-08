@@ -37,6 +37,7 @@ void main() {
     WidgetTester tester,
     Future<http.Response> Function(http.Request) handler, {
     TaskAssigneeDirectory? directory,
+    Future<void> Function()? refreshChannels,
     ValueNotifier<AsyncValue<List<TaskChannel>>>? channelOptions,
   }) async {
     final api = TasksApi(
@@ -68,7 +69,7 @@ void main() {
             builder: (context, value, _) => WorkPage(
               onBack: () {},
               channels: value,
-              onRefreshChannels: () async {},
+              onRefreshChannels: refreshChannels ?? () async {},
             ),
           ),
         ),
@@ -477,6 +478,43 @@ void main() {
         isNull,
       );
       expect(writes, 0);
+    },
+  );
+  testWidgets(
+    'two create invocations before the next frame send only one POST',
+    (tester) async {
+      final preflight = Completer<void>();
+      var writes = 0;
+      await mount(
+        tester,
+        (request) async {
+          if (request.method == 'POST') {
+            writes++;
+            return http.Response('{"error":"title rejected"}', 400);
+          }
+          return page([]);
+        },
+        directory: eligibleDirectory(),
+        refreshChannels: () => preflight.future,
+      );
+      await tester.tap(find.byTooltip('New task'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('work-task-title')),
+        'Review the update',
+      );
+      final callback = tester
+          .widget<FilledButton>(
+            find.widgetWithText(FilledButton, 'Create task'),
+          )
+          .onPressed!;
+      callback();
+      callback();
+      // Both calls ran against the same built button; no pump/rebuild separates
+      // them. The first call is waiting on actual preflight before either POST.
+      preflight.complete();
+      await tester.pumpAndSettle();
+      expect(writes, 1);
     },
   );
 }
