@@ -2,6 +2,7 @@ part of '../channels_page.dart';
 
 class _ChannelsBody extends StatelessWidget {
   final List<Channel>? channels;
+  final VoidCallback? onOpenWork;
   final AsyncValue<List<Channel>> channelsAsync;
   final bool showError;
   final SessionStatus sessionStatus;
@@ -14,6 +15,7 @@ class _ChannelsBody extends StatelessWidget {
   final Future<void> Function(Channel channel) onSelectChannel;
 
   const _ChannelsBody({
+    this.onOpenWork,
     required this.channels,
     required this.channelsAsync,
     required this.showError,
@@ -51,6 +53,36 @@ class _ChannelsBody extends StatelessWidget {
               hitTestBehavior: HitTestBehavior.translucent,
               slivers: [
                 SliverToBoxAdapter(child: SizedBox(height: barHeight)),
+                if (onOpenWork != null)
+                  SliverToBoxAdapter(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        Grid.gutter,
+                        Grid.xxs,
+                        Grid.gutter,
+                        Grid.xs,
+                      ),
+                      child: Card(
+                        margin: EdgeInsets.zero,
+                        elevation: 0,
+                        color: context.colors.surfaceContainerHigh,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(Radii.dialog),
+                        ),
+                        child: ListTile(
+                          key: const ValueKey('home-work-entry'),
+                          leading: Icon(
+                            LucideIcons.clipboardList,
+                            color: context.colors.primary,
+                          ),
+                          title: const Text('Work'),
+                          subtitle: const Text('View and assign tasks'),
+                          trailing: const Icon(LucideIcons.chevronRight),
+                          onTap: onOpenWork,
+                        ),
+                      ),
+                    ),
+                  ),
                 if (usesPinnedGradient)
                   _SliverChannelsList(
                     channels: loadedChannels,
