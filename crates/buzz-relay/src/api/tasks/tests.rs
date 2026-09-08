@@ -115,6 +115,7 @@ fn task_wire_renders_status_and_hex_pubkeys() {
         archived_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
+        revision: 0,
     };
     let wire = task_json(&task);
     assert_eq!(wire["status"], "in_progress");
@@ -438,18 +439,17 @@ mod route_authz {
 
     pub(super) async fn pagination_and_history_assertions(f: &Fixture) {
         let mut ids = Vec::new();
+        // Insert equal subsecond timestamps directly. UPDATE timestamps are
+        // derived by the revision trigger and cannot serve as a fixture setter.
         for title in ["visible one", "visible two", "visible three"] {
-            let payload = serde_json::json!({"title": title}).to_string();
-            let (status, body) = f
-                .request("POST", "/api/tasks", &f.owner, Some(&payload))
-                .await;
-            assert_eq!(status, StatusCode::OK, "create: {body}");
-            ids.push(body["id"].as_str().expect("task id").to_owned());
+            let id = Uuid::new_v4();
+            sqlx::query("INSERT INTO tasks (community_id, id, title, updated_at) VALUES ($1, $2, $3, '2026-01-01T00:00:00.123456Z')")
+                .bind(f.community.as_uuid()).bind(id).bind(title)
+                .execute(&f.pool).await.expect("visible fixture task");
+            sqlx::query("INSERT INTO task_events (community_id, task_id, action) VALUES ($1, $2, 'created')")
+                .bind(f.community.as_uuid()).bind(id).execute(&f.pool).await.expect("fixture creation history");
+            ids.push(id.to_string());
         }
-        // Tie timestamps with subsecond precision to exercise the id part of
-        // the cursor and its wire encoding, behind a newer invisible task.
-        sqlx::query("UPDATE tasks SET updated_at = '2026-01-01T00:00:00.123456Z' WHERE community_id = $1 AND channel_id IS NULL")
-            .bind(f.community.as_uuid()).execute(&f.pool).await.expect("fixture timestamps");
         ids.sort_by(|a, b| b.cmp(a));
         let (status, first) = f
             .request("GET", "/api/tasks?limit=2", &f.outsider, None)
@@ -520,7 +520,72 @@ mod route_authz {
             retry["events"], detail["events"],
             "signed retry must not append duplicate history"
         );
-        eprintln!("PASS signed task create/update/history; private tasks excluded before limit; cursor pages 2+1; retry unchanged");
+        // Exercise actual signed creation and guarded updates over this HTTP
+        // listener in addition to the deliberately tied pagination fixtures.
+        let (status, created) = f
+            .request(
+                "POST",
+                "/api/tasks",
+                &f.owner,
+                Some(r#"{"title":"guarded task"}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "create: {created}");
+        assert_eq!(created["revision"], 0);
+        let guarded_path = format!("/api/tasks/{}", created["id"].as_str().expect("id"));
+        let (status, changed) = f
+            .request(
+                "PATCH",
+                &guarded_path,
+                &f.owner,
+                Some(r#"{"priority":7,"expected_revision":0}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "guarded change: {changed}");
+        assert_eq!(changed["revision"], 1);
+        let (_, before_conflict) = f.request("GET", &guarded_path, &f.owner, None).await;
+        assert_eq!(
+            before_conflict["events"].as_array().expect("history").len(),
+            2
+        );
+        let (status, conflict) = f
+            .request(
+                "PATCH",
+                &guarded_path,
+                &f.owner,
+                Some(r#"{"priority":9,"expected_revision":0}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "stale update: {conflict}");
+        assert!(conflict["error"]
+            .as_str()
+            .expect("error")
+            .contains("actual 1"));
+        let (_, after_conflict) = f.request("GET", &guarded_path, &f.owner, None).await;
+        assert_eq!(
+            after_conflict, before_conflict,
+            "a 409 cannot mutate task or history"
+        );
+        let (status, no_op) = f
+            .request(
+                "PATCH",
+                &guarded_path,
+                &f.owner,
+                Some(r#"{"priority":7,"expected_revision":1}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "no-op: {no_op}");
+        assert_eq!(no_op, changed);
+        let (status, _) = f
+            .request(
+                "PATCH",
+                &guarded_path,
+                &f.owner,
+                Some(r#"{"expected_revision":1}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        eprintln!("PASS signed HTTP create/update/history; private pagination 2+1; revision 0→1; stale write 409; guarded no-op unchanged; guard-only 400");
     }
 
     pub(super) async fn private_channel_assertions(f: &Fixture) {

@@ -38,7 +38,7 @@ macro_rules! task_columns {
     () => {
         "community_id, id, channel_id, created_by_pubkey, assignee_pubkey, \
          parent_task_id, title, body, status, priority, source, source_ref, \
-         due_at, done_at, archived_at, created_at, updated_at"
+         due_at, done_at, archived_at, created_at, updated_at, revision"
     };
 }
 
@@ -84,6 +84,8 @@ pub struct TaskRecord {
     pub created_at: DateTime<Utc>,
     /// Last-modification timestamp.
     pub updated_at: DateTime<Utc>,
+    /// Monotonic version, advanced only when persisted task fields change.
+    pub revision: i32,
 }
 
 /// One entry in a task's append-only history.
@@ -180,6 +182,8 @@ pub struct TaskFilter {
 /// The same distinction applies to `due_at`.
 #[derive(Debug, Clone, Default)]
 pub struct TaskPatch {
+    /// Optional optimistic concurrency guard; omission preserves unguarded writes.
+    pub expected_revision: Option<i32>,
     /// New status.
     pub status: Option<TaskStatus>,
     /// New title.
@@ -226,6 +230,7 @@ fn parse_task_row(row: &sqlx::postgres::PgRow) -> Result<TaskRecord> {
         archived_at: row.try_get("archived_at")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+        revision: row.try_get("revision")?,
     })
 }
 
@@ -464,6 +469,15 @@ pub async fn update_task(
     .await?
     .ok_or_else(|| DbError::NotFound(format!("task {id}")))?;
     let current = parse_task_row(&current)?;
+    if let Some(expected) = patch.expected_revision {
+        if expected != current.revision {
+            return Err(DbError::StaleRevision {
+                task_id: id,
+                expected,
+                actual: current.revision,
+            });
+        }
+    }
 
     let new_status = patch.status.unwrap_or(current.status);
     let new_title = patch.title.clone().unwrap_or_else(|| current.title.clone());
@@ -498,7 +512,7 @@ pub async fn update_task(
 
     let row = sqlx::query(concat!(
         "UPDATE tasks SET status = $3, title = $4, priority = $5, due_at = $6, \
-                          assignee_pubkey = $7, done_at = $8, updated_at = clock_timestamp() \
+                          assignee_pubkey = $7, done_at = $8 \
          WHERE community_id = $1 AND id = $2 \
          RETURNING ",
         task_columns!()
@@ -653,6 +667,15 @@ mod tests {
     #[test]
     fn an_empty_patch_asks_for_nothing() {
         assert!(TaskPatch::default().is_empty());
+    }
+
+    #[test]
+    fn a_guard_only_patch_is_empty() {
+        assert!(TaskPatch {
+            expected_revision: Some(0),
+            ..TaskPatch::default()
+        }
+        .is_empty());
     }
 
     #[test]

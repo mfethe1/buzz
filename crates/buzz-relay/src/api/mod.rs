@@ -182,6 +182,41 @@ pub mod relay_members {
         }
     }
 
+    /// Enforce a per-machine capability grant for an agent. **Default deny.**
+    ///
+    /// Unlike [`enforce_relay_membership`], this is NOT relaxed by
+    /// `require_relay_membership`: an open relay still denies ungranted
+    /// cross-machine actions. Absence of a grant is a denial.
+    pub async fn require_capability(
+        state: &AppState,
+        community: CommunityId,
+        agent_pubkey: &[u8],
+        capability: &str,
+        target: &str,
+    ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+        match state
+            .db
+            .capability_is_granted(community, agent_pubkey, capability, target)
+            .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "capability_not_granted",
+                    "capability": capability,
+                    "target": target,
+                    "message": format!(
+                        "agent has no active {capability} grant for target {target}"
+                    ),
+                })),
+            )),
+            Err(e) => Err(super::internal_error(&format!(
+                "capability check failed: {e}"
+            ))),
+        }
+    }
+
     /// Extract NIP-OA owner from an auth tag without membership enforcement.
     ///
     /// Used on open relays (`require_relay_membership = false`) to opportunistically

@@ -1225,6 +1225,7 @@ CREATE TABLE tasks (
     archived_at        TIMESTAMPTZ,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revision           INT         NOT NULL DEFAULT 0,
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_tasks_done_at_matches_status
         CHECK ((status = 'done') = (done_at IS NOT NULL)),
@@ -1251,6 +1252,32 @@ CREATE INDEX idx_tasks_community_channel ON tasks (community_id, channel_id)
     WHERE channel_id IS NOT NULL;
 CREATE INDEX idx_tasks_community_parent ON tasks (community_id, parent_task_id)
     WHERE parent_task_id IS NOT NULL;
+
+-- HW-017: monotonic revision counter for optimistic concurrency on PATCH.
+CREATE OR REPLACE FUNCTION bump_task_revision()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Bump ONLY when the row's payload actually changed. An idempotent
+    -- restate still fires a BEFORE UPDATE trigger; bumping there would
+    -- invalidate every other client's `expected_revision` for a write that
+    -- changed nothing, manufacturing spurious 409s. The derived columns are
+    -- normalised to OLD first so the whole-row comparison sees only
+    -- caller-supplied payload, and comparing the whole row means a future
+    -- column on `tasks` is guarded automatically.
+    NEW.revision := OLD.revision;
+    NEW.updated_at := OLD.updated_at;
+    IF NEW IS DISTINCT FROM OLD THEN
+        NEW.revision := OLD.revision + 1;
+        NEW.updated_at := clock_timestamp();
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_tasks_revision
+    BEFORE UPDATE ON tasks
+    FOR EACH ROW
+    EXECUTE FUNCTION bump_task_revision();
 
 -- Append-only lifecycle and comment log; also the read model behind the
 -- human-visible task feed, hence the (community, time) feed index.
@@ -1982,3 +2009,167 @@ CREATE INDEX idx_relay_operator_audit_target
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('relay_operator_audit', 'deployment-global append-only roster mutation audit trail; no community_id intentionally');
 
+
+-- Machine homes: the machine an agent actually runs on, as first-class relay data.
+--
+-- Modeling choice (the open item PR-3 was asked to settle at review): these are
+-- columns on `users`, NOT a new `agent_machine_homes` table. 0046 states the rule
+-- this follows -- "a task creator/assignee is a `users` row, never a separate
+-- agent table. Agents in Buzz *are* users" -- and warns that a dedicated id
+-- "would invent a second identity space that nothing else in the schema uses."
+-- A side table keyed by `(community_id, pubkey)` would hold exactly one row per
+-- agent and would be joined on every read, so it buys no cardinality the user
+-- row cannot express, while adding precisely the second identity space 0046
+-- rejects. `users.agent_owner_pubkey` (NIP-OA) already set this precedent:
+-- agent-shaped facts live on the agent's own user row.
+--
+-- `machine_id` is the stable host identity (the desktop's device id); the label
+-- is human-facing and renameable. `machine_runtime` is unconstrained TEXT for
+-- the reason 0031 gives for `workflow_runs.error_code` and 0046 repeats for
+-- `tasks.source`: a new runtime (openclaw, hermes, claude-code, codex) must be
+-- addable across a rolling upgrade without a schema migration.
+--
+-- Every constraint leads with `community_id`, as the migration lint
+-- (`scoped_primary_key_unique_and_foreign_key_constraints_lead_with_community_id`)
+-- requires, so one community's machine registration is invisible to another.
+
+
+ALTER TABLE users
+    ADD COLUMN machine_id      VARCHAR(255),
+    ADD COLUMN machine_label   VARCHAR(255),
+    ADD COLUMN machine_runtime TEXT;
+
+-- One home agent per machine, per community. This is the "one-home-per-machine"
+-- invariant the agent-homes program is built on: two agents claiming the same
+-- host is the exact ambiguity that makes a task assignee meaningless. Enforced
+-- as a partial unique index so the (overwhelming) majority of users, who carry
+-- no machine_id at all, are entirely unconstrained.
+CREATE UNIQUE INDEX idx_users_one_home_per_machine
+    ON users (community_id, machine_id)
+    WHERE machine_id IS NOT NULL;
+
+-- A machine home is meaningless without the machine it names, and a bare label
+-- or runtime with no `machine_id` is unaddressable -- it could never be resolved
+-- to a host. Rejecting that at the database keeps a half-registered home
+-- unrepresentable rather than merely discouraged.
+ALTER TABLE users
+    ADD CONSTRAINT chk_users_machine_fields_require_machine_id
+        CHECK (machine_id IS NOT NULL
+               OR (machine_label IS NULL AND machine_runtime IS NULL));
+
+-- Blank/whitespace ids and labels are the other way a home becomes
+-- unaddressable, and TEXT columns accept them silently.
+ALTER TABLE users
+    ADD CONSTRAINT chk_users_machine_id_not_blank
+        CHECK (machine_id IS NULL OR length(btrim(machine_id)) > 0),
+    ADD CONSTRAINT chk_users_machine_label_not_blank
+        CHECK (machine_label IS NULL OR length(btrim(machine_label)) > 0),
+    ADD CONSTRAINT chk_users_machine_runtime_not_blank
+        CHECK (machine_runtime IS NULL OR length(btrim(machine_runtime)) > 0);
+
+-- `users` already carries the universal community write fence from 0001; adding
+-- columns does not detach it, so no re-attach is needed here.
+
+-- Per-machine capability grants: default deny.
+--
+-- PR-3 gave agents a machine home. This is the authorization half: which agent
+-- may perform which capability against which target. Nothing is implicit —
+-- absence of a row is denial, and revocation is a tombstone (revoked_at), not a
+-- DELETE. The separate append-only history retains each grant/revoke transition.
+--
+-- Tenant-scoped like every non-operator table: community_id NOT NULL, and it
+-- leads the primary key and the unique index (migration lint enforces both).
+
+
+
+CREATE TABLE agent_capability_grants (
+    community_id  UUID        NOT NULL REFERENCES communities(id),
+    agent_pubkey  BYTEA       NOT NULL,
+    capability    VARCHAR(64) NOT NULL,
+    target        TEXT        NOT NULL,
+    granted_by    BYTEA       NOT NULL,
+    granted_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revoked_at    TIMESTAMPTZ,
+    revoked_by    BYTEA,
+    PRIMARY KEY (community_id, agent_pubkey, capability, target)
+);
+
+-- A revoked grant keeps its row; re-granting reuses it (see store::grant).
+CREATE INDEX idx_agent_capability_grants_active
+    ON agent_capability_grants (community_id, agent_pubkey, capability)
+    WHERE revoked_at IS NULL;
+
+COMMENT ON TABLE agent_capability_grants IS
+    'Per-machine capability grants. Default deny: no row (or revoked_at set) means denied.';
+COMMENT ON COLUMN agent_capability_grants.target IS
+    'Target machine_id (users.machine_id from PR-3), or "*" for any machine in the community.';
+COMMENT ON COLUMN agent_capability_grants.revoked_at IS
+    'Current tombstone. Immutable grant/revoke history is in agent_capability_events.';
+
+SELECT attach_community_write_fence('agent_capability_grants');
+
+-- The projection can be re-granted, but its overwritten actors/timestamps must
+-- survive. An AFTER trigger appends the OLD/NEW images in the same statement
+-- transaction. Row locking serializes concurrent upserts, including first grant.
+CREATE TABLE agent_capability_events (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    id BIGINT GENERATED ALWAYS AS IDENTITY,
+    agent_pubkey BYTEA NOT NULL,
+    capability VARCHAR(64) NOT NULL,
+    target TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('grant', 'revoke')),
+    actor_pubkey BYTEA NOT NULL,
+    before_state JSONB,
+    after_state JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (community_id, id)
+);
+CREATE INDEX idx_agent_capability_events_grant
+    ON agent_capability_events (community_id, agent_pubkey, capability, target, id);
+COMMENT ON TABLE agent_capability_events IS
+    'Append-only grant/revoke facts; removed only by the fenced whole-community purge. Not a signed event or execution authorization receipt.';
+SELECT attach_community_write_fence('agent_capability_events');
+
+CREATE FUNCTION record_agent_capability_change() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' AND NEW IS NOT DISTINCT FROM OLD THEN
+        RETURN NULL;
+    END IF;
+    INSERT INTO agent_capability_events
+        (community_id, agent_pubkey, capability, target, action, actor_pubkey,
+         before_state, after_state)
+    VALUES
+        (NEW.community_id, NEW.agent_pubkey, NEW.capability, NEW.target,
+         CASE WHEN NEW.revoked_at IS NULL THEN 'grant' ELSE 'revoke' END,
+         CASE WHEN NEW.revoked_at IS NULL THEN NEW.granted_by ELSE NEW.revoked_by END,
+         CASE WHEN TG_OP = 'INSERT' THEN NULL ELSE to_jsonb(OLD) END,
+         to_jsonb(NEW));
+    RETURN NULL;
+END
+$$;
+CREATE TRIGGER agent_capability_change_history
+    AFTER INSERT OR UPDATE ON agent_capability_grants
+    FOR EACH ROW EXECUTE FUNCTION record_agent_capability_change();
+
+-- A mutable projection never grants authority to rewrite its history. The one
+-- deletion exception is the existing generation-bound whole-community executor;
+-- the universal write fence independently verifies that same proof.
+CREATE FUNCTION protect_agent_capability_history() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' AND EXISTS (
+        SELECT 1 FROM communities
+        WHERE id = OLD.community_id AND deletion_state IN ('fenced', 'tombstone')
+          AND current_setting('buzz.deletion_executor_community', true) = id::TEXT
+          AND current_setting('buzz.deletion_fence_generation', true) = deletion_fence_generation::TEXT
+    ) THEN
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'capability history is append-only'
+        USING ERRCODE = 'object_not_in_prerequisite_state';
+END
+$$;
+CREATE TRIGGER agent_capability_history_immutable
+    BEFORE UPDATE OR DELETE ON agent_capability_events
+    FOR EACH ROW EXECUTE FUNCTION protect_agent_capability_history();

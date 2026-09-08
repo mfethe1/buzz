@@ -74,6 +74,7 @@ pub struct CreateTaskRequest {
 /// `skip_serializing_if`/`default`) is what distinguishes the two.
 #[derive(Debug, Deserialize, Default)]
 pub struct UpdateTaskRequest {
+    expected_revision: Option<i32>,
     status: Option<String>,
     title: Option<String>,
     priority: Option<i32>,
@@ -155,6 +156,10 @@ fn validate_title(title: &str) -> Result<String, (StatusCode, Json<Value>)> {
 /// not a server fault.
 fn map_task_error(context: &str, error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
     match &error {
+        buzz_db::DbError::StaleRevision { task_id, expected, actual } => api_error(
+            StatusCode::CONFLICT,
+            &format!("task {task_id} was modified (expected revision {expected}, actual {actual}); re-fetch and retry"),
+        ),
         buzz_db::DbError::NotFound(_) => api_error(StatusCode::NOT_FOUND, "task not found"),
         buzz_db::DbError::InvalidData(message) => api_error(StatusCode::BAD_REQUEST, message),
         buzz_db::DbError::AccessDenied(_) => api_error(
@@ -460,6 +465,7 @@ pub async fn update_task(
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid task JSON: {e}")))?;
 
     let patch = TaskPatch {
+        expected_revision: request.expected_revision,
         status: request.status.as_deref().map(parse_status).transpose()?,
         title: request.title.as_deref().map(validate_title).transpose()?,
         priority: request.priority,
@@ -582,6 +588,7 @@ fn task_json(task: &TaskRecord) -> Value {
         "archived_at": task.archived_at.map(|value| value.timestamp()),
         "created_at": task.created_at.timestamp(),
         "updated_at": task.updated_at.timestamp(),
+        "revision": task.revision,
     })
 }
 
