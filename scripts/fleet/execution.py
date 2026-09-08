@@ -1,6 +1,6 @@
 """Single-use start acknowledgement, local receipt and bounded qualification."""
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import copy
 import json
 import os
@@ -129,7 +129,7 @@ def unknown_outcome(buzz, journal, request):
     """A prior start intent or started receipt never permits a second probe."""
     attempt = request["attempt_id"]
     journal.update(attempt, "outcome_unknown")
-    with journal.connect() as db:
+    with closing(journal.connect()) as db, db:
         start = db.execute("SELECT event_id FROM outbox WHERE attempt=? AND transition='start'",
                            (attempt,)).fetchone()
     if start and start["event_id"]:
@@ -159,7 +159,7 @@ def execute(policy, request):
         # An outbox row is written BEFORE attempting the network start. On any
         # restart, that row denotes consumed-or-unknown authority, never a lease
         # that another process may reuse. This also closes the ACK/local-save gap.
-        with journal.connect() as db:
+        with closing(journal.connect()) as db, db:
             prior_start = db.execute("SELECT 1 FROM outbox WHERE attempt=? AND transition='start'",
                                      (attempt,)).fetchone()
         if prior_start:
@@ -170,7 +170,7 @@ def execute(policy, request):
         projection = buzz.attempt(request)
         require(projection["state"] in ("planned", "claimed"), "relay_attempt_not_startable")
         current = buzz.reduce(request["channel"], request["task_id"])
-        with journal.connect() as db:
+        with closing(journal.connect()) as db, db:
             has_outbox = bool(db.execute("SELECT 1 FROM outbox WHERE attempt=?", (attempt,)).fetchone())
         if not has_outbox:
             require(current["head"] == request["head"] and current["snapshot"] == request["snapshot"],
@@ -238,7 +238,7 @@ def finish_delivery(policy, journal, request, result):
     if current["snapshot"]["status"] == "cancelled":
         journal.update(attempt, "cancel_acknowledged", result)
         return {"attempt_id": attempt, "state": "cancel_acknowledged", "receipt_event_id": receipt_id, "result": result}
-    with journal.connect() as db:
+    with closing(journal.connect()) as db, db:
         start = db.execute("SELECT event_id,snapshot FROM outbox WHERE attempt=? AND transition='start'",
                            (attempt,)).fetchone()
     require(start and start["event_id"], "start_receipt_missing")

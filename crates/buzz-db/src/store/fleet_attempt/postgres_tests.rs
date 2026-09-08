@@ -4,6 +4,52 @@ use buzz_core::cml::CmlStatus;
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn submit_binds_observed_commit_and_exact_signed_receipt() {
+    let f = Fixture::new().await;
+    let (plan, start, mut task) = f.start().await;
+    let receipt = f.receipt(&plan, Some(&start), ReceiptStatus::Success);
+    f.persist(&receipt).await.unwrap();
+    task.status = CmlStatus::Review;
+    task.git.head_sha = Some("c".repeat(40));
+    task.evidence.push(buzz_core::cml::Evidence {
+        kind: "fleet-qualification-receipt".into(),
+        reference: receipt.id.to_hex(),
+    });
+    for case in [
+        "wrong_commit",
+        "missing_receipt",
+        "wrong_receipt",
+        "wrong_kind",
+    ] {
+        let mut invalid = task.clone();
+        match case {
+            "wrong_commit" => invalid.git.head_sha = Some("d".repeat(40)),
+            "missing_receipt" => invalid.evidence.clear(),
+            "wrong_receipt" => invalid.evidence[0].reference = "e".repeat(64),
+            "wrong_kind" => invalid.evidence[0].kind = "test".into(),
+            _ => unreachable!(),
+        }
+        let event = f.event(&invalid, CmlTransition::Submit, Some(&start));
+        assert!(f.persist(&event).await.is_err(), "accepted {case}");
+        assert_eq!(f.event_count(&event).await, 0, "stored {case}");
+        let head: Vec<u8> = sqlx::query_scalar(
+            "SELECT cml_head FROM fleet_attempts WHERE community_id=$1 AND task_id=$2",
+        )
+        .bind(f.community.as_uuid())
+        .bind(task.id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(head, start.id.as_bytes().as_slice());
+    }
+    let valid = f.event(&task, CmlTransition::Submit, Some(&start));
+    assert!(f.persist(&valid).await.unwrap().1);
+    assert!(!f.persist(&valid).await.unwrap().1);
+    assert_eq!(f.event_count(&valid).await, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn atomic_signed_plan_start_receipt_and_duplicate_round_trip() {
     let f = Fixture::new().await;
     let (plan, claim, mut task) = f.plan_claim().await;

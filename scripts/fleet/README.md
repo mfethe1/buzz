@@ -11,6 +11,8 @@ count. It does not determine whether the worktree is clean. It records the
 Python version in the host's durable receipt. A typed signed receipt containing
 that bounded result is persisted by the relay; CML evidence references its event
 ID. Artifact upload and a phone result viewer are outside this adapter.
+The relay accepts a fleet submission only when its Git head matches the saved
+successful receipt and its evidence names that exact signed receipt event.
 
 ## Verify locally
 

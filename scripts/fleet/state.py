@@ -1,5 +1,6 @@
 """Execution journals and a receipt backend compatible with the Mack bridge."""
 
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -24,7 +25,7 @@ class Journal:
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.directory, 0o700)
         self.path = self.directory / "journal.sqlite"
-        with self.connect() as db:
+        with closing(self.connect()) as db, db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS attempts (
                     id TEXT PRIMARY KEY, request TEXT NOT NULL, state TEXT NOT NULL,
@@ -41,12 +42,16 @@ class Journal:
     def connect(self):
         db = sqlite3.connect(str(self.path), timeout=10)
         db.row_factory = sqlite3.Row
-        db.execute("PRAGMA synchronous=FULL")
+        try:
+            db.execute("PRAGMA synchronous=FULL")
+        except BaseException:
+            db.close()
+            raise
         return db
 
     def admit(self, request):
         attempt = request["attempt_id"]
-        with self.connect() as db:
+        with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             previous = db.execute("SELECT request FROM attempts WHERE id=?", (attempt,)).fetchone()
             encoded = canonical(request)
@@ -57,7 +62,7 @@ class Journal:
         return self.get(attempt)
 
     def get(self, attempt):
-        with self.connect() as db:
+        with closing(self.connect()) as db, db:
             row = db.execute("SELECT * FROM attempts WHERE id=?", (attempt,)).fetchone()
         if not row:
             return {"attempt_id": attempt, "state": "not_recorded"}
@@ -67,19 +72,19 @@ class Journal:
         return item
 
     def update(self, attempt, state, result=None):
-        with self.connect() as db:
+        with closing(self.connect()) as db, db:
             db.execute("UPDATE attempts SET state=?,result=?,updated=? WHERE id=?",
                        (state, canonical(result) if result is not None else None, time.time(), attempt))
 
     def cancel(self, attempt):
-        with self.connect() as db:
+        with closing(self.connect()) as db, db:
             db.execute("UPDATE attempts SET cancelled=1,updated=? WHERE id=?", (time.time(), attempt))
 
     def cancelled(self, attempt):
         return bool(self.get(attempt).get("cancelled"))
 
     def freeze(self, attempt, transition, previous, snapshot):
-        with self.connect() as db:
+        with closing(self.connect()) as db, db:
             db.execute("INSERT OR IGNORE INTO outbox VALUES(?,?,?,?,NULL)",
                        (attempt, transition, previous, canonical(snapshot)))
             row = db.execute("SELECT * FROM outbox WHERE attempt=? AND transition=?",
@@ -94,7 +99,7 @@ class Journal:
         """
         if transition not in ("receipt:unknown", "receipt:terminal"):
             raise ValueError("only_receipt_delivery_may_refresh")
-        with self.connect() as db:
+        with closing(self.connect()) as db, db:
             changed = db.execute("UPDATE outbox SET previous=? WHERE attempt=? AND transition=? "
                                  "AND previous=? AND event_id IS NULL",
                                  (str(published_at), attempt, transition, previous)).rowcount
@@ -102,7 +107,7 @@ class Journal:
                 raise ValueError("receipt_delivery_generation_changed")
 
     def sent(self, attempt, transition, event_id):
-        with self.connect() as db:
+        with closing(self.connect()) as db, db:
             db.execute("UPDATE outbox SET event_id=? WHERE attempt=? AND transition=?",
                        (event_id, attempt, transition))
 
@@ -116,7 +121,7 @@ class CompatibleReceipts:
     def __init__(self, path):
         self.path = Path(path)
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with self.connect() as db:
+        with closing(self.connect()) as db, db:
             db.execute("""CREATE TABLE IF NOT EXISTS receipts (
                 task_id TEXT PRIMARY KEY, digest TEXT NOT NULL, state TEXT NOT NULL,
                 started REAL NOT NULL, updated REAL NOT NULL, result TEXT)""")
@@ -124,7 +129,11 @@ class CompatibleReceipts:
 
     def connect(self):
         db = sqlite3.connect(str(self.path), timeout=10)
-        db.execute("PRAGMA synchronous=FULL")
+        try:
+            db.execute("PRAGMA synchronous=FULL")
+        except BaseException:
+            db.close()
+            raise
         return db
 
     @staticmethod
@@ -133,7 +142,7 @@ class CompatibleReceipts:
         return hashlib.sha256(json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     def claim(self, task_id, envelope):
-        with self.connect() as db:
+        with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT digest,state,result FROM receipts WHERE task_id=?", (task_id,)).fetchone()
             if row:
@@ -146,7 +155,7 @@ class CompatibleReceipts:
         return {"state": "new"}
 
     def finish(self, task_id, envelope, result):
-        with self.connect() as db:
+        with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT digest FROM receipts WHERE task_id=?", (task_id,)).fetchone()
             if not row or row[0] != self.digest(envelope):
@@ -155,7 +164,7 @@ class CompatibleReceipts:
                        (time.time(), canonical(result), task_id))
 
     def get(self, task_id):
-        with self.connect() as db:
+        with closing(self.connect()) as db, db:
             row = db.execute("SELECT state,started,updated,result,digest FROM receipts WHERE task_id=?",
                              (task_id,)).fetchone()
         if not row:

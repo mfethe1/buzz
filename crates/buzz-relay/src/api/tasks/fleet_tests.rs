@@ -201,7 +201,19 @@ mod postgres_tests {
         // Revocation blocks new execution, while an already completed worker may
         // still append its verified terminal fact through normal member ingress.
         assert_eq!(post(&f, &receipt, false).await["accepted"], true);
-        assert_eq!(post(&f, &early, false).await["accepted"], true);
+        assert_ne!(post(&f, &early, false).await["accepted"], true);
+        assert_eq!(count(&f, &early).await, 0);
+        submitted.evidence.push(buzz_core::cml::Evidence {
+            kind: "fleet-qualification-receipt".into(),
+            reference: receipt.id.to_hex(),
+        });
+        let mut wrong = submitted.clone();
+        wrong.git.head_sha = Some("d".repeat(40));
+        let wrong = signed(&f, &wrong, CmlTransition::Submit, Some(&start));
+        assert_ne!(post(&f, &wrong, false).await["accepted"], true);
+        assert_eq!(count(&f, &wrong).await, 0);
+        let valid = signed(&f, &submitted, CmlTransition::Submit, Some(&start));
+        assert_eq!(post(&f, &valid, false).await["accepted"], true);
         let (_, display) = f
             .request("GET", &format!("/api/tasks/{}", f.task_id), &f.owner, None)
             .await;

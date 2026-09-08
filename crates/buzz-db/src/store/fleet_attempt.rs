@@ -209,10 +209,28 @@ async fn project_cml(
             return Err(deny("started fleet attempts are never re-leased"));
         }
         next_state = "expired".into();
-    } else if cml.transition == CmlTransition::Submit && state != "success" {
-        return Err(deny(
-            "worker submission requires a durable successful receipt",
-        ));
+    } else if cml.transition == CmlTransition::Submit {
+        if state != "success" {
+            return Err(deny(
+                "worker submission requires a durable successful receipt",
+            ));
+        }
+        let signed_receipt = row_event(&row, "receipt")?;
+        let (_, receipt) =
+            FleetReceipt::from_event_after_signature(&signed_receipt).map_err(invalid)?;
+        let receipt_id = signed_receipt.id.to_hex();
+        if row.get::<Option<Vec<u8>>, _>("receipt_event_id").as_deref()
+            != Some(signed_receipt.id.as_bytes().as_slice())
+            || receipt.status != ReceiptStatus::Success
+            || receipt.qualification.as_ref().map(|q| &q.head_sha) != cml.task.git.head_sha.as_ref()
+            || !cml.task.evidence.iter().any(|evidence| {
+                evidence.kind == "fleet-qualification-receipt" && evidence.reference == receipt_id
+            })
+        {
+            return Err(deny(
+                "worker submission must bind the observed commit and signed receipt",
+            ));
+        }
     } else if cml.transition == CmlTransition::Block
         && !matches!(state.as_str(), "error" | "cancelled")
     {
