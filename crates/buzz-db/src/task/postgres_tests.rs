@@ -803,8 +803,8 @@ async fn revision_advances_on_real_change_and_holds_on_a_semantic_noop() {
     .expect("real change");
     assert_eq!(bumped.revision, 1, "a real change bumps exactly once");
 
-    // Restate the values the row already holds. The trigger fires, but the
-    // whole-row comparison sees no payload change, so revision must hold.
+    // The API returns before writing when the requested fields already match;
+    // this checks that fast path, separately from direct SQL below.
     let restated = update_task(
         &pool,
         community,
@@ -842,6 +842,32 @@ async fn revision_advances_on_real_change_and_holds_on_a_semantic_noop() {
     assert_eq!(
         bumped_again.revision, 2,
         "the counter still advances after a no-op"
+    );
+
+    // Body is not patchable through update_task. The database trigger must
+    // still cover this writer and normalize attempts to set derived fields.
+    let changed =
+        sqlx::query("UPDATE tasks SET body = 'direct writer' WHERE community_id = $1 AND id = $2")
+            .bind(community.as_uuid())
+            .bind(task.id)
+            .execute(&pool)
+            .await
+            .expect("direct payload update");
+    assert_eq!(changed.rows_affected(), 1);
+    let direct = get_task(&pool, community, task.id)
+        .await
+        .expect("direct change");
+    assert_eq!(direct.body.as_deref(), Some("direct writer"));
+    assert_eq!(direct.revision, 3);
+    assert_ne!(direct.updated_at, bumped_again.updated_at);
+    let restated = sqlx::query("UPDATE tasks SET body = body, revision = revision + 1000, updated_at = '2000-01-01T00:00:00Z' WHERE community_id = $1 AND id = $2")
+        .bind(community.as_uuid()).bind(task.id).execute(&pool).await.expect("direct derived-only update");
+    assert_eq!(restated.rows_affected(), 1);
+    assert_eq!(
+        get_task(&pool, community, task.id)
+            .await
+            .expect("normalized direct no-op"),
+        direct
     );
 
     delete_test_community(&pool, community).await;

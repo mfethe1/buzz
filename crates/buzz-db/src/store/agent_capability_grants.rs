@@ -203,7 +203,7 @@ impl Db {
         .await
     }
 
-    /// List all grants (including revoked tombstones) for an agent.
+    /// List all grants (including revoked tombstones) for a community.
     #[datastore_span(name = "capability_list_grants", system = "postgresql")]
     pub async fn capability_list_grants(
         &self,

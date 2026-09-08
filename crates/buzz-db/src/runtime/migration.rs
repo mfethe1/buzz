@@ -1911,7 +1911,12 @@ mod postgres_tests {
         // here so the comparison below stays an exact equality: a new scoped
         // table that forgets its fence line still fails this test, and a fence
         // line for a table nobody registered here fails it too.
-        for post_0029_scoped_table in ["tasks", "task_events"] {
+        for post_0029_scoped_table in [
+            "tasks",
+            "task_events",
+            "agent_capability_grants",
+            "agent_capability_events",
+        ] {
             expected_fences.insert(post_0029_scoped_table.to_owned());
         }
         assert_eq!(
