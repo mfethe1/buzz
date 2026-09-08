@@ -2668,8 +2668,6 @@ async fn handle_ws_message(
                             );
                         }
                     }
-                    state.acknowledge_observer_frame(&event_id);
-                    debug!("OK for event {event_id}: accepted={accepted} message={message}");
                 }
             }
             true
@@ -6888,33 +6886,100 @@ mod tests {
         }
     }
 
-    /// The bug this replaced: every `OK` retired its in-flight frame, so a
-    /// rejected event was dropped from the resend queue exactly as though it
-    /// had been stored, and the rejection was only visible at `debug!`.
-    #[test]
-    fn transient_rejection_keeps_the_frame_queued_for_resend() {
-        let mut state = BgState::new();
-        let keys = Keys::generate();
-        let refused = make_observer_frame(&keys);
-        state.track_observer_in_flight(Box::new(refused.clone()));
+    /// Exercise real socket frames through the production handler and resend
+    /// writer: a transient refusal retains the signed event until a terminal OK.
+    #[tokio::test]
+    async fn transient_rejection_keeps_the_frame_queued_for_resend() {
+        for (refusal, accepted, terminal) in [
+            ("error: database unavailable", true, "stored"),
+            ("unrecognized refusal", false, "duplicate: already stored"),
+            ("", false, "invalid: bad signature"),
+        ] {
+            let (mut client, mut server) = test_ws_pair().await;
+            let mut state = BgState::new();
+            let keys = Keys::generate();
+            let refused = make_observer_frame(&keys);
+            let (event_tx, _event_rx) = mpsc::channel(1);
+            let (control_tx, _control_rx) = mpsc::channel(1);
+            assert!(
+                execute_connected_command(
+                    &mut client,
+                    &mut state,
+                    &keys.public_key().to_hex(),
+                    RelayCommand::PublishEvent {
+                        event: Box::new(refused.clone()),
+                    },
+                )
+                .await
+            );
+            let original = next_test_frame(&mut server).await;
+            assert_eq!(original, json!(["EVENT", refused]));
 
-        // What the OK handler does for a Retriable disposition: nothing.
-        assert_eq!(
-            classify_ok(false, "rate-limited: slow down"),
-            OkDisposition::Retriable
-        );
-
-        state.requeue_observer_in_flight();
-        let ids: Vec<_> = state
-            .gated_observer_pending
-            .iter()
-            .map(|event| event.id)
-            .collect();
-        assert_eq!(
-            ids,
-            [refused.id],
-            "a transiently refused event must survive to be resent"
-        );
+            for (is_terminal, accepted, message) in
+                [(false, false, refusal), (true, accepted, terminal)]
+            {
+                server
+                    .send(Message::Text(
+                        json!(["OK", refused.id.to_hex(), accepted, message])
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .expect("write actual relay OK frame");
+                let frame = timeout(Duration::from_secs(1), client.next())
+                    .await
+                    .expect("read OK deadline")
+                    .expect("socket stays open")
+                    .expect("valid WebSocket frame");
+                assert!(
+                    handle_ws_message(
+                        frame,
+                        &mut client,
+                        &event_tx,
+                        &control_tx,
+                        &mut state,
+                        &keys,
+                        "ws://localhost",
+                        &keys.public_key().to_hex(),
+                        None,
+                    )
+                    .await
+                );
+                assert!(state.check_rate_gate().is_none());
+                let retained: Vec<_> = state
+                    .observer_in_flight
+                    .iter()
+                    .map(|event| event.id)
+                    .collect();
+                if is_terminal {
+                    assert!(retained.is_empty(), "terminal OK must retire the frame");
+                    state.requeue_observer_in_flight();
+                    assert_eq!(
+                        drain_gated_observer_pending(&mut client, &mut state, 1).await,
+                        0,
+                    );
+                    assert!(timeout(Duration::from_millis(20), server.next())
+                        .await
+                        .is_err());
+                } else {
+                    assert_eq!(
+                        retained,
+                        [refused.id],
+                        "{refusal:?} must not acknowledge an uncommitted observer frame"
+                    );
+                    state.requeue_observer_in_flight();
+                    assert_eq!(
+                        drain_gated_observer_pending(&mut client, &mut state, 1).await,
+                        1,
+                    );
+                    assert_eq!(
+                        next_test_frame(&mut server).await,
+                        original,
+                        "retry must publish the same signed event bytes"
+                    );
+                }
+            }
+        }
     }
 
     /// The parked-frame queue is bounded: overflow evicts the oldest frame and
