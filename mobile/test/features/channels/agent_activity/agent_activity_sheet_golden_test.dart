@@ -65,7 +65,7 @@ void main() {
     if (!selection.qualified) {
       // This preserves the prior canonical comparison on hosts such as CI's
       // Linux runner; it is not qualification of that renderer fingerprint.
-      print(
+      debugPrint(
         'Unqualified renderer: comparing canonical golden images strictly. '
         'Updates are disabled. ${jsonEncode(actual)}',
       );
