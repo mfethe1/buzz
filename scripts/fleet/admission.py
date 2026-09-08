@@ -191,5 +191,3 @@ def publish_transition(buzz, journal, request, transition, previous, snapshot):
         event_id = response["event_id"]
     journal.sent(request["attempt_id"], transition, event_id)
     return event_id, frozen
-
-
