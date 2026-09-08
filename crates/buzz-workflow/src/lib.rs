@@ -31,6 +31,7 @@
 //! ```
 
 pub mod action_sink;
+mod approval;
 pub mod error;
 pub mod executor;
 pub mod schema;
@@ -204,9 +205,9 @@ impl WorkflowEngine {
 
     /// Finalize a workflow run after execution completes or fails.
     ///
-    /// This is the **single** place that maps an executor result to a DB status
-    /// update. All execution paths (event-triggered, manual trigger/webhook,
-    /// approval resume) call this instead of duplicating the 3-way match.
+    /// Event-triggered, manual/webhook, and resumed executions use this finalizer.
+    /// Suspension is already committed atomically by the executor; continuation
+    /// timeout/recovery separately records an explicit unknown outcome.
     ///
     /// `existing_trace` is prepended to the executor's trace — used by the
     /// approval-resume path where pre-approval steps already have trace entries.
@@ -227,33 +228,8 @@ impl WorkflowEngine {
                 let step_count = result.step_index as i32;
 
                 if result.approval_token.is_some() {
-                    // Approval gates are not yet implemented (WF-08).
-                    // Fail explicitly rather than creating unreachable WaitingApproval rows.
-                    tracing::warn!(
-                        run_id = %run_id,
-                        step_index = result.step_index,
-                        "Workflow hit approval gate — not yet implemented, marking as failed"
-                    );
-                    if let Err(e) = self
-                        .db
-                        .update_workflow_run(
-                            community_id,
-                            run_id,
-                            RunStatus::Failed,
-                            step_count,
-                            &trace_json,
-                            Some(buzz_db::workflow::WorkflowRunFailure {
-                                code: "approval_not_supported",
-                                message: "approval gates not yet implemented — see WF-08",
-                            }),
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            run_id = %run_id,
-                            "Failed to update run to Failed (approval gate): {e}"
-                        );
-                    }
+                    // The executor committed the request event, immutable continuation,
+                    // approval and waiting run atomically before returning suspension.
                 } else {
                     tracing::info!(run_id = %run_id, "Workflow run completed");
                     if let Err(e) = self
@@ -488,9 +464,19 @@ impl WorkflowEngine {
     /// within an interval.
     pub async fn run(self: &Arc<Self>) {
         tracing::info!("WorkflowEngine cron loop started (60s tick)");
-
+        let mut approval_tick = tokio::time::interval(std::time::Duration::from_secs(2));
+        let mut cron_tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        cron_tick.tick().await; // retain the existing delayed first cron fire
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            tokio::select! {
+                _ = approval_tick.tick() => {
+                    if let Err(error) = self.recover_approvals().await {
+                        tracing::error!("Workflow approval recovery failed: {error}");
+                    }
+                    continue;
+                }
+                _ = cron_tick.tick() => {}
+            }
 
             let now = Utc::now();
 
