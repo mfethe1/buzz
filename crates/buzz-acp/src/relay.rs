@@ -753,6 +753,8 @@ enum RelayMessage {
     Auth {
         challenge: String,
     },
+    /// Task-list cache advisory; the agent harness has no task-list cache.
+    TasksSyncRequired,
 }
 
 /// Subscription ID for the global membership notification subscription.
@@ -2677,6 +2679,7 @@ async fn handle_ws_message(
                         warn!("CLOSED for unknown subscription {subscription_id} — ignoring");
                     }
                 }
+                RelayMessage::TasksSyncRequired => {}
                 RelayMessage::Auth { challenge } => {
                     // AUTH send failure must trigger reconnect.
                     debug!("received mid-session AUTH challenge — re-authenticating");
@@ -2810,6 +2813,8 @@ async fn process_handshake_buffer(
             } => serde_json::to_string(&json!(["OK", event_id, accepted, message])).ok(),
             // AUTH in the buffer is stale — skip it.
             RelayMessage::Auth { .. } => None,
+            // The harness does not consume task-list cache invalidations.
+            RelayMessage::TasksSyncRequired => None,
         };
         if let Some(text) = text {
             let should_continue = handle_ws_message(
@@ -3996,6 +4001,13 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
                 .to_string();
             Ok(RelayMessage::Auth { challenge })
         }
+        "BUZZ_TASKS_SYNC_REQUIRED" => {
+            let channel_id = arr.get(1).and_then(Value::as_str);
+            if arr.len() != 2 || channel_id.and_then(|id| Uuid::parse_str(id).ok()).is_none() {
+                return Err(RelayError::UnexpectedMessage(text.to_string()));
+            }
+            Ok(RelayMessage::TasksSyncRequired)
+        }
         other => Err(RelayError::UnexpectedMessage(format!(
             "unknown message type: {other}"
         ))),
@@ -4371,6 +4383,10 @@ async fn wait_for_any_ok(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "relay/task_sync_tests.rs"]
+mod task_sync_tests;
 
 #[cfg(test)]
 mod tests {
