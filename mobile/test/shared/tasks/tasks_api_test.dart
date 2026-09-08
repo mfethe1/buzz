@@ -290,6 +290,33 @@ void main() {
   });
 
   group('updateTask', () {
+    test('signs the exact expected revision with the changed status', () async {
+      late http.Request captured;
+      final api = apiWith((request) async {
+        captured = request;
+        return http.Response(jsonEncode(_taskJson()), 200);
+      });
+      await api.updateTask(
+        'task-1',
+        status: TaskStatus.done,
+        expectedRevision: 17,
+      );
+      expect(jsonDecode(captured.body), {
+        'status': 'done',
+        'expected_revision': 17,
+      });
+      final encoded = captured.headers['Authorization']!.substring(
+        'Nostr '.length,
+      );
+      final event =
+          jsonDecode(
+                utf8.decode(base64Url.decode(base64Url.normalize(encoded))),
+              )
+              as Map<String, dynamic>;
+      final hash = sha256.convert(utf8.encode(captured.body)).toString();
+      expect(event['tags'], anyElement(equals(['payload', hash])));
+    });
+
     test('sends only the fields being changed', () async {
       late http.Request captured;
       final api = apiWith((request) async {

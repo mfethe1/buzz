@@ -64,6 +64,62 @@ void main() {
     });
   }
 
+  test('co64 offsets outside the moved range retain all eight bytes', () async {
+    final ftyp = _box('ftyp', ascii.encode('isom'));
+    final mdat = _box('mdat', [1, 2, 3, 4]);
+    // Includes the first inexact JS integer and high-bit unsigned values.
+    // They do not refer to the moved payload and must remain byte-for-byte.
+    const untouched = <int>[
+      0,
+      0x20,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0x7f,
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      0xff,
+      0x80,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+    ];
+    final moov = _nestedMoov(
+      _box('co64', [
+        0,
+        0,
+        0,
+        0,
+        ..._uint32(4),
+        ..._uint64(ftyp.length + 8),
+        ...untouched,
+      ]),
+    );
+    final source = File('${tempDirectory.path}/mixed-offsets.mp4');
+    final destination = File('${tempDirectory.path}/output.mp4');
+    await source.writeAsBytes([...ftyp, ...mdat, ...moov]);
+    await rewriteMp4ForFastStart(source, destination);
+    final output = await destination.readAsBytes();
+    final entries = _findAscii(output, 'co64') + 12;
+    expect(_readUint64(output, entries), ftyp.length + 8 + moov.length);
+    expect(
+      output.sublist(entries + 8, entries + 8 + untouched.length),
+      untouched,
+    );
+    expect(_topLevelTypes(output), ['ftyp', 'moov', 'mdat']);
+  });
+
   test(
     'rejects excessive nested box depth and deletes partial output',
     () async {

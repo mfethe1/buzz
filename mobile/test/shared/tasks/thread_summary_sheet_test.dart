@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/tasks/tasks_api.dart';
+import 'package:buzz/shared/tasks/tasks_sync.dart';
 import 'package:buzz/shared/tasks/thread_summary.dart';
 import 'package:buzz/shared/tasks/thread_summary_sheet.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -149,6 +150,37 @@ void main() {
     // Re-saving the same summary can only fail, so the action retires.
     expect(tester.widget<FilledButton>(_save).onPressed, isNull);
   });
+
+  testWidgets(
+    'the open task picker refreshes its candidates after relay changes',
+    (tester) async {
+      var reads = 0;
+      await tester.pumpWidget(
+        _app(
+          http_testing.MockClient((_) async {
+            reads++;
+            return http.Response(
+              jsonEncode({
+                'tasks': [jsonDecode(_taskBody(title: 'Candidate $reads'))],
+              }),
+              200,
+            );
+          }),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      await tester.tap(_save);
+      await tester.pumpAndSettle();
+      expect(find.text('Candidate 1'), findsOneWidget);
+      final container = ProviderScope.containerOf(tester.element(_newTaskRow));
+      container.read(tasksSyncSignalProvider.notifier).bump();
+      await tester.pumpAndSettle();
+      expect(reads, 2);
+      expect(find.text('Candidate 2'), findsOneWidget);
+      expect(find.text('Candidate 1'), findsNothing);
+    },
+  );
 
   testWidgets('persists onto an existing task without creating one', (
     tester,

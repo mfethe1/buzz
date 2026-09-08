@@ -8,7 +8,9 @@ const _maxBoxDepth = 32;
 const _maxMoovBytes = 64 * 1024 * 1024;
 const _copyBufferBytes = 1024 * 1024;
 const _uint32Max = 0xffffffff;
-const _uint64Max = 0x7fffffffffffffff;
+// Dart's native file offsets are signed 64-bit. Keep the bound and addition
+// exact without a large int literal that prevents JS compilation of importers.
+final _uint64Max = (BigInt.one << 63) - BigInt.one;
 const _containerTypes = {
   'moov',
   'trak',
@@ -329,11 +331,11 @@ void _patchCo64(
     final entry = start + 8 + index * 8;
     final value = data.getUint64(entry, Endian.big);
     if (value >= movedRegionStart && value < movedRegionEnd) {
-      final adjusted = value + delta;
+      final adjusted = BigInt.from(value) + BigInt.from(delta);
       if (adjusted > _uint64Max) {
         throw const FormatException('co64 offset overflow');
       }
-      data.setUint64(entry, adjusted, Endian.big);
+      data.setUint64(entry, adjusted.toInt(), Endian.big);
     }
   }
 }

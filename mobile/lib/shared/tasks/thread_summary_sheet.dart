@@ -22,6 +22,8 @@ import '../widgets/sheet_divider.dart';
 import 'task.dart';
 import 'thread_summary.dart';
 import 'tasks_api.dart';
+import 'task_query.dart';
+import 'tasks_sync.dart';
 
 /// Opens the summary sheet for an already-collected thread.
 ///
@@ -257,12 +259,13 @@ class _SummaryTaskPicker extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final api = ref.read(tasksApiProvider);
-    final tasks = useMemoized(
+    final api = ref.watch(tasksApiProvider);
+    final query = useTaskQuery(
       () => api.listTasks(channelId: channelId, limit: 20),
-      [channelId],
+      scope: [api, channelId],
+      signal: ref.watch(tasksSyncSignalProvider),
     );
-    final snapshot = useFuture(tasks);
+    final snapshot = query.value;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(Grid.gutter, 0, Grid.gutter, Grid.xs),

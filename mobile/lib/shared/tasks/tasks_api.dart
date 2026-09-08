@@ -144,11 +144,13 @@ class TasksApi {
     TaskStatus? status,
     String? title,
     int? priority,
+    int? expectedRevision,
   }) async {
     final payload = <String, Object?>{
       if (status != null) 'status': status.wireValue,
       if (title != null) 'title': title.trim(),
       'priority': ?priority,
+      'expected_revision': ?expectedRevision,
     };
     final decoded = await _send('PATCH', _uri('/api/tasks/$taskId'), payload);
     return Task.fromJson(_asObject(decoded));

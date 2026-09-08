@@ -14,6 +14,7 @@ import 'package:buzz/features/channels/thread_detail_page/thread_task_chip.dart'
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/tasks/task.dart';
 import 'package:buzz/shared/tasks/tasks_api.dart';
+import 'package:buzz/shared/tasks/tasks_sync.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -28,6 +29,7 @@ Map<String, dynamic> _taskJson({
   String id = 'task-1',
   String title = 'Ship the digest contract',
   String status = 'in_progress',
+  int revision = 7,
 }) => {
   'id': id,
   'title': title,
@@ -35,6 +37,7 @@ Map<String, dynamic> _taskJson({
   'priority': 0,
   'created_at': 1786000000,
   'updated_at': 1786000060,
+  'revision': revision,
 };
 
 Map<String, dynamic> _eventJson({
@@ -74,6 +77,10 @@ class _StaticRelayConfig extends RelayConfigNotifier {
 
   @override
   RelayConfig build() => RelayConfig(baseUrl: _baseUrl, nsec: _nsec);
+
+  void switchCommunity(String baseUrl) {
+    state = RelayConfig(baseUrl: baseUrl, nsec: _nsec);
+  }
 }
 
 /// A screen with one button that opens the sheet through the same entry point
@@ -537,69 +544,257 @@ void main() {
       );
     });
 
-    // Acceptance 3 + 4: exactly one PATCH carrying ONLY status, then a
+    // Acceptance 3 + 4: one revision-guarded status PATCH, then a
     // re-fetch that sources both the new status and the new history row from
     // the relay rather than from local state.
-    testWidgets('selecting a new status PATCHes status only, then re-fetches', (
+    testWidgets(
+      'selecting a new status guards the read revision, then re-fetches',
+      (tester) async {
+        final methods = <String>[];
+        final patchBodies = <String>[];
+        var getCount = 0;
+        await _pumpSheet(
+          tester,
+          nsec: nsec,
+          handler: (request) async {
+            methods.add(request.method);
+            if (request.method == 'PATCH') {
+              patchBodies.add(request.body);
+              return http.Response(jsonEncode(_taskJson(status: 'done')), 200);
+            }
+            getCount++;
+            // The relay appends the status_changed row itself; the second GET
+            // is what surfaces it. The first GET must NOT contain it, or the
+            // test could pass on stale data.
+            return http.Response(
+              jsonEncode({
+                'task': _taskJson(
+                  status: getCount == 1 ? 'in_progress' : 'done',
+                ),
+                'events': [
+                  if (getCount > 1)
+                    _eventJson(
+                      id: 9,
+                      action: 'status_changed',
+                      fromStatus: 'in_progress',
+                      toStatus: 'done',
+                    ),
+                ],
+              }),
+              200,
+            );
+          },
+        );
+        await _openSheet(tester);
+        await tester.pumpAndSettle();
+
+        expect(tester.widget<Text>(_statusLabelFinder).data, 'In progress');
+        expect(find.byKey(const ValueKey('task-event-row-9')), findsNothing);
+
+        await tester.tap(_statusFinder);
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('task-status-option-done')));
+        await tester.pumpAndSettle();
+
+        // EXACTLY ONE PATCH.
+        expect(methods.where((m) => m == 'PATCH').length, 1);
+        // The version is the one actually read with this task. No title,
+        // priority, actor, role or ownership claim crosses the wire.
+        expect(jsonDecode(patchBodies.single), {
+          'status': 'done',
+          'expected_revision': 7,
+        });
+        // A re-fetch followed the write.
+        expect(getCount, 2);
+        // Both the new label AND the appended history row come from the
+        // re-fetch, not from local mutation.
+        expect(tester.widget<Text>(_statusLabelFinder).data, 'Done');
+        expect(find.byKey(const ValueKey('task-event-row-9')), findsOneWidget);
+        expect(_statusErrorFinder, findsNothing);
+      },
+    );
+
+    testWidgets(
+      'a revision conflict refreshes details without replaying the edit',
+      (tester) async {
+        final requests = <http.Request>[];
+        await _pumpSheet(
+          tester,
+          nsec: nsec,
+          handler: (request) async {
+            requests.add(request);
+            if (request.method == 'PATCH') {
+              return http.Response('{"error":"task was modified"}', 409);
+            }
+            final latest = requests.length > 1;
+            return http.Response(
+              jsonEncode({
+                'task': _taskJson(
+                  status: latest ? 'blocked' : 'in_progress',
+                  revision: latest ? 8 : 7,
+                ),
+                'events': [
+                  if (latest) _eventJson(id: 8, body: 'Waiting for access'),
+                ],
+              }),
+              200,
+            );
+          },
+        );
+        await _openSheet(tester);
+        await tester.pumpAndSettle();
+        await tester.tap(_statusFinder);
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('task-status-option-done')));
+        await tester.pumpAndSettle();
+        expect(requests.map((r) => r.method), ['GET', 'PATCH', 'GET']);
+        expect(jsonDecode(requests[1].body)['expected_revision'], 7);
+        expect(tester.widget<Text>(_statusLabelFinder).data, 'Blocked');
+        expect(find.text('Waiting for access'), findsOneWidget);
+        expect(
+          find.text(
+            'This task changed on another device. Review the latest details and try again.',
+          ),
+          findsOneWidget,
+        );
+        // The user's next explicit choice must use the newly fetched version.
+        await tester.tap(_statusFinder);
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('task-status-option-done')));
+        await tester.pumpAndSettle();
+        expect(jsonDecode(requests[3].body)['expected_revision'], 8);
+      },
+    );
+
+    testWidgets('relay task changes and reconnect refresh the open history', (
       tester,
     ) async {
-      final methods = <String>[];
-      final patchBodies = <String>[];
-      var getCount = 0;
+      var reads = 0;
       await _pumpSheet(
         tester,
         nsec: nsec,
-        handler: (request) async {
-          methods.add(request.method);
-          if (request.method == 'PATCH') {
-            patchBodies.add(request.body);
-            return http.Response(jsonEncode(_taskJson(status: 'done')), 200);
-          }
-          getCount++;
-          // The relay appends the status_changed row itself; the second GET
-          // is what surfaces it. The first GET must NOT contain it, or the
-          // test could pass on stale data.
-          return http.Response(
-            jsonEncode({
-              'task': _taskJson(status: getCount == 1 ? 'in_progress' : 'done'),
-              'events': [
-                if (getCount > 1)
-                  _eventJson(
-                    id: 9,
-                    action: 'status_changed',
-                    fromStatus: 'in_progress',
-                    toStatus: 'done',
-                  ),
-              ],
-            }),
-            200,
+        handler: (_) async {
+          reads++;
+          return _detailResponse(
+            title: 'Task version $reads',
+            events: [_eventJson(id: reads, body: 'History version $reads')],
           );
         },
       );
       await _openSheet(tester);
       await tester.pumpAndSettle();
-
-      expect(tester.widget<Text>(_statusLabelFinder).data, 'In progress');
-      expect(find.byKey(const ValueKey('task-event-row-9')), findsNothing);
-
-      await tester.tap(_statusFinder);
+      final container = ProviderScope.containerOf(
+        tester.element(_statusFinder),
+      );
+      final session = container.read(relaySessionProvider.notifier);
+      session.debugSetSessionStatus(SessionStatus.connected);
+      session.debugHandleMessage([
+        'BUZZ_TASKS_SYNC_REQUIRED',
+        '11111111-1111-4111-8111-111111111111',
+      ]);
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('task-status-option-done')));
+      expect(reads, 2);
+      expect(find.text('Task version 2'), findsOneWidget);
+      expect(find.text('History version 2'), findsOneWidget);
+      expect(find.text('History version 1'), findsNothing);
+      session.debugSetSessionStatus(SessionStatus.reconnecting);
+      await session.debugHandleConnected();
       await tester.pumpAndSettle();
-
-      // EXACTLY ONE PATCH.
-      expect(methods.where((m) => m == 'PATCH').length, 1);
-      // Body carries ONLY status: no title, no priority, and no actor, role
-      // or ownership claim — the relay authorizes on channel membership.
-      expect(jsonDecode(patchBodies.single), {'status': 'done'});
-      // A re-fetch followed the write.
-      expect(getCount, 2);
-      // Both the new label AND the appended history row come from the
-      // re-fetch, not from local mutation.
-      expect(tester.widget<Text>(_statusLabelFinder).data, 'Done');
-      expect(find.byKey(const ValueKey('task-event-row-9')), findsOneWidget);
-      expect(_statusErrorFinder, findsNothing);
+      expect(reads, 3);
+      expect(find.text('History version 3'), findsOneWidget);
     });
+
+    testWidgets('invalidations during a read queue only one follow-up', (
+      tester,
+    ) async {
+      final pending = Completer<http.Response>();
+      var reads = 0;
+      await _pumpSheet(
+        tester,
+        nsec: nsec,
+        handler: (_) async {
+          reads++;
+          if (reads == 1) return pending.future;
+          return _detailResponse(
+            title: 'Latest task',
+            events: [_eventJson(id: 2, body: 'Latest history')],
+          );
+        },
+      );
+      await _openSheet(tester);
+      final container = ProviderScope.containerOf(
+        tester.element(find.byKey(const ValueKey('task-detail-loading'))),
+      );
+      for (var i = 0; i < 20; i++) {
+        container.read(tasksSyncSignalProvider.notifier).bump();
+        await tester.pump();
+      }
+      expect(reads, 1);
+      pending.complete(_detailResponse(title: 'Older task'));
+      await tester.pumpAndSettle();
+      expect(reads, 2);
+      expect(find.text('Latest task'), findsOneWidget);
+      expect(find.text('Latest history'), findsOneWidget);
+      expect(find.text('Older task'), findsNothing);
+    });
+
+    testWidgets(
+      'changing community clears old detail and fences pending reads',
+      (tester) async {
+        final oldRead = Completer<http.Response>();
+        await _pumpSheet(
+          tester,
+          nsec: nsec,
+          handler: (request) async {
+            if (request.url.host == 'relay.example.com') return oldRead.future;
+            return _detailResponse(title: 'New community task');
+          },
+        );
+        await _openSheet(tester);
+        final container = ProviderScope.containerOf(
+          tester.element(find.byKey(const ValueKey('task-detail-loading'))),
+        );
+        (container.read(relayConfigProvider.notifier) as _StaticRelayConfig)
+            .switchCommunity('https://other.example.com');
+        await tester.pumpAndSettle();
+        expect(find.text('New community task'), findsOneWidget);
+        oldRead.complete(_detailResponse(title: 'Private old community task'));
+        await tester.pumpAndSettle();
+        expect(find.text('Private old community task'), findsNothing);
+        expect(find.text('New community task'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
+      'changing community while the picker is open sends no stale edit',
+      (tester) async {
+        final patches = <http.Request>[];
+        await _pumpSheet(
+          tester,
+          nsec: nsec,
+          handler: (request) async {
+            if (request.method == 'PATCH') patches.add(request);
+            return _detailResponse(title: request.url.host);
+          },
+        );
+        await _openSheet(tester);
+        await tester.pumpAndSettle();
+        final container = ProviderScope.containerOf(
+          tester.element(_statusFinder),
+        );
+        await tester.tap(_statusFinder);
+        await tester.pumpAndSettle();
+        (container.read(relayConfigProvider.notifier) as _StaticRelayConfig)
+            .switchCommunity('https://other.example.com');
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('task-status-option-done')));
+        await tester.pumpAndSettle();
+        expect(patches, isEmpty);
+        expect(find.text('other.example.com'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      },
+    );
 
     // Acceptance 5: selecting the CURRENT status sends nothing. The relay
     // would reject an empty patch with 400 "patch must change at least one
