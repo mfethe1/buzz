@@ -420,6 +420,11 @@ test-unit:
         # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
         # stray file in migrations/ or a broken lint ships green.
         cargo nextest run -p buzz-db --lib
+        # Workflow definition/executor rules and approval read serialization.
+        # PostgreSQL workflow cases stay in the separate ignored-test profile.
+        cargo nextest run -p buzz-workflow --lib
+        cargo nextest run -p buzz-relay --lib \
+            -E 'test(/^api::workflows::tests::/)'
         # Multi-tenant conformance gate (buzz-conformance): the independent
         # replay checker + golden fixtures. No infra — pure in-process trace
         # replay — so it belongs in the unit job. Run all targets (lib + the

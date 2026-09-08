@@ -104,6 +104,13 @@ run_unit_tests() {
   run_test_step "buzz-db unit tests" \
     cargo test -p buzz-db --lib -- --nocapture
 
+  # Match the workflow and approval read-unit lanes in just test-unit.
+  # PostgreSQL cases remain ignored here and run in the isolated DB profile.
+  run_test_step "buzz-workflow unit tests" \
+    cargo test -p buzz-workflow --lib -- --nocapture
+  run_test_step "buzz-relay workflow read unit tests" \
+    cargo test -p buzz-relay --lib api::workflows::tests:: -- --nocapture
+
   # Multi-tenant conformance gate: independent replay checker + golden
   # fixtures (buzz-conformance). Pure in-process trace replay, no infra.
   run_test_step "buzz-conformance tests" \
