@@ -55,10 +55,21 @@ void main() {
               ).readAsStringSync(),
             )
             as List<dynamic>;
-    _goldenDirectory = qualifiedGoldenDirectory(
-      readGoldenRendererFingerprint(),
+    final actual = readGoldenRendererFingerprint();
+    final selection = selectGoldenRenderer(
+      actual,
       profiles,
+      updating: autoUpdateGoldenFiles,
     );
+    _goldenDirectory = selection.directory;
+    if (!selection.qualified) {
+      // This preserves the prior canonical comparison on hosts such as CI's
+      // Linux runner; it is not qualification of that renderer fingerprint.
+      print(
+        'Unqualified renderer: comparing canonical golden images strictly. '
+        'Updates are disabled. ${jsonEncode(actual)}',
+      );
+    }
   });
   // -------------------------------------------------------------------------
   // 01 / 02 — the original two captures, unchanged so their hashes stay stable.

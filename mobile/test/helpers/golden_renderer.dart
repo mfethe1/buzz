@@ -44,12 +44,20 @@ Map<String, String> readGoldenRendererFingerprint() {
   };
 }
 
-/// Selects an exact, reviewed profile; unknown inputs fail even during updates.
-/// The empty directory preserves the original canonical captures.
-String qualifiedGoldenDirectory(
+/// An exact alternative profile or an unqualified canonical comparison.
+class GoldenRendererSelection {
+  const GoldenRendererSelection(this.directory, {required this.qualified});
+  final String directory;
+  final bool qualified;
+}
+
+/// Unknown renderers retain the existing strict canonical comparison, but may
+/// neither select an alternative profile nor overwrite the canonical images.
+GoldenRendererSelection selectGoldenRenderer(
   Map<String, String> actual,
-  List<dynamic> profiles,
-) {
+  List<dynamic> profiles, {
+  bool updating = false,
+}) {
   final matches = profiles.where((entry) {
     if (entry is! Map<String, dynamic>) return false;
     final fingerprint = entry['fingerprint'];
@@ -57,6 +65,9 @@ String qualifiedGoldenDirectory(
         fingerprint.length == actual.length &&
         actual.entries.every((e) => fingerprint[e.key] == e.value);
   }).toList();
+  if (matches.isEmpty && !updating) {
+    return const GoldenRendererSelection('', qualified: false);
+  }
   if (matches.length != 1) {
     throw StateError(
       'Golden renderer is not uniquely qualified. Preserve the existing PNGs; '
@@ -69,5 +80,5 @@ String qualifiedGoldenDirectory(
       (directory.isNotEmpty && !RegExp(r'^[a-z0-9-]+$').hasMatch(directory))) {
     throw StateError('Invalid golden renderer directory');
   }
-  return directory;
+  return GoldenRendererSelection(directory, qualified: true);
 }

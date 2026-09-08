@@ -16,47 +16,62 @@ void main() {
     {'directory': 'macos-26-4-1-25e253', 'fingerprint': fingerprint},
   ];
   test('selects the exact independently qualified renderer', () {
+    final selection = selectGoldenRenderer(fingerprint, profiles);
+    expect(selection.directory, 'macos-26-4-1-25e253');
+    expect(selection.qualified, isTrue);
     expect(
-      qualifiedGoldenDirectory(fingerprint, profiles),
+      selectGoldenRenderer(fingerprint, profiles, updating: true).directory,
       'macos-26-4-1-25e253',
     );
     expect(
-      qualifiedGoldenDirectory(fingerprint, [
+      selectGoldenRenderer(fingerprint, [
         {'directory': '', 'fingerprint': fingerprint},
-      ]),
+      ]).directory,
       '',
     );
   });
   for (final field in fingerprint.keys) {
-    test(
-      'rejects an unqualified $field even when every other field matches',
-      () {
-        expect(
-          () => qualifiedGoldenDirectory({
-            ...fingerprint,
-            field: 'unknown',
-          }, profiles),
-          throwsStateError,
-        );
-      },
-    );
+    test('unknown $field compares canonical images but cannot update them', () {
+      final actual = {...fingerprint, field: 'unknown'};
+      final selection = selectGoldenRenderer(actual, profiles);
+      expect(selection.directory, '');
+      expect(selection.qualified, isFalse);
+      expect(
+        () => selectGoldenRenderer(actual, profiles, updating: true),
+        throwsStateError,
+      );
+    });
   }
-  test('rejects incomplete and ambiguous profile matches', () {
+  test(
+    'unknown Linux runner retains the canonical comparison without qualification',
+    () {
+      final selection = selectGoldenRenderer({
+        ...fingerprint,
+        'platform': 'linux',
+        'abi': 'linux_x64',
+        'osVersion': 'CI kernel',
+      }, profiles);
+      expect(selection.directory, '');
+      expect(selection.qualified, isFalse);
+    },
+  );
+  test('rejects incomplete updates and ambiguous profile matches', () {
     expect(
-      () => qualifiedGoldenDirectory(
+      () => selectGoldenRenderer(
         {...fingerprint}..remove('engine'),
         profiles,
+        updating: true,
       ),
       throwsStateError,
     );
     expect(
-      () => qualifiedGoldenDirectory(fingerprint, [...profiles, ...profiles]),
+      () => selectGoldenRenderer(fingerprint, [...profiles, ...profiles]),
       throwsStateError,
     );
   });
   test('rejects profile directory traversal', () {
     expect(
-      () => qualifiedGoldenDirectory(fingerprint, [
+      () => selectGoldenRenderer(fingerprint, [
         {'directory': '../unreviewed', 'fingerprint': fingerprint},
       ]),
       throwsStateError,
