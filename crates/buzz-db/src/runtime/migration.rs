@@ -1869,8 +1869,23 @@ mod postgres_tests {
                 .get(table)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion table {table}"));
             if table != "community_deletion_requests" {
+                // Keep the historical migration immutable. pgSchema drops
+                // CHECK predicates containing IS NOT NULL, so the desired
+                // schema uses equivalent scalar num_nonnulls expressions.
+                // Permit only these two known rewrites; compare every other
+                // part of the table definition exactly as before.
+                let definition = if table == "community_deletion_checkpoints" {
+                    definition
+                        .replace(
+                            "(completed_at is not null)",
+                            "(num_nonnulls(completed_at) = 1)",
+                        )
+                        .replace("(error is not null)", "(num_nonnulls(error) = 1)")
+                } else {
+                    definition.clone()
+                };
                 assert_eq!(
-                    in_schema, definition,
+                    in_schema, &definition,
                     "schema.sql definition of {table} drifted from migration 0029"
                 );
             }
