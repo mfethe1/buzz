@@ -117,6 +117,53 @@ pub async fn cmd_events_publish(
     Ok(())
 }
 
+/// Sign and submit a strictly typed fleet receipt through ordinary event ingest.
+/// Its attempt d-tag keeps it outside the CML task's lifecycle reduction.
+pub async fn cmd_events_receipt(
+    client: &crate::client::BuzzClient,
+    channel: &str,
+    receipt_file: &str,
+    created_at: u64,
+) -> Result<(), CliError> {
+    use buzz_core::fleet::{FleetReceipt, RECEIPT_PROTOCOL};
+    use nostr::{EventBuilder, Kind, Tag, Timestamp};
+    let channel = uuid::Uuid::parse_str(channel)
+        .map_err(|error| CliError::Usage(format!("invalid channel UUID: {error}")))?;
+    let receipt: FleetReceipt = serde_json::from_str(&read_input(receipt_file)?)
+        .map_err(|error| CliError::Usage(format!("invalid receipt: {error}")))?;
+    let content = receipt
+        .to_canonical_json()
+        .map_err(|error| CliError::Usage(error.to_string()))?;
+    let tags = [
+        vec![
+            "protocol".to_owned(),
+            RECEIPT_PROTOCOL.to_owned(),
+            "1".to_owned(),
+        ],
+        vec!["h".to_owned(), channel.to_string()],
+        vec!["d".to_owned(), receipt.attempt_id.clone()],
+    ]
+    .into_iter()
+    .map(Tag::parse)
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|error| CliError::Usage(error.to_string()))?;
+    let event = EventBuilder::new(
+        Kind::Custom(buzz_core::kind::KIND_JOB_RESULT as u16),
+        content,
+    )
+    .tags(tags)
+    .custom_created_at(Timestamp::from(created_at))
+    .sign_with_keys(client.keys())
+    .map_err(|error| CliError::Other(format!("sign receipt: {error}")))?;
+    FleetReceipt::from_event_after_signature(&event)
+        .map_err(|error| CliError::Usage(format!("self-check rejected receipt: {error}")))?;
+    let id = event.id.to_hex();
+    let raw = client.submit_event(event).await?;
+    crate::commands::parse_write_response(&raw, "duplicate fleet receipt")?;
+    println!(r#"{{"accepted":true,"event_id":"{id}"}}"#);
+    Ok(())
+}
+
 /// Run `buzz cml events reduce` — fetch and reduce a task's events.
 pub async fn cmd_events_reduce(
     client: &crate::client::BuzzClient,

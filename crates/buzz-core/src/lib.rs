@@ -25,6 +25,8 @@ pub mod error;
 pub mod event;
 /// NIP-01 subscription filter matching.
 pub mod filter;
+/// Fixed fleet execution scope and worker receipt contracts.
+pub mod fleet;
 /// Git permission types — ref patterns, protection rules, policy evaluation.
 pub mod git_perms;
 /// Shared invite-link contract constants.

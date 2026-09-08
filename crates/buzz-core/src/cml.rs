@@ -521,7 +521,7 @@ fn is_lower_hex(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn sort_json(value: Value) -> Value {
+pub(crate) fn sort_json(value: Value) -> Value {
     match value {
         Value::Object(map) => {
             let sorted: BTreeMap<_, _> = map

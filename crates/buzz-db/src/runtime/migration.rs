@@ -705,9 +705,9 @@ mod postgres_tests {
         // upstream carries 44 (0032-0034 and 0040 adopted from our PRs);
         // fork adds 0046_task_system (PR #6425 pending upstream) and 0047
         // structured task history, 0048 machine homes, 0049 capability grants,
-        // 0050 task revisions, and 0051 durable workflow approvals.
+        // 0050 task revisions, 0051 workflow approvals, and 0052 fleet admission.
         // Deployed migration checksums stay unchanged.
-        assert_eq!(migrations.len(), 50);
+        assert_eq!(migrations.len(), 51);
         assert_eq!(migrations[44].version, 46);
         assert_eq!(migrations[45].version, 47);
         assert_eq!(migrations[46].version, 48);
@@ -729,6 +729,11 @@ mod postgres_tests {
         assert!(task_changes.contains("ALTER TABLE task_events ADD COLUMN changes JSONB"));
         assert!(task_changes.contains("ALTER COLUMN created_at SET DEFAULT clock_timestamp()"));
         assert!(!migrations[44].sql.as_str().contains("ADD COLUMN changes"));
+        assert_eq!(migrations[50].version, 52);
+        assert!(migrations[50]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE fleet_attempts"));
         assert_eq!(migrations[49].version, 51);
         assert!(migrations[49]
             .sql

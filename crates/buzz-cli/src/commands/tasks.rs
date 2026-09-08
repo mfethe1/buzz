@@ -183,6 +183,24 @@ pub async fn dispatch(
             print_value(&parse_response(&response)?, format);
             Ok(())
         }
+        TasksCmd::Admission {
+            task,
+            attempt,
+            start_event,
+        } => {
+            let task = uuid("task", &task)?;
+            if !buzz_core::fleet::valid_attempt_id(&attempt) {
+                return Err(CliError::Usage("invalid fleet attempt id".into()));
+            }
+            crate::validate::validate_hex64(&start_event)?;
+            let response = client
+                .get_authed(&format!(
+                    "/api/tasks/{task}/attempts/{attempt}/admission?start_event_id={start_event}",
+                ))
+                .await?;
+            print_value(&parse_response(&response)?, format);
+            Ok(())
+        }
         TasksCmd::Create {
             title,
             body,

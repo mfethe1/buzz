@@ -2276,10 +2276,22 @@ async fn ingest_event_inner(
         .tags
         .iter()
         .any(|tag| tag.as_slice().first().map(String::as_str) == Some("protocol"));
-    if is_job_kind && has_protocol_tag {
-        buzz_core::cml_event::validate_cml_event_after_signature(&event)
-            .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
-    }
+    let is_fleet_event = if is_job_kind && has_protocol_tag {
+        if buzz_core::fleet::is_receipt(&event) {
+            buzz_core::fleet::FleetReceipt::from_event_after_signature(&event)
+                .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+            true
+        } else {
+            // Other protocol-tagged jobs retain the strict CML validation path.
+            let cml = buzz_core::cml_event::validate_cml_event_after_signature(&event)
+                .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+            buzz_core::fleet::FleetScope::from_task(&cml.task)
+                .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?
+                .is_some()
+        }
+    } else {
+        false
+    };
 
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
     if event.pubkey != *auth.pubkey() && !is_gift_wrap {
@@ -3176,7 +3188,27 @@ async fn ingest_event_inner(
         });
     }
 
-    let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
+    let (stored_event, was_inserted) = if is_fleet_event {
+        // All normal ingress checks above still apply. The signed event,
+        // thread metadata and attempt projection share one commit; dispatch
+        // below occurs only after it succeeds.
+        state
+            .db
+            .insert_fleet_event(
+                tenant.community(),
+                &event,
+                channel_id,
+                thread_meta.as_ref().map(|metadata| metadata.as_params()),
+            )
+            .await
+            .map_err(|error| match error {
+                buzz_db::DbError::AccessDenied(message)
+                | buzz_db::DbError::InvalidData(message) => {
+                    IngestError::Rejected(format!("restricted: {message}"))
+                }
+                other => IngestError::Internal(format!("error: {other}")),
+            })?
+    } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
         state

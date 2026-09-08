@@ -1,97 +1,121 @@
 # Fleet qualification adapter
 
-This first integration accepts a signed CML plan, dispatches a fixed repository
-qualification operation to its assigned PC, and submits evidence to CML review.
-It does not run an AI prompt, edit a repository, approve a review, merge, or
-deploy. A successful qualification is not evidence that model fallback works.
+This adapter accepts a signed CML plan for an existing Buzz task, dispatches a
+fixed repository qualification to its assigned worker, and records a signed
+outcome against the task and attempt. A successful probe submits CML evidence
+for independent review. It does not run an AI prompt, edit a repository, approve
+work, merge, or deploy. Qualification does not exercise model fallbacks.
 
-The executor reads the configured repository's Git HEAD and indexed filename
-count. It does not determine whether the worktree is clean. It records its
-Python version and a receipt hash. The host stores the
-complete result; CML evidence carries its hash. Artifact upload and a phone
-result viewer are not implemented by this adapter.
+The probe reads the configured repository's Git HEAD and indexed filename
+count. It does not determine whether the worktree is clean. It records the
+Python version in the host's durable receipt. A typed signed receipt containing
+that bounded result is persisted by the relay; CML evidence references its event
+ID. Artifact upload and a phone result viewer are outside this adapter.
 
 ## Verify locally
 
-From the repository root:
+From the repository root, with Python 3 and Git available:
 
 ```sh
 python3 scripts/fleet/fleet.py --help
 python3 -W error::ResourceWarning -m unittest discover -s scripts/fleet -p 'test_*.py' -v
 ```
 
-The suite runs the actual adapter CLI, a subprocess host, and a temporary Git
-repository. Its fake Buzz CLI injects transport failure; it does **not** prove
-Nostr signature validation. A live run with the product Buzz CLI and signed CML
-events remains a separate rollout gate. The tests also exercise lost replies,
-duplicate delivery, scope rejection, unknown-attempt recovery refusal, and
-cancellation before and during a probe.
+These tests run the actual adapter CLI, a subprocess host, and a temporary Git
+repository. Their fake Buzz CLI injects transport failures; it does **not** prove
+Nostr verification or relay authorization. Signed native relay qualification is
+a separate gate. PostgreSQL tests exercise atomic admission, revocation ordering,
+HTTP authentication, receipt projection, and whole-community cleanup through
+the repository's isolated PostgreSQL lane.
 
-## Operator policy
+## Operator policy and signed scope
 
-Policy is a host-local JSON file, selected with the required `--policy` flag.
-Keep API keys out of this file. `BUZZ_PRIVATE_KEY` and optional `BUZZ_AUTH_TAG` are
-resolved by the native Buzz CLI on the host where it runs.
+Policy is host-local JSON, selected by the required `--policy` flag. Keep API
+keys out of it. The native Buzz CLI resolves `BUZZ_PRIVATE_KEY` and optional
+`BUZZ_AUTH_TAG` from its host environment.
 
-Required common keys are `version` (1), `alias`, `relay`, `buzz_binary`,
+Common configuration includes `version` (2), `alias`, `relay`, `buzz_binary`,
 `buzz_binary_sha256`, `state_dir`, `receipts_path`, `planner_pubkeys`, and
 `channels`. Paths are absolute. The SHA-256 pins the installed native Buzz
-binary; stock builds lacking `cml events` cannot be used. The planner and
-channel allowlists must be nonempty.
+binary. Planner and channel allowlists must be nonempty. The relay must have the
+atomic fleet admission schema and handlers, including migration 0052; an
+ordinary event-only relay cannot authorize execution.
 
-An execution host additionally defines `worker_pubkey`, `git_binary`, and
-`repositories`: each repository alias maps to an object with its canonical
-`id` (for example, `mfethe1/buzz`) and its local worktree-root `path`.
-The scheduler defines `hosts`, keyed by host alias. Each host entry contains
-the same `worker_pubkey` and repository IDs, plus a fixed `command` argv that
-starts the host adapter's `execute` command over authenticated SSH or locally.
-Repository paths and commands never come from task content. Do not put private
-keys or bearer credentials into the command argv.
+An execution host also defines `worker_pubkey`, stable registered `machine_id`,
+`git_binary`, and `repositories`. Each repository alias maps to a canonical `id`
+(for example, `mfethe1/buzz`) and a local worktree-root `path`. The scheduler
+provides `hosts`, keyed by host alias. Each entry contains that worker,
+`machine_id`, repository IDs, and a fixed `command` argv that starts the host's
+`execute` command locally or over authenticated SSH. Repository paths and argv
+never come from task content. Do not put credentials in argv.
 
-Use `receipts_backend: "hermes"` only when the selected Python environment can
-import Mack's installed `hermes_bridge.receipts.ReceiptStore`; set
-`receipts_path` to the existing bridge receipt database. Otherwise the default
-`compatible` backend creates the same table/API shape in the configured file.
-This does not enqueue work into the existing unrestricted Codex bridge runner.
+The `policy-digest --target HOST` command computes the public scope digest from
+this configuration. Scheduler and host must agree on version, target, machine,
+relay, worker, planner/channel allowlists, and repository IDs. The digest does
+not embed host-local paths or credentials; the binary pin is checked separately.
 
-A CML plan's `extensions.org.buzz.fleet.v1` object must have exactly four keys:
-`target` (host alias), `repository` (policy alias), `capability` (`qualify`), and
-`expires_at` (Unix seconds, after the plan timestamp and at most one hour later).
-The plan must assign the configured worker and an allowlisted planner. It must
-already be signed and accepted by Buzz. Human/mobile task rows are not implicitly
-converted into executable plans.
+Use `receipts_backend: "hermes"` only when that Python environment can import
+Mack's installed `hermes_bridge.receipts.ReceiptStore`, with `receipts_path`
+pointing to its existing receipt database. The default `compatible` backend uses
+the same schema/API shape in its configured file. This does not enqueue work into
+the unrestricted Codex bridge runner.
 
-## Runtime contract
+A CML plan's `extensions.org.buzz.fleet.v2` object has exactly seven keys:
+`target`, `machine_id`, `repository`, `capability` (`qualify`), `expires_at`,
+`task_revision`, and `policy_digest`. The expiry is after the plan timestamp and
+at most one hour later. The plan UUID must identify an existing, unarchived task
+in the same channel, at that exact revision. Both planner and worker must be
+active explicit channel members. The worker must match its registered machine
+home; the planner must have an active existing `cross_ssh` capability grant for
+that machine or `*`. This adapter does not enroll identities or grant permission.
+Task assignee and status do not confer execution permission.
 
-`admit --channel UUID --task UUID` fetches and reduces native signed CML, then
-records an execution request. It returns a stable `attempt_id` bound to relay,
-channel, task UUID, and plan event ID. `dispatch --attempt ID` delivers it once.
-`result --attempt ID` reads the local durable receipt/journal. After a lost
-transport reply, `recover --attempt ID` sends the same frozen request; a host
-with a started receipt reports `outcome_unknown` and refuses to run it again.
+There is one qualification attempt per CML task root. A new qualification needs
+an explicitly created new task and signed plan; an old root is never silently
+replaced. Version 1 fleet requests are rejected by this adapter.
 
-Each host independently reduces the current CML chain, checks scope and the
-shared admission-policy digest, and fails closed if the head changed or the
-chain conflicts. A kernel lock serializes its driver. Frozen claim/start/result
-snapshots are persisted before publication, preserving the Nostr event ID on
-retry. An execution receipt is committed before the fixed probe starts, and
-the result is committed before its CML submission. Successful execution reaches
-`review`; independent verification is still required.
+## Runtime and recovery
 
-The current relay rejects signed event timestamps outside a 15-minute window.
-An outbox can reconcile an already accepted event after that window, but an
-unaccepted frozen event can then require explicit reconciliation. This adapter
-does not silently create a competing successor with a new timestamp.
+`admit --channel UUID --task UUID` validates native CML and its relay attempt
+projection, then records the frozen request. The relay's stable attempt ID binds
+community, task UUID, and signed plan event ID. `dispatch --attempt ID` delivers
+it once. `result --attempt ID` reads local receipts; `recover --attempt ID`
+redelivers the same request to reconcile a previous uncertain delivery.
 
-`cancel --attempt ID` requires an already signed planner cancellation in CML.
-It forwards the request to the host, where `cancel_requested` remains intent.
-`cancelled_before_execution` or a terminal `cancel_acknowledged` receipt is the
-acknowledgement. A transport failure never proves that a remote process stopped.
+The relay commits each fleet event and its attempt projection atomically after
+ordinary signed-event ingress checks. Plan, claim, and start check current
+permissions; positive grant, home, membership and lifecycle locks order admission
+with revocation. Before its local receipt claim and probe, the worker requires
+both a newly accepted response to its own signed start and a fresh primary
+admission read bound to that start, task revision, attempt, worker and scope.
+Missing projections, denied reads, duplicate ACKs and lost start replies fail
+closed. A reduced CML snapshot or task display response cannot authorize a probe.
 
-This is an on-demand driver, not an always-running subscriber or a complete
-fleet scheduler. Qualification dispatch is serialized. Shared provider quotas,
-agent sandboxing, phone approvals/push, automatic admission, and AI execution
-remain outside this slice. Windows execution admission is explicitly blocked
-until process-tree containment has been implemented and qualified on that host.
-POSIX process groups bound the known fixed commands; they do not contain a
-deliberately detached descendant and are not a sandbox for untrusted agents.
+A host commits its start intent before network publication and its local receipt
+before the probe. An existing start intent or unfinished receipt is never replayed;
+it reports `outcome_unknown`. A started relay projection proves acceptance of a
+start, not that a process is running or finished. A known worker may append a
+signed `unknown` outcome; that still does not acknowledge stopping.
+
+Results are saved locally before delivery. Typed receipts use protocol
+`buzz-fleet-receipt` version 1 and the attempt ID as their `d` tag, keeping them
+outside the CML task's reducer. A delayed receipt can refresh its publication
+envelope while retaining its frozen result and completion time. CML lifecycle
+outboxes retain their original snapshots: an already accepted event can be
+reconciled, but an unaccepted event outside ingest's 15-minute timestamp window
+requires explicit reconciliation. Such a failure cannot restart the probe.
+
+`cancel --attempt ID` requires an already signed planner cancellation. The relay
+records intent first. A host reports `cancel_requested` while a known probe is
+being stopped, and publishes a terminal receipt only after its process runner
+returns. Cancellation before any accepted start can produce
+`cancelled_before_execution`. A terminal `cancel_acknowledged` may also mean a
+probe had already finished; inspect the typed outcome. A crashed or unreachable
+worker cannot turn uncertainty into proof of stopping.
+
+This is an on-demand fixed-operation driver. An always-running Mack scheduler,
+shared provider quotas, agent sandboxing, phone approvals/push, and AI execution
+remain separate work. Windows execution is blocked until process-tree
+containment is qualified there. POSIX process groups bound the known fixed
+commands during normal cancellation; they do not contain deliberately detached
+descendants or prove that a child stopped after its adapter crashed.

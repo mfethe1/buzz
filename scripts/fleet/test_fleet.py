@@ -25,18 +25,42 @@ from state import CompatibleReceipts, Journal, canonical, digest
 FAKE_BUZZ = r'''
 import hashlib,json,os,pathlib,sys
 path=pathlib.Path(os.environ['FLEET_FAKE_RELAY'])
-data=json.loads(path.read_text())
-args=sys.argv[1:]
+data=json.loads(path.read_text());args=sys.argv[1:]
+def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+def projection():
+ snapshot=data['current']['snapshot'];scope=snapshot['extensions']['org.buzz.fleet.v2']
+ return {'id':'buzz-qualify-'+'a'*64,'task_id':snapshot['id'],'plan_event_id':'a'*64,
+         'worker':snapshot['roles']['worker'],'machine_id':scope['machine_id'],
+         'state':data.get('state','planned'),'start_event_id':data.get('start'),
+         'cancel_event_id':data['current']['head'] if snapshot['status']=='cancelled' else None,
+         'receipt_event_id':data.get('receipt_id'),'receipt':data.get('receipt')}
+if 'tasks' in args:
+ if 'get' in args:
+  print(json.dumps({'attempts':[projection()]}));sys.exit(0)
+ if 'admission' in args:
+  if os.environ.get('FLEET_LEGACY_RELAY') or data.get('state')!='started':sys.exit(9)
+  scope=data['current']['snapshot']['extensions']['org.buzz.fleet.v2'];row=projection()
+  print(json.dumps({'attempt_id':row['id'],'task_id':row['task_id'],'plan_event_id':row['plan_event_id'],
+                    'start_event_id':row['start_event_id'],'worker':row['worker'],'machine_id':row['machine_id'],
+                    'policy_digest':scope['policy_digest'],'expires_at':scope['expires_at']}));sys.exit(0)
 if 'reduce' in args:
  print(json.dumps(data['current']));sys.exit(0)
+if 'receipt' in args:
+ wire=json.load(sys.stdin);channel=args[args.index('--channel')+1];published_at=int(args[args.index('--created-at')+1])
+ head=digest([0,data['current']['snapshot']['roles']['worker'],published_at,43004,
+              [['protocol','buzz-fleet-receipt','1'],['h',channel],['d',wire['attempt_id']]],
+              json.dumps(wire,sort_keys=True,separators=(',',':'),ensure_ascii=False)])
+ data['receipt_id']=head;data['state']=wire['status']
+ data['receipt']={'id':head,'pubkey':data['current']['snapshot']['roles']['worker'],'created_at':published_at,'kind':43004,'tags':[['protocol','buzz-fleet-receipt','1'],['h',channel],['d',wire['attempt_id']]],'content':json.dumps(wire,sort_keys=True,separators=(',',':'),ensure_ascii=False)}
+ path.write_text(json.dumps(data))
+ print(json.dumps({'accepted':True,'event_id':head}));sys.exit(0)
 if 'publish' not in args:sys.exit(9)
-transition=args[args.index('--transition')+1]
-previous=args[args.index('--prev')+1]
+transition=args[args.index('--transition')+1];previous=args[args.index('--prev')+1]
 if previous!=data['current']['head']:sys.exit(7)
-snapshot=json.load(sys.stdin)
-head=hashlib.sha256(json.dumps([transition,previous,snapshot],sort_keys=True).encode()).hexdigest()
-data['current']={'verdict':'ok','head':head,'snapshot':snapshot}
-data['published'].append(transition)
+snapshot=json.load(sys.stdin);head=digest([transition,previous,snapshot])
+data['current']={'verdict':'ok','head':head,'snapshot':snapshot};data['published'].append(transition)
+if transition=='claim':data['state']='claimed'
+if transition=='start':data['state']='started';data['start']=head
 path.write_text(json.dumps(data))
 if os.environ.get('FLEET_LOSE_REPLY')==transition and not data.get('lost'):
  data['lost']=True;path.write_text(json.dumps(data));sys.exit(3)
@@ -74,7 +98,7 @@ class QualificationTest(unittest.TestCase):
                       "reviewer": "3" * 64, "fixer": None},
             "git": {"repo": "mfethe1/buzz", "base_sha": "a" * 40,
                     "branch": "codex/qualification", "head_sha": None, "worktree_alias": "qualification"},
-            "extensions": {fleet.EXTENSION: {"target": "mack", "repository": "buzz",
+            "extensions": {fleet.EXTENSION: {"target": "mack", "machine_id": "mack", "task_revision": 0, "policy_digest": "", "repository": "buzz",
                                              "capability": "qualify", "expires_at": now + 300}},
             "evidence": [], "blockers": [], "acceptance": [], "lease": None,
             "review": {"round": 0, "max_rounds": 3},
@@ -82,13 +106,16 @@ class QualificationTest(unittest.TestCase):
         }
         self.relay.write_text(json.dumps({"current": {"verdict": "ok", "head": "a" * 64,
                                                        "snapshot": self.snapshot}, "published": []}))
-        self.host = {"version": 1, "alias": "mack", "relay": "http://relay.invalid",
+        self.host = {"version": 2, "alias": "mack", "machine_id": "mack", "relay": "http://relay.invalid",
                      "buzz_binary": str(self.fake), "git_binary": self.git,
                      "buzz_binary_sha256": fleet.file_digest(self.fake),
                      "state_dir": str(self.root / "host"), "receipts_path": str(self.root / "host/receipts.sqlite"),
                      "planner_pubkeys": ["1" * 64], "worker_pubkey": "2" * 64,
                      "channels": [self.channel],
                      "repositories": {"buzz": {"id": "mfethe1/buzz", "path": str(self.repo)}}}
+        self.snapshot["extensions"][fleet.EXTENSION]["policy_digest"] = fleet.authority_digest(self.host, "mack", self.host)
+        self.relay.write_text(json.dumps({"current": {"verdict": "ok", "head": "a" * 64,
+                                                       "snapshot": self.snapshot}, "published": []}))
         self.host_path = self.root / "host-policy.json"
         self.host_path.write_text(json.dumps(self.host))
         self.scheduler = dict(self.host, state_dir=str(self.root / "scheduler"),
@@ -148,6 +175,22 @@ class QualificationTest(unittest.TestCase):
         self.assertEqual(fleet.execute(self.host, request)["state"], "delivered")
         self.assertEqual(json.loads(self.relay.read_text())["published"], ["claim", "start", "submit"])
 
+    def test_lost_start_reply_never_reuses_admission_or_spawns(self):
+        request = self.admit()
+        os.environ["FLEET_LOSE_REPLY"] = "start"
+        first = fleet.execute(self.host, request)
+        self.assertEqual(first["state"], "outcome_unknown")
+        self.assertEqual(fleet.execute(self.host, request)["state"], "outcome_unknown")
+        self.assertEqual(CompatibleReceipts(self.host["receipts_path"]).get(request["attempt_id"])["state"], "not_recorded")
+        self.assertEqual(json.loads(self.relay.read_text())["published"], ["claim", "start"])
+
+    def test_legacy_event_only_relay_ok_cannot_authorize_probe(self):
+        request = self.admit()
+        os.environ["FLEET_LEGACY_RELAY"] = "1"
+        self.assertEqual(fleet.execute(self.host, request)["state"], "outcome_unknown")
+        self.assertEqual(CompatibleReceipts(self.host["receipts_path"]).get(request["attempt_id"])["state"], "not_recorded")
+        self.assertEqual(json.loads(self.relay.read_text())["published"], ["claim", "start"])
+
     def test_unknown_execution_refuses_replay_after_restart(self):
         request = self.admit()
         Journal(self.host["state_dir"]).admit(request)
@@ -190,6 +233,16 @@ class QualificationTest(unittest.TestCase):
         self.relay.write_text(json.dumps(data))
         with self.assertRaisesRegex(ValueError, "capability_not_allowed"):
             self.admit()
+
+    def test_public_policy_digest_cli_matches_both_operator_scopes(self):
+        results = []
+        for path in [self.host_path, self.scheduler_path]:
+            result = subprocess.run([sys.executable, fleet.__file__, "--policy", str(path),
+                                     "policy-digest", "--target", "mack"], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            results.append(json.loads(result.stdout))
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(results[0]["policy_digest"], self.snapshot["extensions"][fleet.EXTENSION]["policy_digest"])
 
     def test_policy_binary_pin_is_enforced_at_cli_entry(self):
         self.fake.write_text(self.fake.read_text() + "\n# modified binary\n")

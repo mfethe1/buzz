@@ -101,6 +101,9 @@ run_unit_tests() {
   # buzz-db tests are #[ignore]d; nothing here (or in integration mode below,
   # which runs `cargo test -p buzz-db` without --ignored) runs them — they need a
   # separate isolated-DB gate, so --lib keeps this step infra-free.
+  run_test_step "fixed fleet adapter fault tests" \
+    python3 -W error::ResourceWarning -m unittest discover -s scripts/fleet -p 'test_*.py' -v
+
   run_test_step "buzz-db unit tests" \
     cargo test -p buzz-db --lib -- --nocapture
 

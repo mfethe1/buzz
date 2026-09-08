@@ -17,7 +17,7 @@ def digest(value):
 
 
 class Journal:
-    """Transport/execution facts only; signed CML remains task authority."""
+    """Transport/execution facts; the relay projection fences execution."""
 
     def __init__(self, directory):
         self.directory = Path(directory).resolve()
@@ -85,6 +85,21 @@ class Journal:
             row = db.execute("SELECT * FROM outbox WHERE attempt=? AND transition=?",
                              (attempt, transition)).fetchone()
         return dict(row)
+
+    def refresh_receipt_delivery(self, attempt, transition, previous, published_at):
+        """Refresh only an unaccepted receipt envelope; the outcome stays frozen.
+
+        Caller first reconciles the writer-backed remote receipt. Execution
+        transitions cannot use this operation or renew a consumed start.
+        """
+        if transition not in ("receipt:unknown", "receipt:terminal"):
+            raise ValueError("only_receipt_delivery_may_refresh")
+        with self.connect() as db:
+            changed = db.execute("UPDATE outbox SET previous=? WHERE attempt=? AND transition=? "
+                                 "AND previous=? AND event_id IS NULL",
+                                 (str(published_at), attempt, transition, previous)).rowcount
+            if changed != 1:
+                raise ValueError("receipt_delivery_generation_changed")
 
     def sent(self, attempt, transition, event_id):
         with self.connect() as db:

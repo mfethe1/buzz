@@ -36,6 +36,9 @@ use crate::{
     state::AppState,
 };
 
+mod admission;
+pub use admission::get_fleet_admission;
+
 const DEFAULT_TASK_LIMIT: i64 = 50;
 const MAX_TASK_LIMIT: i64 = 200;
 const MAX_TITLE_CHARS: usize = 200;
@@ -450,9 +453,15 @@ pub async fn get_task(
         .await
         .map_err(|error| map_task_error("list task events", error))?;
 
+    let attempts = state
+        .db
+        .list_task_attempts(tenant.community(), task_id)
+        .await
+        .map_err(|error| map_task_error("list task attempts", error))?;
     Ok(Json(serde_json::json!({
         "task": task_json(&task),
         "events": events.iter().map(task_event_json).collect::<Vec<_>>(),
+        "attempts": attempts,
     })))
 }
 

@@ -398,6 +398,7 @@ test-unit:
     #!/usr/bin/env bash
     set -euo pipefail
     ./scripts/test-ensure-local-relay-key.sh
+    python3 -W error::ResourceWarning -m unittest discover -s scripts/fleet -p 'test_*.py' -v
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
         # buzz-auth NIP-FI verifier doctests. The sealed-authority
