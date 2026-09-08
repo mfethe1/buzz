@@ -11,6 +11,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -32,7 +33,7 @@ pub const LIST_MAX_LIMIT: i64 = 1000;
 ///
 /// Approval tokens are stored hashed so that a DB read does not expose
 /// the raw token (same pattern as API tokens in buzz-auth).
-fn hash_approval_token(token: &str) -> Vec<u8> {
+pub fn hash_approval_token(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
@@ -259,6 +260,14 @@ pub struct ApprovalRecord {
     pub step_index: i32,
     /// Who may approve (user mention or role spec).
     pub approver_spec: String,
+    /// Human-readable request rendered when the workflow suspended.
+    pub request_message: Option<String>,
+    /// Exact saved workflow revision covered by this approval.
+    pub definition_hash: Option<String>,
+    /// Signed native approval request identity.
+    pub request_event_id: Option<Vec<u8>>,
+    /// Signed decision identity, populated only after an accepted decision.
+    pub decision_event_id: Option<Vec<u8>>,
     /// Current status of this approval request.
     pub status: ApprovalStatus,
     /// Compressed public key bytes of the user who acted on this approval.
@@ -270,6 +279,9 @@ pub struct ApprovalRecord {
     /// When the approval record was created.
     pub created_at: DateTime<Utc>,
 }
+
+/// Durable approval suspension, decision, and one-use continuation claims.
+pub mod approval;
 
 // -- Workflow CRUD ------------------------------------------------------------
 
@@ -912,6 +924,10 @@ pub struct WorkflowRunFailure<'a> {
 
 /// Update run status, current step, execution trace, and optional failure.
 ///
+/// Terminal outcomes cannot be overwritten; a saved approval wait cannot be
+/// completed or failed by a late executor finalizer. Progress never moves behind
+/// an admitted continuation. Approval decisions and claims use atomic transactions.
+///
 /// Fix C3: `started_at` is set when the NEW status is 'running' and `started_at`
 /// has not yet been stamped (IS NULL). The original code read `status` from the
 /// column AFTER `SET status = ?` had already changed it, so the condition was
@@ -942,6 +958,9 @@ pub async fn update_workflow_run(
             completed_at  = CASE WHEN $7 IN ('completed','failed','cancelled')
                                  THEN NOW() ELSE completed_at END
         WHERE community_id = $8 AND id = $9
+          AND status NOT IN ('completed','failed','cancelled')
+          AND NOT (status = 'waiting_approval' AND $6 IN ('completed','failed'))
+          AND current_step <= $2
         "#,
     )
     .bind(&status_str)
@@ -1052,7 +1071,7 @@ pub async fn get_approval_by_stored_hash(
     let row = sqlx::query(
         r#"
         SELECT token, workflow_id, run_id, step_id, step_index, approver_spec,
-               status::text AS status, approver_pubkey, note, expires_at, created_at
+               status::text AS status, approver_pubkey, note, expires_at, created_at, request_message, request_event_id, decision_event_id, continuation->>'definition_hash' AS approval_definition_hash
         FROM workflow_approvals
         WHERE community_id = $1 AND token = $2
         "#,
@@ -1076,7 +1095,7 @@ pub async fn get_run_approvals(
     let rows = sqlx::query(
         r#"
         SELECT token, workflow_id, run_id, step_id, step_index, approver_spec,
-               status::text AS status, approver_pubkey, note, expires_at, created_at
+               status::text AS status, approver_pubkey, note, expires_at, created_at, request_message, request_event_id, decision_event_id, continuation->>'definition_hash' AS approval_definition_hash
         FROM workflow_approvals
         WHERE community_id = $1 AND run_id = $2 AND workflow_id = $3
         ORDER BY step_index, created_at
@@ -1231,6 +1250,10 @@ fn row_to_approval_record(row: sqlx::postgres::PgRow) -> Result<ApprovalRecord> 
         step_id: row.try_get("step_id")?,
         step_index: row.try_get("step_index")?,
         approver_spec: row.try_get("approver_spec")?,
+        request_message: row.try_get("request_message")?,
+        definition_hash: row.try_get("approval_definition_hash")?,
+        request_event_id: row.try_get("request_event_id")?,
+        decision_event_id: row.try_get("decision_event_id")?,
         status,
         approver_pubkey: row.try_get("approver_pubkey")?,
         note: row.try_get("note")?,
@@ -2066,6 +2089,10 @@ mod postgres_tests {
             run_id,
             step_id: "request_approval".to_owned(),
             step_index: 1,
+            request_message: None,
+            definition_hash: None,
+            request_event_id: None,
+            decision_event_id: None,
             approver_spec: "@engineering-lead".to_owned(),
             status: ApprovalStatus::Pending,
             approver_pubkey: None,
@@ -2096,6 +2123,10 @@ mod postgres_tests {
             run_id: Uuid::new_v4(),
             step_id: "gate".to_owned(),
             step_index: 0,
+            request_message: None,
+            definition_hash: None,
+            request_event_id: None,
+            decision_event_id: None,
             approver_spec: "@manager".to_owned(),
             status: ApprovalStatus::Granted,
             approver_pubkey: Some(approver_pubkey.clone()),
@@ -2119,6 +2150,10 @@ mod postgres_tests {
             run_id: Uuid::new_v4(),
             step_id: "gate".to_owned(),
             step_index: 0,
+            request_message: None,
+            definition_hash: None,
+            request_event_id: None,
+            decision_event_id: None,
             approver_spec: "@manager".to_owned(),
             status: ApprovalStatus::Denied,
             approver_pubkey: Some(vec![0xbb; 32]),
@@ -2140,6 +2175,10 @@ mod postgres_tests {
             run_id: Uuid::new_v4(),
             step_id: "gate".to_owned(),
             step_index: 0,
+            request_message: None,
+            definition_hash: None,
+            request_event_id: None,
+            decision_event_id: None,
             approver_spec: "@lead".to_owned(),
             status: ApprovalStatus::Pending,
             approver_pubkey: None,

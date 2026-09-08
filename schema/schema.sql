@@ -441,6 +441,15 @@ CREATE TABLE workflow_approvals (
     denied_at       TIMESTAMPTZ,
     expires_at      TIMESTAMPTZ NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    request_event_id BYTEA,
+    decision_event_id BYTEA,
+    request_message TEXT,
+    continuation JSONB,
+    resume_claimed_at TIMESTAMPTZ,
+    resume_deadline_at TIMESTAMPTZ,
+    CONSTRAINT workflow_approvals_native_decision_required
+        CHECK (continuation IS NULL OR status NOT IN ('granted','denied')
+            OR num_nonnulls(decision_event_id) = 1),
     PRIMARY KEY (community_id, token),
     FOREIGN KEY (community_id, workflow_id)
         REFERENCES workflows (community_id, id) ON DELETE CASCADE,
@@ -451,6 +460,13 @@ CREATE TABLE workflow_approvals (
 CREATE INDEX idx_workflow_approvals_workflow ON workflow_approvals (community_id, workflow_id);
 CREATE INDEX idx_workflow_approvals_run ON workflow_approvals (community_id, run_id);
 CREATE INDEX idx_workflow_approvals_status ON workflow_approvals (community_id, status);
+
+CREATE UNIQUE INDEX idx_workflow_approvals_decision_event
+    ON workflow_approvals (community_id, decision_event_id)
+    WHERE decision_event_id IS NOT NULL;
+CREATE INDEX idx_workflow_approvals_recovery
+    ON workflow_approvals (status, resume_deadline_at)
+    WHERE continuation IS NOT NULL;
 
 -- ── Scheduled workflow fires (cron claim) ─────────────────────────────────────
 -- Plan §5: the at-most-once cron fire claim. UNIQUE (community_id, workflow_id,

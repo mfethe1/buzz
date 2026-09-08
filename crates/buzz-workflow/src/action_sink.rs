@@ -62,6 +62,19 @@ impl From<ActionSinkError> for crate::WorkflowError {
 /// Returns `Pin<Box<dyn Future>>` for dyn-compatibility — required because
 /// `WorkflowEngine` stores `Arc<dyn ActionSink>`.
 pub trait ActionSink: Send + Sync {
+    /// Sign and atomically persist the native approval request and saved wait.
+    /// Sinks that cannot preserve this transaction must fail closed.
+    fn request_approval(
+        &self,
+        _wait: buzz_db::workflow::approval::ApprovalWait,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionSinkError>> + Send + '_>> {
+        Box::pin(async {
+            Err(ActionSinkError::InvalidInput(
+                "approval persistence unavailable".into(),
+            ))
+        })
+    }
+
     /// Post a message to a channel on behalf of a workflow owner.
     ///
     /// - `community_id`: the server-resolved community that owns the workflow

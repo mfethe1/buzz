@@ -235,6 +235,99 @@ impl RelayActionSink {
 }
 
 impl ActionSink for RelayActionSink {
+    fn request_approval(
+        &self,
+        wait: buzz_db::workflow::approval::ApprovalWait,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionSinkError>> + Send + '_>> {
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+            let channel = state
+                .db
+                .get_channel_for_event_write(wait.community_id, wait.channel_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if channel.archived_at.is_some() {
+                return Err(ActionSinkError::ChannelArchived(
+                    wait.channel_id.to_string(),
+                ));
+            }
+            let host = state
+                .db
+                .lookup_community_host(wait.community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database("approval community is unavailable".into())
+                })?;
+            let tenant = buzz_core::TenantContext::resolved(wait.community_id, host);
+            use sha2::{Digest, Sha256};
+            let revision = wait
+                .continuation
+                .get("definition_hash")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    ActionSinkError::InvalidInput("approval has no workflow revision".into())
+                })?;
+            let snapshot_bytes = serde_json::to_vec(&wait.continuation)
+                .map_err(|e| ActionSinkError::InvalidInput(e.to_string()))?;
+            let snapshot_hash = hex::encode(Sha256::digest(&snapshot_bytes));
+            let mut tags = vec![
+                Tag::parse(["workflow-revision", revision]),
+                Tag::parse(["continuation-sha256", &snapshot_hash]),
+                Tag::parse(["h", &wait.channel_id.to_string()]),
+                Tag::parse(["d", &hex::encode(&wait.reference)]),
+                Tag::parse(["workflow", &wait.workflow_id.to_string()]),
+                Tag::parse(["run", &wait.run_id.to_string()]),
+                Tag::parse(["step", &wait.step_id]),
+            ]
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?;
+            if wait.approver_spec != "any" {
+                tags.push(
+                    Tag::parse(["p", &wait.approver_spec])
+                        .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?,
+                );
+            }
+            let event = EventBuilder::new(
+                Kind::from(buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED as u16),
+                &wait.message,
+            )
+            .tags(tags)
+            .sign_with_keys(&state.relay_keypair)
+            .map_err(|e| ActionSinkError::EventBuild(e.to_string()))?;
+            let mut tx = state
+                .db
+                .begin_event_write_transaction()
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            buzz_deletion::store(&state.db)
+                .guard_transaction(&mut tx, wait.community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            let stored = buzz_db::workflow::approval::save_wait(&mut tx, &wait, &event)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            tx.commit()
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            // The event and push trigger are durable before best-effort live fanout.
+            let _ = dispatch_persistent_event(
+                &tenant,
+                &state,
+                &stored,
+                buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED,
+                &event.pubkey.to_hex(),
+                None,
+            )
+            .await;
+            Ok(())
+        })
+    }
+
     fn send_message(
         &self,
         community_id: CommunityId,

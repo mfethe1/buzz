@@ -6,8 +6,7 @@
 //! - Sequential step dispatch
 //! - Execution trace updates in DB
 //!
-//! Action dispatch uses placeholder implementations that log intent.
-//! Real event emission is wired in WF-07/08 (relay integration).
+//! Relay-owned action sinks persist native events and approval waits.
 
 use std::collections::HashMap;
 
@@ -844,8 +843,7 @@ pub async fn dispatch_action(
 
                     let token = generate_approval_token(run_id, step_id);
 
-                    // TODO (WF-08): create approval record in DB, emit kind:46010.
-                    // For now, return Suspended with the token so the caller can persist state.
+                    // execute_steps commits the wait before returning suspension.
 
                     Ok(StepResult::Suspended {
                         approval_token: token,
@@ -1137,7 +1135,7 @@ async fn add_reaction_impl(message_id: &str, emoji: &str) -> Result<JsonValue, W
 /// Rich return type from `execute_run` / `execute_from_step`.
 ///
 /// Carries enough information for the caller to:
-/// - Persist the approval record when suspended at a `RequestApproval` step.
+/// - Observe a suspension whose approval and continuation have already committed.
 /// - Update the run's execution trace and current step in the DB.
 /// - Resume execution from the correct step after approval.
 #[derive(Debug)]
@@ -1162,7 +1160,7 @@ pub struct ExecutionResult {
 /// 4. Stores the step output for use by later steps.
 ///
 /// On `RequestApproval`: returns `ExecutionResult` with `approval_token = Some(token)`.
-/// Caller must persist the approval record and update the run status.
+/// The approval, signed request, continuation and run wait are already committed.
 ///
 /// Returns `ExecutionResult` with `approval_token = None` on normal completion.
 ///
@@ -1282,7 +1280,7 @@ pub async fn execute_from_step(
 ///
 /// On error, returns `(WorkflowError, PartialProgress)` so callers can persist
 /// the trace of steps completed before the failure.
-async fn execute_steps(
+pub(crate) async fn execute_steps(
     engine: &WorkflowEngine,
     community_id: CommunityId,
     run_id: Uuid,
@@ -1390,8 +1388,28 @@ async fn execute_steps(
                     run_id = %run_id, step = %step.id,
                     "Step suspended — awaiting approval (token: <redacted>)"
                 );
-                // Return the token and current state so the caller can persist the
-                // approval record and update the run's execution trace.
+                if let Err(error) = engine
+                    .persist_approval_wait(
+                        community_id,
+                        run_id,
+                        def,
+                        trigger_ctx,
+                        &resolved_action,
+                        &approval_token,
+                        i,
+                        &step_outputs,
+                        &trace,
+                    )
+                    .await
+                {
+                    return Err((
+                        error,
+                        crate::error::PartialProgress {
+                            step_index: i,
+                            trace,
+                        },
+                    ));
+                }
                 return Ok(ExecutionResult {
                     approval_token: Some(approval_token),
                     step_index: i,
