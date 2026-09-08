@@ -18,11 +18,13 @@ class HomePage extends HookConsumerWidget {
   const HomePage({
     required this.settingsPageBuilder,
     required this.hasUnreadInbox,
+    this.workPageBuilder,
     super.key,
   });
 
   final WidgetBuilder settingsPageBuilder;
   final bool hasUnreadInbox;
+  final Widget Function(BuildContext, VoidCallback, bool)? workPageBuilder;
 
   static const double _tabBarHeight = mobileTabBarHeight;
   static const double _tabBarRadius = _tabBarHeight / 2;
@@ -64,6 +66,7 @@ class HomePage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final tabIndex = useState(0);
+    final showWork = useState(false);
     final visitedTabs = useRef(<int>{0});
     final tabContentTransitionDirection = useRef(1.0);
     final tabContentTransitionController = useAnimationController(
@@ -88,14 +91,36 @@ class HomePage extends HookConsumerWidget {
     );
 
     final pages = [
-      ChannelsPage(
-        settingsPageBuilder: settingsPageBuilder,
-        tabReselection: homeReselection,
-        onSettingsTransitionProgress: (progress) {
-          if (settingsTransitionProgress.value != progress) {
-            settingsTransitionProgress.value = progress;
-          }
+      PopScope(
+        canPop: !showWork.value || tabIndex.value != 0,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) showWork.value = false;
         },
+        child: IndexedStack(
+          index: showWork.value ? 1 : 0,
+          children: [
+            ChannelsPage(
+              settingsPageBuilder: settingsPageBuilder,
+              onOpenWork: workPageBuilder == null
+                  ? null
+                  : () => showWork.value = true,
+              tabReselection: homeReselection,
+              onSettingsTransitionProgress: (progress) {
+                if (settingsTransitionProgress.value != progress) {
+                  settingsTransitionProgress.value = progress;
+                }
+              },
+            ),
+            if (showWork.value && workPageBuilder != null)
+              workPageBuilder!(
+                context,
+                () => showWork.value = false,
+                tabIndex.value == 0,
+              )
+            else
+              const SizedBox.shrink(),
+          ],
+        ),
       ),
       if (visitedTabs.value.contains(1))
         ActivityPage(tabReselection: activityReselection)
@@ -176,7 +201,7 @@ class HomePage extends HookConsumerWidget {
                   ),
                   Positioned.fill(
                     child: ChannelQuickActionsLauncher(
-                      visible: tabIndex.value == 0,
+                      visible: tabIndex.value == 0 && !showWork.value,
                       navigationBarHeight: HomePage._tabBarHeight,
                       navigationBarBottomGap: HomePage._tabBarBottomGap,
                       navigationBarWidth: navigationBarWidth,
@@ -191,6 +216,7 @@ class HomePage extends HookConsumerWidget {
               selectedIndex: tabIndex.value,
               hasUnreadInbox: hasUnreadInbox,
               onDestinationSelected: (i) {
+                if (i == 0) showWork.value = false;
                 if (i == tabIndex.value) {
                   switch (i) {
                     case 0:

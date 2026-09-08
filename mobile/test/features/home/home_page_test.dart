@@ -1,4 +1,11 @@
 import 'package:buzz/features/home/home_page.dart';
+import 'package:buzz/features/work/work_page.dart';
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/shared/tasks/tasks_api.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -11,13 +18,28 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   Future<Widget> buildHome({
     int unreadInboxCount = 0,
+    bool includeWork = false,
     bool disableAnimations = false,
     Gradient? topSectionGradient,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     return ProviderScope(
-      overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        if (includeWork) channelsProvider.overrideWith(_WorkChannels.new),
+        if (includeWork)
+          tasksApiProvider.overrideWithValue(
+            TasksApi(
+              httpClient: MockClient(
+                (_) async =>
+                    http.Response('{"tasks":[],"next_cursor":null}', 200),
+              ),
+              baseUrl: 'https://work.example',
+              nsec: nostr.Keys.generate().nsec,
+            ),
+          ),
+      ],
       child: MaterialApp(
         theme: AppTheme.light(topSectionGradient: topSectionGradient),
         builder: (context, child) => MediaQuery(
@@ -29,10 +51,49 @@ void main() {
         home: HomePage(
           settingsPageBuilder: _buildSettingsPage,
           hasUnreadInbox: unreadInboxCount > 0,
+          workPageBuilder: includeWork
+              ? (context, onBack, visible) => WorkPage(
+                  onBack: onBack,
+                  visible: visible,
+                  channels: const AsyncData([]),
+                  onRefreshChannels: () async {},
+                )
+              : null,
         ),
       ),
     );
   }
+
+  testWidgets(
+    'Work opens from Home while conversation state and all three tabs remain available',
+    (tester) async {
+      await tester.pumpWidget(await buildHome(includeWork: true));
+      await tester.pumpAndSettle();
+      final conversations = tester.element(find.byType(ChannelsPage));
+      expect(find.text('general'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('home-work-entry')));
+      await tester.pumpAndSettle();
+      expect(find.byType(WorkPage), findsOneWidget);
+      expect(find.text('No tasks yet.'), findsOneWidget);
+      for (final label in ['Home', 'Activity', 'Search']) {
+        expect(find.bySemanticsLabel(label), findsOneWidget);
+      }
+      expect(
+        find.byTooltip('Create or start conversation').hitTestable(),
+        findsNothing,
+      );
+      await tester.tap(find.byTooltip('Back to Home'));
+      await tester.pumpAndSettle();
+      expect(find.text('general'), findsOneWidget);
+      expect(tester.element(find.byType(ChannelsPage)), same(conversations));
+      await tester.tap(find.byKey(const ValueKey('home-work-entry')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.bySemanticsLabel('Home'));
+      await tester.pumpAndSettle();
+      expect(find.text('general'), findsOneWidget);
+      expect(find.byType(WorkPage), findsNothing);
+    },
+  );
 
   testWidgets('shows icon-only navigation and an aligned quick action', (
     tester,
@@ -436,3 +497,20 @@ void main() {
 }
 
 Widget _buildSettingsPage(BuildContext context) => const SizedBox.shrink();
+
+class _WorkChannels extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() async => [
+    Channel(
+      id: 'room',
+      name: 'general',
+      description: '',
+      createdBy: 'owner',
+      createdAt: DateTime.utc(2026),
+      memberCount: 1,
+      channelType: 'stream',
+      visibility: 'private',
+      isMember: true,
+    ),
+  ];
+}

@@ -263,6 +263,20 @@ class TaskEvent {
   bool get isSummary => action == TaskEventAction.summaryPersisted.wireValue;
 }
 
+/// A bounded task list page and the relay's opaque continuation cursor.
+@immutable
+class TaskPage {
+  /// Keeps the returned order and cursor together so filters cannot mix pages.
+  TaskPage({required List<Task> tasks, this.nextCursor})
+    : tasks = List.unmodifiable(tasks);
+
+  /// Tasks in the relay's newest-modified-first order.
+  final List<Task> tasks;
+
+  /// Pass unchanged as `before` to retrieve the next page, or null at the end.
+  final String? nextCursor;
+}
+
 /// A task plus its full event history, as returned by `GET /api/tasks/{id}`.
 @immutable
 class TaskDetail {

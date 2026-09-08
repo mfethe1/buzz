@@ -95,6 +95,24 @@ class TasksApi {
     String? assignee,
     String? sourceRef,
     int? limit,
+  }) async => (await listTaskPage(
+    status: status,
+    channelId: channelId,
+    assignee: assignee,
+    sourceRef: sourceRef,
+    limit: limit,
+  )).tasks;
+
+  /// Reads a bounded page. [before] belongs to this exact filter and identity;
+  /// discard it when refreshing or changing either scope.
+  Future<TaskPage> listTaskPage({
+    TaskStatus? status,
+    String? channelId,
+    String? assignee,
+    String? sourceRef,
+    int? limit,
+    String? before,
+    bool? includeArchived,
   }) async {
     final query = <String, String>{
       if (status != null) 'status': status.wireValue,
@@ -102,16 +120,24 @@ class TasksApi {
       'assignee': ?assignee,
       'source_ref': ?sourceRef,
       if (limit != null) 'limit': '$limit',
+      'before': ?before,
+      if (includeArchived != null) 'include_archived': '$includeArchived',
     };
     final decoded = await _send('GET', _uri('/api/tasks', query), null);
-    final tasks = _asObject(decoded)['tasks'];
+    final object = _asObject(decoded);
+    final tasks = object['tasks'];
     if (tasks is! List) {
       throw const FormatException('relay returned a malformed task list');
     }
-    return [
-      for (final task in tasks)
-        if (task is Map<String, dynamic>) Task.fromJson(task),
-    ];
+    final nextCursor = object['next_cursor'];
+    if (nextCursor != null &&
+        (nextCursor is! String || nextCursor.trim().isEmpty)) {
+      throw const FormatException('relay returned a malformed task cursor');
+    }
+    return TaskPage(
+      tasks: [for (final task in tasks) Task.fromJson(_asObject(task))],
+      nextCursor: nextCursor as String?,
+    );
   }
 
   /// `GET /api/tasks/{id}` — one task plus its full event history.

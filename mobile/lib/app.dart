@@ -15,6 +15,8 @@ import 'features/channels/channel_management_provider.dart';
 import 'features/channels/channels_provider.dart';
 import 'features/channels/unread_badge/unread_badge_provider.dart';
 import 'features/home/home_page.dart';
+import 'features/work/work_page.dart';
+import 'shared/tasks/task_channel.dart';
 import 'features/invites/invite_create_page.dart';
 import 'features/invites/invite_join_provider.dart';
 import 'features/pairing/pairing_page.dart';
@@ -388,6 +390,8 @@ class App extends HookConsumerWidget {
             child: HomePage(
               settingsPageBuilder: _buildSettingsPage,
               hasUnreadInbox: hasUnreadInbox,
+              workPageBuilder: (context, onBack, visible) =>
+                  _WorkPageContent(onBack: onBack, visible: visible),
             ),
           ),
           _ => const DeepLinkDispatcher(
@@ -398,6 +402,27 @@ class App extends HookConsumerWidget {
       ),
     );
   }
+}
+
+class _WorkPageContent extends ConsumerWidget {
+  const _WorkPageContent({required this.onBack, required this.visible});
+  final VoidCallback onBack;
+  final bool visible;
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => WorkPage(
+    onBack: onBack,
+    visible: visible,
+    channels: ref
+        .watch(channelsProvider)
+        .whenData(
+          (channels) => [
+            for (final channel in channels)
+              if (channel.isMember && !channel.isArchived)
+                TaskChannel(id: channel.id, name: channel.name),
+          ],
+        ),
+    onRefreshChannels: () => ref.read(channelsProvider.notifier).refresh(),
+  );
 }
 
 Widget _buildSettingsPage(BuildContext context) => const _SettingsPageContent();
