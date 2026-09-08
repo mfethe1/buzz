@@ -246,9 +246,7 @@ impl ActionSink for RelayActionSink {
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
-        // AGENT-HOMES-001: authored_text is reserved for future mention-
-        // resolution in relay-signed posts; keep the parameter, silence lint.
-        let _authored_text = authored_text;
+        let authored_text = authored_text.to_owned();
         let author_pubkey = author_pubkey.to_owned();
         let reply_to = reply_to.map(str::to_owned);
 
@@ -400,8 +398,9 @@ impl ActionSink for RelayActionSink {
             // The stored author-written template independently supplies the
             // authority-bearing workflow-mention tags. A trigger may therefore
             // render an `@Name` into visible output, but it cannot borrow the
-            // workflow owner's authority to wake that agent. A resolution failure
-            // must not drop the message, so log and proceed with the base tags.
+            // workflow owner's authority to wake that agent. Member or profile
+            // lookup failures abort the write rather than persist partial routing
+            // or authority metadata.
             let members = state
                 .db
                 .get_members_for_event_write(tenant.community(), channel_uuid)
@@ -420,18 +419,13 @@ impl ActionSink for RelayActionSink {
                     Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
                 })
                 .collect();
-            // The owner is attributed via `actor`, never p-tagged, so they are
-            // not woken by their own workflow's output even if the text names
-            // them. Skipping them here keeps that true.
-            for mentioned in resolve_mention_pubkeys(&text, &named_members) {
-                if mentioned == author_pubkey_hex {
-                    continue;
-                }
-                tags.push(
-                    Tag::parse(["p", &mentioned])
-                        .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
-                );
-            }
+            append_workflow_mention_tags(
+                &mut tags,
+                &text,
+                &authored_text,
+                &named_members,
+                &author_pubkey_hex,
+            )?;
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
             let event = EventBuilder::new(kind, &text)
@@ -567,7 +561,7 @@ impl ActionSink for RelayActionSink {
 
             let channel = state
                 .db
-                .get_channel(tenant.community(), channel_uuid)
+                .get_channel_for_event_write(tenant.community(), channel_uuid)
                 .await
                 .map_err(|e| match &e {
                     buzz_db::DbError::ChannelNotFound(_) | buzz_db::DbError::NotFound(_) => {
@@ -687,8 +681,8 @@ impl ActionSink for RelayActionSink {
     }
 }
 
-/// only for targets also named in the workflow owner's stored step template.
-#[allow(dead_code)]
+/// Append routing tags from rendered text without adding an owner p tag, and
+/// authority tags only for targets also named in the stored step template.
 fn append_workflow_mention_tags(
     tags: &mut Vec<Tag>,
     rendered_text: &str,
@@ -1332,6 +1326,14 @@ mod postgres_tests {
         };
         let explicit = load_event(&explicit_event_id_hex).await;
         let injected = load_event(&injected_event_id_hex).await;
+        for stored in [&explicit, &injected] {
+            stored.event.verify().expect("persisted event signature");
+            assert_eq!(
+                stored.event.pubkey,
+                state.relay_keypair.public_key(),
+                "workflow authority must be signed by this relay"
+            );
+        }
 
         let tag_values = |stored: &buzz_core::StoredEvent, name: &str| -> Vec<String> {
             stored
@@ -1357,9 +1359,10 @@ mod postgres_tests {
             !p_tag_targets.iter().any(|t| t == &author_hex),
             "author must NOT be p-tagged — that wakes them as a second agent; got {p_tag_targets:?}"
         );
-        assert!(
-            p_tag_targets.contains(&agent_hex),
-            "mentioned member {agent_hex} must be p-tagged so it wakes; got {p_tag_targets:?}"
+        assert_eq!(
+            p_tag_targets,
+            vec![agent_hex.clone()],
+            "only the explicitly mentioned member must be p-tagged"
         );
         assert_eq!(
             tag_values(&explicit, "buzz:workflow-owner"),
@@ -1373,13 +1376,20 @@ mod postgres_tests {
         );
 
         let injected_p_tags = tag_values(&injected, "p");
-        assert!(
-            injected_p_tags.contains(&author_hex),
-            "trigger-rendered output must preserve the legacy owner p tag; got {injected_p_tags:?}"
+        assert_eq!(
+            tag_values(&injected, "actor"),
+            vec![author_hex.clone()],
+            "trigger-rendered output must attribute its owner through actor"
         );
-        assert!(
-            injected_p_tags.contains(&agent_hex),
-            "trigger-rendered mention must preserve legacy mention/feed routing; got {injected_p_tags:?}"
+        assert_eq!(
+            tag_values(&injected, "buzz:workflow-owner"),
+            vec![author_hex],
+            "trigger-rendered output must preserve the signed workflow owner"
+        );
+        assert_eq!(
+            injected_p_tags,
+            vec![agent_hex],
+            "trigger-rendered mention must preserve routing without waking the owner"
         );
         assert!(
             tag_values(&injected, "buzz:workflow-mention").is_empty(),
