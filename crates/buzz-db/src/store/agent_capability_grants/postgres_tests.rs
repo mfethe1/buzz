@@ -472,6 +472,15 @@ async fn migration_schema_upgrade_from_task_system_preserves_rows_and_adds_grant
     )
     .await
     .expect("migrated home");
+    assert!(
+        sqlx::query("UPDATE users SET machine_id = NULL WHERE community_id = $1 AND pubkey = $2")
+            .bind(community.as_uuid())
+            .bind(&agent)
+            .execute(&pool)
+            .await
+            .is_err(),
+        "migration must also reject runtime metadata without a machine id"
+    );
     grant(&pool, community, &agent, CAP_CROSS_SSH, "mack", &agent)
         .await
         .expect("migrated grant");
