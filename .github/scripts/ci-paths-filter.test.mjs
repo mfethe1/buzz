@@ -183,63 +183,143 @@ function selectedLanes(outputs) {
   });
 }
 
+const desktopLanes = [
+  "desktop-domain",
+  "relay-artifacts-domain",
+  "desktop-macos-domain",
+  "relay-domain",
+];
+const mobileLanes = ["clients", "mobile-swift-domain"];
+
 for (const scenario of [
   {
-    name: "Justfile-only edit",
-    rust: true,
-    change: (dir) => {
-      writeFileSync(path.join(dir, "Justfile"), "# changed recipe\n");
-    },
+    name: "root Justfile edit",
+    paths: ["Justfile"],
+    filters: ["rust"],
+    lanes: rustLanes,
   },
   {
-    name: "Justfile deletion",
-    rust: true,
-    change: (dir) => {
-      rmSync(path.join(dir, "Justfile"));
-    },
+    name: "root Justfile deletion",
+    remove: "Justfile",
+    filters: ["rust"],
+    lanes: rustLanes,
+  },
+  { name: "root README", paths: ["README.md"], filters: [], lanes: [] },
+  { name: "documentation", paths: ["docs/guide.md"], filters: [], lanes: [] },
+  {
+    name: "nested Justfile documentation",
+    paths: ["docs/Justfile"],
+    filters: [],
+    lanes: [],
   },
   {
-    name: "unrelated documentation edit",
-    rust: false,
-    change: (dir) => {
-      writeFileSync(path.join(dir, "README.md"), "Documentation change\n");
-    },
+    name: "desktop UI",
+    paths: ["desktop/src/App.tsx"],
+    filters: ["desktop"],
+    lanes: desktopLanes,
   },
   {
-    name: "nested documentation named Justfile",
-    rust: false,
-    change: (dir) => {
-      mkdirSync(path.join(dir, "docs"));
-      writeFileSync(path.join(dir, "docs/Justfile"), "Documentation example\n");
-    },
+    name: "Tauri implementation",
+    paths: ["desktop/src-tauri/src/main.rs"],
+    filters: ["desktop-rust"],
+    lanes: ["rust", ...desktopLanes],
+  },
+  {
+    name: "Tauri subtree documentation",
+    paths: ["desktop/src-tauri/README.md"],
+    filters: ["desktop-rust"],
+    lanes: ["rust", ...desktopLanes],
+  },
+  {
+    name: "similarly named UI file outside Tauri",
+    paths: ["desktop/src-tauri-helper.ts"],
+    filters: ["desktop"],
+    lanes: desktopLanes,
+  },
+  {
+    name: "mobile client",
+    paths: ["mobile/lib/app.dart"],
+    filters: ["mobile"],
+    lanes: mobileLanes,
+  },
+  {
+    name: "web client",
+    paths: ["web/src/main.ts"],
+    filters: ["web"],
+    lanes: ["clients"],
+  },
+  {
+    name: "shared JavaScript lockfile",
+    paths: ["pnpm-lock.yaml"],
+    filters: ["desktop", "web"],
+    lanes: [...desktopLanes, "clients"],
+  },
+  {
+    name: "shared model capabilities",
+    paths: ["scripts/model-capabilities.json"],
+    filters: ["rust", "desktop"],
+    lanes: rustLanes,
+  },
+  {
+    name: "Rust manifest",
+    paths: ["Cargo.toml"],
+    filters: ["rust"],
+    lanes: rustLanes,
+  },
+  {
+    name: "CI workflow",
+    paths: [".github/workflows/ci.yml"],
+    filters: ["rust", "mobile"],
+    lanes: [...rustLanes, ...mobileLanes],
+  },
+  {
+    name: "UI plus Tauri plus mobile",
+    paths: [
+      "desktop/src/App.tsx",
+      "desktop/src-tauri/src/main.rs",
+      "mobile/lib/app.dart",
+    ],
+    filters: ["desktop", "desktop-rust", "mobile"],
+    lanes: ["rust", ...desktopLanes, ...mobileLanes],
+  },
+  {
+    name: "documentation plus Tauri",
+    paths: ["docs/guide.md", "desktop/src-tauri/src/main.rs"],
+    filters: ["desktop-rust"],
+    lanes: ["rust", ...desktopLanes],
+  },
+  {
+    name: "all client and Rust surfaces",
+    paths: [
+      "Justfile",
+      "desktop/src/App.tsx",
+      "desktop/src-tauri/src/main.rs",
+      "web/src/main.ts",
+      "mobile/lib/app.dart",
+    ],
+    filters: ["rust", "desktop", "desktop-rust", "web", "mobile"],
+    lanes: [...rustLanes, ...mobileLanes],
   },
 ]) {
-  test(`${scenario.name} selects Rust CI only for the root Justfile`, (t) => {
-    const outputs = runAction(scenario.change);
-    assert.equal(outputs.rust, String(scenario.rust));
-    for (const name of ["desktop-rust", "web", "mobile"]) {
-      assert.equal(outputs[name], "false", `${name} must remain unchanged`);
-    }
-    assert.equal(JSON.parse(outputs.changes).includes("rust"), scenario.rust);
-    const lanes = selectedLanes(outputs);
-    if (scenario.rust) {
-      assert.deepEqual(lanes, rustLanes);
-    } else {
-      // The existing desktop negation independently over-selects docs under
-      // the action's default "some" quantifier. Do not bless that behavior or
-      // claim this case-only repair fixes it: verify the Rust-only lanes here.
-      for (const name of [
-        "rust",
-        "rust-cross-compile-domain",
-        "postgres-domain",
-        "security-domain",
-      ]) {
-        assert.ok(
-          !lanes.includes(name),
-          `${name} must not run for documentation`,
-        );
+  test(`${scenario.name} selects its intended CI lanes`, (t) => {
+    const outputs = runAction((directory) => {
+      if (scenario.remove) rmSync(path.join(directory, scenario.remove));
+      for (const relative of scenario.paths ?? []) {
+        const file = path.join(directory, relative);
+        mkdirSync(path.dirname(file), { recursive: true });
+        writeFileSync(file, "Changed fixture content\n");
       }
+    });
+    for (const name of ["rust", "desktop", "desktop-rust", "web", "mobile"]) {
+      assert.equal(
+        outputs[name],
+        String(scenario.filters.includes(name)),
+        name,
+      );
     }
+    assert.deepEqual(JSON.parse(outputs.changes), scenario.filters);
+    const lanes = selectedLanes(outputs);
+    assert.deepEqual(lanes, scenario.lanes);
     t.diagnostic(
       JSON.stringify({ action: actionRef, actionSha256, outputs, lanes }),
     );

@@ -36,6 +36,7 @@ jobs:
         id: filter
         with:
           token: ''
+          predicate-quantifier: some-with-excludes
           filters: |
             rust:
               - 'crates/**'
