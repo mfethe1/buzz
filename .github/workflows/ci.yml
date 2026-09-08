@@ -36,6 +36,7 @@ jobs:
         id: filter
         with:
           token: ''
+          predicate-quantifier: some-with-excludes
           filters: |
             rust:
               - 'crates/**'
@@ -58,7 +59,7 @@ jobs:
               - 'scripts/run-tests.sh'
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
-              - 'justfile'
+              - 'Justfile'
             desktop:
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
@@ -94,6 +95,10 @@ jobs:
         run: scripts/test-relay-image-eligibility-workflow.sh
       - name: Docker cache ownership contract
         run: just docker-cache-check
+      - name: CI path selection contract
+        run: |
+          pnpm install --filter buzz-workspace --frozen-lockfile --ignore-scripts
+          node --test .github/scripts/ci-paths-filter.test.mjs
       - name: Desktop release candidate contract
         run: scripts/test-desktop-release-candidate.sh
       - name: OSS desktop promotion contract
