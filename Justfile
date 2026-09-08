@@ -499,6 +499,10 @@ test-unit:
         # Keep them in the infra-free gate; the broader Git suite uses MinIO.
         cargo nextest run -p buzz-relay --lib \
             -E 'test(/^api::git::store::probe_deadline::tests::/)'
+        # Task notification/privacy and reconnect controls are infra-free here;
+        # the ignored signed HTTP/WebSocket flow runs in the PostgreSQL profile.
+        cargo nextest run -p buzz-relay -p buzz-ws-client --lib \
+            -E '(package(buzz-relay) and (test(/^api::tasks::tests::/) + test(/^state::task_invalidation::tests::/) + test(/^protocol::tests::/))) or package(buzz-ws-client)'
     else
         ./scripts/run-tests.sh unit
     fi

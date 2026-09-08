@@ -214,15 +214,15 @@ mod route_authz {
 
     #[allow(dead_code)] // AGENT-HOMES-001: shared fixture; fields used by sibling test mods
     pub(super) struct Fixture {
-        state: Arc<AppState>,
+        pub(super) state: Arc<AppState>,
         #[allow(dead_code)]
-        pool: sqlx::PgPool,
-        host: String,
-        community: buzz_core::CommunityId,
-        private_channel_id: Uuid,
-        task_id: Uuid,
-        owner: Keys,
-        outsider: Keys,
+        pub(super) pool: sqlx::PgPool,
+        pub(super) host: String,
+        pub(super) community: buzz_core::CommunityId,
+        pub(super) private_channel_id: Uuid,
+        pub(super) task_id: Uuid,
+        pub(super) owner: Keys,
+        pub(super) outsider: Keys,
         pub(super) http_base: Option<String>,
     }
 
@@ -380,7 +380,7 @@ mod route_authz {
             crate::router::build_router(self.state.clone())
         }
 
-        async fn request(
+        pub(super) async fn request(
             &self,
             method: &str,
             path_and_query: &str,
@@ -739,3 +739,6 @@ mod postgres_tests {
         }
     }
 }
+
+#[path = "notifications_tests.rs"]
+mod task_notifications;
