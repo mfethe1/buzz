@@ -21,6 +21,7 @@
 // mean carrying a fork delta on an upstream-owned file purely for evidence.
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -36,11 +37,29 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 
 import '../../../helpers/golden_shot.dart';
+import '../../../helpers/golden_renderer.dart';
 
 /// Tablet capture surface (iPad-class logical size, portrait).
 const Size kTabletLogicalSize = Size(834, 1112);
 
+late String _goldenDirectory;
+String _golden(String name) =>
+    _goldenDirectory.isEmpty ? name : '$_goldenDirectory/$name';
+
 void main() {
+  setUpAll(() {
+    final profiles =
+        jsonDecode(
+              File(
+                '${mobilePackageRoot()}/test/features/channels/agent_activity/goldens/renderer_profiles.json',
+              ).readAsStringSync(),
+            )
+            as List<dynamic>;
+    _goldenDirectory = qualifiedGoldenDirectory(
+      readGoldenRendererFingerprint(),
+      profiles,
+    );
+  });
   // -------------------------------------------------------------------------
   // 01 / 02 — the original two captures, unchanged so their hashes stay stable.
   // -------------------------------------------------------------------------
@@ -54,7 +73,7 @@ void main() {
     await captureShot(
       tester,
       find.byType(AgentActivitySheet),
-      '01-hw014-error-state-with-retry',
+      _golden('01-hw014-error-state-with-retry'),
       settle: false,
     );
   });
@@ -72,7 +91,7 @@ void main() {
     await captureShot(
       tester,
       find.byType(AgentActivitySheet),
-      '02-hw014-post-tap-connecting',
+      _golden('02-hw014-post-tap-connecting'),
       settle: false,
     );
   });
@@ -100,7 +119,7 @@ void main() {
     await captureShot(
       tester,
       find.byType(AgentActivitySheet),
-      '03-hw014-populated-after-recovery',
+      _golden('03-hw014-populated-after-recovery'),
       settle: false,
     );
   });
@@ -122,7 +141,7 @@ void main() {
     await captureShot(
       tester,
       find.byType(AgentActivitySheet),
-      '04-hw014-error-state-with-retry-dark',
+      _golden('04-hw014-error-state-with-retry-dark'),
       settle: false,
     );
   });
@@ -147,7 +166,7 @@ void main() {
     await captureShot(
       tester,
       find.byType(AgentActivitySheet),
-      '05-hw014-populated-tablet',
+      _golden('05-hw014-populated-tablet'),
       settle: false,
     );
   });
@@ -167,7 +186,7 @@ void main() {
     await captureShot(
       tester,
       find.byType(AgentActivitySheet),
-      '06-hw014-error-state-tablet-dark',
+      _golden('06-hw014-error-state-tablet-dark'),
       settle: false,
     );
   });
@@ -186,7 +205,7 @@ void main() {
     await captureShot(
       tester,
       find.byType(AgentActivitySheet),
-      '07-hw014-empty-waiting',
+      _golden('07-hw014-empty-waiting'),
       settle: false,
     );
   });
@@ -201,7 +220,7 @@ void main() {
     await captureShot(
       tester,
       find.byType(AgentActivitySheet),
-      '08-hw014-idle-not-connected',
+      _golden('08-hw014-idle-not-connected'),
       settle: false,
     );
   });
