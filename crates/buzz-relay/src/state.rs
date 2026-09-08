@@ -1,5 +1,7 @@
 //! Shared application state — Arc-wrapped, shared across all connections.
 
+mod task_invalidation;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};

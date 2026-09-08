@@ -44,6 +44,13 @@ pub enum RelayMessage {
         /// The number of matching events.
         count: u64,
     },
+    /// Buzz extension: advisory task invalidation. The relay is
+    /// advising the client that tasks in `channel_id` changed and it should
+    /// refetch through the authorized HTTP API. No task content is carried.
+    TasksSyncRequired {
+        /// UUID of the channel whose task list changed.
+        channel_id: String,
+    },
 }
 
 /// The relay's response to a published event (NIP-01 `OK` message).
@@ -160,6 +167,14 @@ pub fn parse_relay_message(text: &str) -> Result<RelayMessage, WsClientError> {
                 count,
             })
         }
+        "BUZZ_TASKS_SYNC_REQUIRED" => {
+            let channel_id = arr
+                .get(1)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| WsClientError::UnexpectedMessage(text.to_string()))?
+                .to_string();
+            Ok(RelayMessage::TasksSyncRequired { channel_id })
+        }
         other => Err(WsClientError::UnexpectedMessage(format!(
             "unknown message type: {other}"
         ))),
@@ -187,4 +202,26 @@ pub fn build_auth_event(
     builder
         .sign_with_keys(keys)
         .map_err(|e| WsClientError::EventBuilder(e.to_string()))
+}
+
+#[cfg(test)]
+mod task_sync_tests {
+    use super::*;
+
+    #[test]
+    fn task_signal_is_recognized_without_changing_unknown_frame_errors() {
+        let channel = "00000000-0000-0000-0000-000000000001";
+        assert!(
+            matches!(parse_relay_message(&format!(r#"["BUZZ_TASKS_SYNC_REQUIRED","{channel}"]"#)),
+            Ok(RelayMessage::TasksSyncRequired { channel_id }) if channel_id == channel)
+        );
+        assert!(matches!(
+            parse_relay_message(r#"["BUZZ_TASKS_SYNC_REQUIRED"]"#),
+            Err(WsClientError::UnexpectedMessage(_))
+        ));
+        assert!(matches!(
+            parse_relay_message(r#"["UNKNOWN_FUTURE_EXTENSION"]"#),
+            Err(WsClientError::UnexpectedMessage(_))
+        ));
+    }
 }

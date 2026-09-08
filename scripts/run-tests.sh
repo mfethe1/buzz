@@ -133,6 +133,17 @@ run_unit_tests() {
   # step with `just test-unit`; ignored lifecycle tests run elsewhere.  run_test_step "buzz-acp unit tests" \
     cargo test -p buzz-acp --lib -- --nocapture
 
+  # Match the task notification lane in just test-unit. PostgreSQL cases stay
+  # ignored here and run through the isolated PostgreSQL profile instead.
+  run_test_step "buzz-relay task route unit tests" \
+    cargo test -p buzz-relay --lib api::tasks::tests:: -- --nocapture
+  run_test_step "buzz-relay task notification control tests" \
+    cargo test -p buzz-relay --lib state::task_invalidation::tests:: -- --nocapture
+  run_test_step "buzz-relay protocol tests" \
+    cargo test -p buzz-relay --lib protocol::tests:: -- --nocapture
+  run_test_step "buzz-ws-client unit tests" \
+    cargo test -p buzz-ws-client --lib -- --nocapture
+
   # Mirror the three infra-free relay handler modules in `just test-unit`'s
   # nextest expression. Keep the side-effects filter pinned to `::tests::` so
   # it does not select the sibling Postgres-backed test module.
