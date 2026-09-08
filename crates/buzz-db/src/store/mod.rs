@@ -2,6 +2,8 @@
 
 /// Explicit deployment-global admin report reads.
 pub mod admin_moderation;
+/// Per-machine capability grants for agents (default deny).
+pub mod agent_capability_grants;
 /// Community-scoped authentication allowlist persistence.
 pub mod allowlist;
 /// API token storage and lookup.

@@ -703,8 +703,31 @@ mod postgres_tests {
         migrations.sort_by_key(|migration| migration.version);
 
         // upstream carries 44 (0032-0034 and 0040 adopted from our PRs);
-        // fork adds 0046_task_system (PR #6425 pending upstream).
-        assert_eq!(migrations.len(), 45);
+        // fork adds 0046_task_system (PR #6425 pending upstream) and 0047
+        // structured task history, 0048 machine homes, 0049 capability grants,
+        // and 0050 task revisions. Deployed migration checksums stay unchanged.
+        assert_eq!(migrations.len(), 49);
+        assert_eq!(migrations[44].version, 46);
+        assert_eq!(migrations[45].version, 47);
+        assert_eq!(migrations[46].version, 48);
+        assert!(migrations[46]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN machine_id"));
+        assert_eq!(migrations[47].version, 49);
+        assert!(migrations[47]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE agent_capability_events"));
+        assert_eq!(migrations[48].version, 50);
+        assert!(migrations[48]
+            .sql
+            .as_str()
+            .contains("CREATE TRIGGER trg_tasks_revision"));
+        let task_changes = migrations[45].sql.as_str();
+        assert!(task_changes.contains("ALTER TABLE task_events ADD COLUMN changes JSONB"));
+        assert!(task_changes.contains("ALTER COLUMN created_at SET DEFAULT clock_timestamp()"));
+        assert!(!migrations[44].sql.as_str().contains("ADD COLUMN changes"));
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1888,7 +1911,12 @@ mod postgres_tests {
         // here so the comparison below stays an exact equality: a new scoped
         // table that forgets its fence line still fails this test, and a fence
         // line for a table nobody registered here fails it too.
-        for post_0029_scoped_table in ["tasks", "task_events"] {
+        for post_0029_scoped_table in [
+            "tasks",
+            "task_events",
+            "agent_capability_grants",
+            "agent_capability_events",
+        ] {
             expected_fences.insert(post_0029_scoped_table.to_owned());
         }
         assert_eq!(

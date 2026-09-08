@@ -45,6 +45,19 @@ pub enum DbError {
     #[error("invalid data: {0}")]
     InvalidData(String),
 
+    /// A PATCH carried `expected_revision` that does not match the row's current
+    /// `revision`. The caller must re-fetch and retry. This is the optimistic
+    /// concurrency guard from HW-017: a stale write must not silently win.
+    #[error("task {task_id} revision mismatch: expected {expected}, found {actual}")]
+    StaleRevision {
+        /// The task that was being patched.
+        task_id: uuid::Uuid,
+        /// The revision the caller expected (the snapshot it read).
+        expected: i32,
+        /// The revision the row actually carries.
+        actual: i32,
+    },
+
     /// A serving write admitted before the lifecycle transition is still live.
     /// This is an ordinary retryable drain condition, not a safety violation.
     #[error(
