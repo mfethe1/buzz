@@ -42,8 +42,8 @@ CREATE UNIQUE INDEX idx_users_one_home_per_machine
 -- unrepresentable rather than merely discouraged.
 ALTER TABLE users
     ADD CONSTRAINT chk_users_machine_fields_require_machine_id
-        CHECK (machine_id IS NOT NULL
-               OR (machine_label IS NULL AND machine_runtime IS NULL));
+        CHECK (num_nonnulls(machine_id) = 1
+               OR num_nonnulls(machine_label, machine_runtime) = 0);
 
 -- Blank/whitespace ids and labels are the other way a home becomes
 -- unaddressable, and TEXT columns accept them silently.

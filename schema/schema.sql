@@ -184,7 +184,9 @@ CREATE TABLE users (
     machine_label      VARCHAR(255),
     machine_runtime    TEXT,
     CONSTRAINT chk_users_machine_fields_require_machine_id
-        CHECK (machine_id IS NOT NULL OR (machine_label IS NULL AND machine_runtime IS NULL)),
+        -- pgschema1.7.4 drops CHECKs containing IS NOT NULL as presumed column
+        -- nullability. num_nonnulls preserves this cross-column invariant.
+        CHECK (num_nonnulls(machine_id) = 1 OR num_nonnulls(machine_label, machine_runtime) = 0),
     CONSTRAINT chk_users_machine_id_not_blank
         CHECK (machine_id IS NULL OR length(btrim(machine_id)) > 0),
     CONSTRAINT chk_users_machine_label_not_blank
