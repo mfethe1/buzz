@@ -1,25 +1,6 @@
-/// The task detail sheet (HW-005 read surface, HW-007 status write surface).
-///
-/// HW-004 made "this thread produced a task" visible as a chip, but left the
-/// task write-once and invisible: `getTask()` had zero production callers and
-/// `TaskEvent` was parsed but never rendered. This sheet is the first
-/// task-VIEWING surface on mobile — chip tap → one `GET /api/tasks/{id}` →
-/// render `TaskDetail` (task + full event history).
-///
-/// HW-007 made the STATUS — and only the status — writable. Tapping it opens
-/// [showTaskStatusPicker]; a different selection issues exactly one
-/// `PATCH /api/tasks/{id}` carrying only `status`, then RE-FETCHES so the new
-/// status and the relay-appended `status_changed` row both render from relay
-/// truth. There is no optimistic local mutation: a failed write can never leave
-/// a phantom success on screen. Title, priority, assignee and the comment
-/// composer remain deliberately out of scope.
-///
-/// AUTHORIZATION IS INHERITED, NEVER INVENTED. The relay's PATCH path is
-/// channel-membership scoped with no per-user ownership check, so the control
-/// is never hidden on a guessed ownership rule — doing so would misrepresent
-/// the real invariant. The sheet issues one request per open (plus one per
-/// explicit retry, plus one PATCH + one re-fetch per accepted transition);
-/// there is no polling and no live subscription.
+/// Task detail and status editing, refreshed from the relay after task changes,
+/// reconnects, accepted writes and revision conflicts. Status writes carry the
+/// revision displayed when the picker opens; conflicts never replay a write.
 ///
 /// Untrusted-text rules match HW-003/HW-004: title, bodies and actors are
 /// relay-supplied, length-clamped by runes (never UTF-16 code units), and
@@ -32,6 +13,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../shared/tasks/task.dart';
+import '../../../shared/tasks/task_query.dart';
+import '../../../shared/tasks/tasks_sync.dart';
 import '../../../shared/tasks/tasks_api.dart';
 import '../../../shared/theme/theme.dart';
 import '../../../shared/utils/string_utils.dart';
@@ -71,7 +54,7 @@ String? taskWireStatusLabel(String? wire) {
   return wire;
 }
 
-/// Opens the read-only detail sheet for one task.
+/// Opens task detail and its status control.
 Future<void> showTaskDetailSheet({
   required BuildContext context,
   required WidgetRef ref,
@@ -90,27 +73,41 @@ Future<void> showTaskDetailSheet({
   );
 }
 
-class _TaskDetailSheet extends HookConsumerWidget {
+class _TaskDetailSheet extends ConsumerWidget {
   const _TaskDetailSheet({required this.taskId});
 
   final String taskId;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // One fetch per open, plus one per explicit retry tap. A tick, not a
-    // timer: no polling, no live subscription, no background refresh.
-    final retryTick = useState(0);
-    final detailSnapshot = useFuture(
-      useMemoized(() => ref.read(tasksApiProvider).getTask(taskId), [
-        taskId,
-        retryTick.value,
-      ]),
+    final api = ref.watch(tasksApiProvider);
+    return _TaskDetailLoader(
+      key: ValueKey((api, taskId)),
+      api: api,
+      taskId: taskId,
     );
+  }
+}
+
+class _TaskDetailLoader extends HookConsumerWidget {
+  const _TaskDetailLoader({super.key, required this.api, required this.taskId});
+
+  final TasksApi api;
+  final String taskId;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final query = useTaskQuery(
+      () => api.getTask(taskId),
+      scope: [api, taskId],
+      signal: ref.watch(tasksSyncSignalProvider),
+    );
+    final detailSnapshot = query.value;
 
     if (detailSnapshot.hasError) {
       return _TaskDetailError(
         error: detailSnapshot.error!,
-        onRetry: () => retryTick.value++,
+        onRetry: query.refresh,
       );
     }
     final detail = detailSnapshot.data;
@@ -123,7 +120,7 @@ class _TaskDetailSheet extends HookConsumerWidget {
         ),
       );
     }
-    return _TaskDetailView(detail: detail, onChanged: () => retryTick.value++);
+    return _TaskDetailView(detail: detail, onChanged: query.refresh);
   }
 }
 
@@ -239,6 +236,7 @@ class _TaskDetailView extends HookConsumerWidget {
                   child: _TaskStatusControl(
                     taskId: detail.task.id,
                     status: detail.task.status,
+                    revision: detail.task.revision,
                     onChanged: onChanged,
                   ),
                 ),
@@ -306,11 +304,13 @@ class _TaskStatusControl extends HookConsumerWidget {
   const _TaskStatusControl({
     required this.taskId,
     required this.status,
+    required this.revision,
     required this.onChanged,
   });
 
   final String taskId;
   final TaskStatus status;
+  final int revision;
   final VoidCallback onChanged;
 
   @override
@@ -322,6 +322,7 @@ class _TaskStatusControl extends HookConsumerWidget {
       // One in-flight transition at a time: a double-tap must not produce two
       // PATCHes and two competing re-fetches.
       if (isSending.value) return;
+      final api = ref.read(tasksApiProvider);
       final selected = await showTaskStatusPicker(
         context: context,
         current: status,
@@ -329,19 +330,27 @@ class _TaskStatusControl extends HookConsumerWidget {
       // Dismissed without choosing, OR chose the status it already has. The
       // relay rejects an empty patch with 400 "patch must change at least one
       // field", so the no-op is declined HERE rather than sent and failed.
-      if (selected == null || selected == status) return;
+      if (!context.mounted || selected == null || selected == status) return;
+      if (!identical(api, ref.read(tasksApiProvider))) return;
 
       isSending.value = true;
       writeError.value = null;
       try {
-        // Exactly one field crosses the wire. No actor, role or ownership
-        // claim is ever sent: the relay authorizes on channel membership.
-        await ref.read(tasksApiProvider).updateTask(taskId, status: selected);
-        onChanged();
+        await api.updateTask(
+          taskId,
+          status: selected,
+          expectedRevision: revision,
+        );
+        if (context.mounted) onChanged();
       } on Object catch (error) {
-        // Relay-supplied message: untrusted, clamped, plain text. The status
-        // shown stays the last relay value because nothing was mutated.
-        writeError.value = clampTaskDetailBody(error.toString());
+        if (!context.mounted) return;
+        if (error is TaskApiException && error.statusCode == 409) {
+          writeError.value =
+              'This task changed on another device. Review the latest details and try again.';
+          onChanged();
+        } else {
+          writeError.value = clampTaskDetailBody(error.toString());
+        }
       } finally {
         if (context.mounted) isSending.value = false;
       }

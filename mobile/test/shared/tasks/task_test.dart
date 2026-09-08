@@ -2,6 +2,12 @@ import 'package:buzz/shared/tasks/task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('task revision decodes exactly and older relays default to zero', () {
+    final json = <String, dynamic>{'id': 'task', 'title': 'Task'};
+    expect(Task.fromJson(json).revision, 0);
+    expect(Task.fromJson({...json, 'revision': 37}).revision, 37);
+  });
+
   group('buildCreateTaskPayload', () {
     test('sends only the fields that were set', () {
       expect(buildCreateTaskPayload(title: 'Ship the relay change'), {
