@@ -8,6 +8,13 @@ ALTER TABLE workflow_approvals
     ADD COLUMN resume_claimed_at TIMESTAMPTZ,
     ADD COLUMN resume_deadline_at TIMESTAMPTZ;
 
+-- Old relays update only status/approver/note and then resume outside the
+-- durable claim path. Fence that writer during mixed-version rollout. The
+-- num_nonnulls form is retained by the pinned pgschema CHECK inspector.
+ALTER TABLE workflow_approvals ADD CONSTRAINT workflow_approvals_native_decision_required
+    CHECK (continuation IS NULL OR status NOT IN ('granted','denied')
+        OR num_nonnulls(decision_event_id) = 1);
+
 CREATE UNIQUE INDEX idx_workflow_approvals_decision_event
     ON workflow_approvals (community_id, decision_event_id)
     WHERE decision_event_id IS NOT NULL;

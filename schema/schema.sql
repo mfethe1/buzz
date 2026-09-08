@@ -431,6 +431,9 @@ CREATE TABLE workflow_approvals (
     continuation JSONB,
     resume_claimed_at TIMESTAMPTZ,
     resume_deadline_at TIMESTAMPTZ,
+    CONSTRAINT workflow_approvals_native_decision_required
+        CHECK (continuation IS NULL OR status NOT IN ('granted','denied')
+            OR num_nonnulls(decision_event_id) = 1),
     PRIMARY KEY (community_id, token),
     FOREIGN KEY (community_id, workflow_id)
         REFERENCES workflows (community_id, id) ON DELETE CASCADE,

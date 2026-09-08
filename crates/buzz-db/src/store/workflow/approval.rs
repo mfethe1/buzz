@@ -537,6 +537,9 @@ mod postgres_tests {
         assert!(approval.request_event_id.is_none());
         let indexes:i64=sqlx::query_scalar("SELECT count(*) FROM pg_indexes WHERE tablename='workflow_approvals' AND indexname IN ('idx_workflow_approvals_decision_event','idx_workflow_approvals_recovery')").fetch_one(&pool).await.expect("indexes");
         assert_eq!(indexes, 2);
+        let native_fence:bool=sqlx::query_scalar("SELECT convalidated FROM pg_constraint WHERE conrelid='workflow_approvals'::regclass AND conname='workflow_approvals_native_decision_required'")
+            .fetch_one(&pool).await.expect("migrated native decision fence");
+        assert!(native_fence);
     }
 
     #[tokio::test]
@@ -590,6 +593,68 @@ mod postgres_tests {
                 .status,
             RunStatus::WaitingApproval
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_approval_saved_wait_survives_late_executor_finalization() {
+        let f = fixture().await;
+        suspend(&f).await;
+        for status in [RunStatus::Failed, RunStatus::Completed] {
+            assert!(
+                f.db.update_workflow_run(
+                    f.wait.community_id,
+                    f.wait.run_id,
+                    status,
+                    99,
+                    &serde_json::json!([{"late":"executor"}]),
+                    Some(crate::workflow::WorkflowRunFailure {
+                        code: "approval_resume_outcome_unknown",
+                        message: "old executor finished after approval commit",
+                    }),
+                )
+                .await
+                .is_err(),
+                "late finalization must preserve the committed wait"
+            );
+            let run =
+                f.db.get_workflow_run(f.wait.community_id, f.wait.run_id)
+                    .await
+                    .expect("run");
+            assert_eq!(run.status, RunStatus::WaitingApproval);
+            assert_eq!(run.current_step, f.wait.step_index);
+            assert_eq!(run.execution_trace, f.wait.trace);
+            assert!(run.error_code.is_none());
+        }
+        let event = decision(&f, &f.owner, true, "still resumable");
+        commit_decision(&f.db, f.wait.community_id, &f.wait.reference, &event, true)
+            .await
+            .expect("decision survives late writer");
+        assert!(f
+            .db
+            .claim_workflow_approval(f.wait.community_id, &f.wait.reference, 30)
+            .await
+            .expect("claim saved continuation")
+            .is_some());
+        assert!(
+            f.db.update_workflow_run(
+                f.wait.community_id,
+                f.wait.run_id,
+                RunStatus::Failed,
+                f.wait.step_index,
+                &serde_json::json!([]),
+                None,
+            )
+            .await
+            .is_err(),
+            "late pre-wait failure must not overwrite the next claimed continuation"
+        );
+        let resumed =
+            f.db.get_workflow_run(f.wait.community_id, f.wait.run_id)
+                .await
+                .expect("resumed run");
+        assert_eq!(resumed.status, RunStatus::Running);
+        assert_eq!(resumed.current_step, f.wait.step_index + 1);
     }
 
     #[tokio::test]
@@ -658,6 +723,55 @@ mod postgres_tests {
             commit_decision(&f.db, f.wait.community_id, &f.wait.reference, &valid, true)
                 .await
                 .expect("authorized")
+                .status,
+            "granted"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_approval_legacy_writer_cannot_grant_or_deny_new_wait() {
+        let f = fixture().await;
+        suspend(&f).await;
+        for status in [
+            crate::workflow::ApprovalStatus::Granted,
+            crate::workflow::ApprovalStatus::Denied,
+        ] {
+            let old_writer =
+                f.db.update_approval_by_stored_hash(
+                    f.wait.community_id,
+                    &f.wait.reference,
+                    status,
+                    Some(&f.owner.public_key().to_bytes()),
+                    Some("old relay writer"),
+                )
+                .await;
+            match old_writer {
+                Err(DbError::Sqlx(sqlx::Error::Database(error))) => {
+                    assert_eq!(error.constraint(),Some("workflow_approvals_native_decision_required"));
+                }
+                other => panic!("legacy writer must fail at native decision fence before old relay can resume: {other:?}"),
+            }
+            assert_eq!(
+                f.db.get_approval_by_stored_hash(f.wait.community_id, &f.wait.reference)
+                    .await
+                    .expect("approval")
+                    .status,
+                crate::workflow::ApprovalStatus::Pending
+            );
+            assert_eq!(
+                f.db.get_workflow_run(f.wait.community_id, f.wait.run_id)
+                    .await
+                    .expect("run")
+                    .status,
+                RunStatus::WaitingApproval
+            );
+        }
+        let event = decision(&f, &f.owner, true, "new atomic writer");
+        assert_eq!(
+            commit_decision(&f.db, f.wait.community_id, &f.wait.reference, &event, true)
+                .await
+                .expect("native writer still admitted")
                 .status,
             "granted"
         );

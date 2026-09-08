@@ -924,6 +924,10 @@ pub struct WorkflowRunFailure<'a> {
 
 /// Update run status, current step, execution trace, and optional failure.
 ///
+/// Terminal outcomes cannot be overwritten; a saved approval wait cannot be
+/// completed or failed by a late executor finalizer. Progress never moves behind
+/// an admitted continuation. Approval decisions and claims use atomic transactions.
+///
 /// Fix C3: `started_at` is set when the NEW status is 'running' and `started_at`
 /// has not yet been stamped (IS NULL). The original code read `status` from the
 /// column AFTER `SET status = ?` had already changed it, so the condition was
@@ -955,6 +959,8 @@ pub async fn update_workflow_run(
                                  THEN NOW() ELSE completed_at END
         WHERE community_id = $8 AND id = $9
           AND status NOT IN ('completed','failed','cancelled')
+          AND NOT (status = 'waiting_approval' AND $6 IN ('completed','failed'))
+          AND current_step <= $2
         "#,
     )
     .bind(&status_str)

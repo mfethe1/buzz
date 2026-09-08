@@ -401,6 +401,120 @@ async fn workflow_approval_signed_http_restart_replay_and_exactly_one_effect() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn workflow_approval_signed_http_second_wait_survives_late_finalizer() {
+    let f = fixture("1h", false).await;
+    let row = f
+        .state
+        .db
+        .get_workflow(f.community, f.workflow)
+        .await
+        .expect("workflow");
+    let mut definition = row.definition;
+    definition["steps"].as_array_mut().expect("steps").insert(
+        2,
+        json!({
+            "id":"review_again", "action":"request_approval", "from":f.owner.public_key().to_hex(),
+            "message":"Confirm {{steps.review.output.approved}}", "timeout":"1h",
+        }),
+    );
+    sqlx::query(
+        "UPDATE workflows SET definition=$3,definition_hash=$4 WHERE community_id=$1 AND id=$2",
+    )
+    .bind(f.community.as_uuid())
+    .bind(f.workflow)
+    .bind(&definition)
+    .bind(Sha256::digest(definition.to_string().as_bytes()).as_slice())
+    .execute(&f.pool)
+    .await
+    .expect("two approval definition");
+    let (run, first) = f.start().await;
+    let grant = f.decision(&f.owner, &first, true, "first approved");
+    let (status, body) = f.submit(&f.owner, &grant).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["accepted"], true, "{body}");
+    f.restarted_engine()
+        .recover_approvals()
+        .await
+        .expect("first restart");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let row = f
+                .state
+                .db
+                .get_workflow_run(f.community, run)
+                .await
+                .expect("run");
+            if row.status == buzz_db::workflow::RunStatus::WaitingApproval && row.current_step == 2
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("second wait committed");
+    let path = format!("/workflows/{}/runs/{run}/approvals", f.workflow);
+    let (status, body) = f.request(&f.owner, "GET", &path, None).await;
+    assert_eq!(status, 200, "{body}");
+    let approvals = body["approvals"].as_array().expect("approvals");
+    assert_eq!(approvals.len(), 2);
+    let second = approvals
+        .iter()
+        .find(|a| a["step_id"] == "review_again")
+        .expect("second wait");
+    assert_eq!(second["message"], "Confirm true");
+    assert_ne!(second["approval_ref"], first["approval_ref"]);
+    // Model an old executor returning an error after its sink committed a wait.
+    f.state
+        .workflow_engine
+        .finalize_run(
+            f.community,
+            run,
+            Err((
+                buzz_workflow::WorkflowError::Database("late fanout failure".into()),
+                buzz_workflow::error::PartialProgress {
+                    step_index: 2,
+                    trace: vec![],
+                },
+            )),
+            None,
+        )
+        .await;
+    assert_eq!(
+        f.state
+            .db
+            .get_workflow_run(f.community, run)
+            .await
+            .expect("preserved wait")
+            .status,
+        buzz_db::workflow::RunStatus::WaitingApproval
+    );
+    let grant = f.decision(&f.owner, second, true, "second approved");
+    let (status, body) = f.submit(&f.owner, &grant).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["accepted"], true, "{body}");
+    f.restarted_engine()
+        .recover_approvals()
+        .await
+        .expect("second restart");
+    assert_eq!(
+        f.terminal(run).await.status,
+        buzz_db::workflow::RunStatus::Completed
+    );
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE community_id=$1 AND channel_id=$2 AND kind=9",
+    )
+    .bind(f.community.as_uuid())
+    .bind(f.channel)
+    .fetch_one(&f.pool)
+    .await
+    .expect("effects");
+    assert_eq!(count, 1);
+    eprintln!("WF-08 signed HTTP: two distinct persisted waits and approvals across recreated engines; late finalizer preserved second wait; one final effect");
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn workflow_approval_signed_http_expiration_is_durable() {
     let f = fixture("1s", true).await;
     let (run, approval) = f.start().await;
