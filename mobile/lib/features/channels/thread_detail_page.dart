@@ -727,9 +727,8 @@ class ThreadDetailPage extends HookConsumerWidget {
       signal: (ref.watch(tasksSyncSignalProvider), taskChipRefreshTick.value),
     );
     final linkedTaskSnapshot = linkedTaskQuery.value;
-    // An inaccessible channel returns [] from the relay's accessible-channel
-    // post-filter, which renders identically to "no task" — the chip must not
-    // become an existence oracle.
+    // Failed or inaccessible lookups yield no chip. Only visible tasks returned
+    // by the relay render here; a failed lookup never asserts that no task exists.
     final linkedTasks = [...?linkedTaskSnapshot.data]
       ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     final linkedTask = linkedTasks.firstOrNull;
