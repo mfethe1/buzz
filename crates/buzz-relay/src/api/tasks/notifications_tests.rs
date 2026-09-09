@@ -116,20 +116,91 @@ mod postgres_tests {
     }
 
     async fn start_conn_control(state: Arc<crate::state::AppState>) -> Background {
+        start_conn_control_gated(state, None).await
+    }
+
+    async fn start_conn_control_gated(
+        state: Arc<crate::state::AppState>,
+        gate: Option<tokio::sync::oneshot::Receiver<()>>,
+    ) -> Background {
         let mut rx = state.pubsub.subscribe_conn_control();
         let subscriber = {
             let pubsub = state.pubsub.clone();
-            tokio::spawn(async move { pubsub.run_conn_control_subscriber().await })
+            tokio::spawn(async move {
+                if let Some(gate) = gate {
+                    gate.await.expect("subscriber startup released");
+                }
+                pubsub.run_conn_control_subscriber().await;
+            })
         };
+        // A fresh, nonexistent community makes the probe disjoint from every
+        // fixture socket. Observe it on this exact subscriber, not merely the
+        // Redis PUBLISH subscriber count (which can describe another relay).
+        let probe_ctx = buzz_core::TenantContext::resolved(
+            buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4()),
+            "readiness.invalid",
+        );
+        let probe_community = probe_ctx.community();
+        let publisher = state.pubsub.clone();
+        let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
         let consumer = tokio::spawn(async move {
+            let mut ready_tx = Some(ready_tx);
             while let Ok(scoped) = rx.recv().await {
+                if scoped.community_id == probe_community
+                    && scoped.command == buzz_pubsub::conn_control::ConnControl::DisconnectCommunity
+                {
+                    if let Some(tx) = ready_tx.take() {
+                        let _ = tx.send(());
+                    }
+                    continue;
+                }
                 state.apply_conn_control(scoped).await;
             }
         });
-        // The production subscriber owns a dedicated Redis connection but has
-        // no readiness callback. Bound startup before issuing the first write.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        Background(vec![subscriber, consumer])
+        // Own the handles before awaiting readiness, so timeout/unwind also
+        // aborts both tasks. Probe retries never replay HTTP task mutations.
+        let background = Background(vec![subscriber, consumer]);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut interval = tokio::time::interval(Duration::from_millis(50));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    result = &mut ready_rx => {
+                        result.expect("readiness consumer remains alive");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        publisher.publish_conn_control(
+                            &probe_ctx,
+                            &buzz_pubsub::conn_control::ConnControl::DisconnectCommunity,
+                        ).await.expect("publish isolated readiness probe");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("this Redis subscriber must observe readiness within five seconds");
+        background
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn connection_control_readiness_waits_for_the_actual_subscriber() {
+        let f = fixture().await.expect("Postgres and Redis fixture");
+        // Another healthy subscriber must not satisfy this relay's readiness.
+        let other = peer_state(&f).await;
+        let _other_background = start_conn_control(other).await;
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let startup = start_conn_control_gated(f.state.clone(), Some(gate));
+        tokio::pin!(startup);
+        tokio::select! {
+            _ = &mut startup => panic!("readiness reported before the subscriber was released"),
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+        }
+        release.send(()).expect("release subscriber startup");
+        let _background = tokio::time::timeout(Duration::from_secs(5), startup)
+            .await
+            .expect("actual Redis readiness must be bounded");
     }
 
     async fn serve(f: &mut Fixture) -> Server {
