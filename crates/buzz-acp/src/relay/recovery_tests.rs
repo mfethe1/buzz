@@ -343,12 +343,30 @@ async fn advance_clock(duration: Duration) {
 #[tokio::test]
 async fn blocked_recovery_write_is_bounded_and_retains_loss() {
     let (mut client, _stalled_server) = test_ws_pair().await;
+    // A single large send can finish immediately on Windows loopback even if
+    // the peer never reads. Establish actual backpressure first, with bounded
+    // memory and attempts, rather than assuming an OS socket-buffer capacity.
+    let mut blocked = false;
+    for _ in 0..32 {
+        match timeout(
+            Duration::from_millis(100),
+            client.send(Message::Binary(vec![0; 1024 * 1024].into())),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => panic!("backpressure fixture write failed: {error}"),
+            Err(_) => {
+                blocked = true;
+                break;
+            }
+        }
+    }
+    assert!(blocked, "fixture did not establish socket backpressure");
+
     let mut state = BgState::new();
     let ch = Uuid::new_v4();
     seed_test_subscription(&mut state, ch);
-    // Bounded 16MB JSON request exceeds loopback TCP buffering. The server does
-    // not read it. This tests the real production write/timeout, not a mock sink.
-    state.active_filters.get_mut(&ch).unwrap().kinds = Some(vec![9; 8_000_000]);
     state.channel_dropped_since.insert(ch, 700);
     let (tx, _rx) = mpsc::channel(1);
     let started = tokio::time::Instant::now();
@@ -361,7 +379,12 @@ async fn blocked_recovery_write_is_bounded_and_retains_loss() {
     assert!(started.elapsed() >= Duration::from_secs(WS_SEND_TIMEOUT_SECS));
     assert_eq!(state.channel_dropped_since[&ch], 700);
     let attempted = state.recovery.last_attempt.clone();
-    recovery::recover_one(&mut client, &mut state, &tx, "agent").await;
+    timeout(
+        Duration::from_secs(1),
+        recovery::recover_one(&mut client, &mut state, &tx, "agent"),
+    )
+    .await
+    .expect("paced recovery must not attempt another blocked write");
     assert_eq!(state.recovery.last_attempt, attempted);
 }
 
