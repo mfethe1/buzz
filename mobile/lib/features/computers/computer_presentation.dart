@@ -5,16 +5,12 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/machines/computer.dart';
+import '../../shared/machines/computer_clock.dart';
 import '../../shared/machines/machines_api.dart';
 import '../../shared/theme/theme.dart';
 
-final computerClockProvider = Provider<DateTime Function()>(
-  (ref) =>
-      () => DateTime.now().toUtc(),
-);
-
 /// Repaint at the nearest observation expiry; never keep a cached ready label.
-DateTime useComputerObservationClock(
+Duration useComputerObservationClock(
   WidgetRef ref,
   List<EnrolledComputer> computers,
   bool visible,
@@ -24,14 +20,14 @@ DateTime useComputerObservationClock(
   final now = clock();
   final deadlines = [
     for (final c in computers)
-      if (c.freshAt(now)) c.expiresAt!,
+      if (c.freshAt(now)) c.freshUntil!,
   ];
   deadlines.sort();
   final next = deadlines.firstOrNull;
   useEffect(() {
     if (!visible || next == null) return null;
     final timer = Timer(
-      next.difference(now) + const Duration(milliseconds: 1),
+      (next - now) + const Duration(milliseconds: 1),
       () => tick.value++,
     );
     return timer.cancel;

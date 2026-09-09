@@ -53,6 +53,7 @@ class ComputersPage extends HookConsumerWidget {
         id: selected.$2,
         onBack: () => selection.value = null,
         visible: visible,
+        onAccessLost: (error) => query?.invalidateAccess(error),
       );
     }
     return Scaffold(
@@ -161,7 +162,7 @@ class _ComputerList extends HookConsumerWidget {
             const Padding(
               padding: EdgeInsets.all(Grid.xl),
               child: Text(
-                'No computers have been added to this community yet.',
+                'You haven’t added any computers to this community yet.',
                 textAlign: TextAlign.center,
               ),
             ),

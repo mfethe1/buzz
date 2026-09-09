@@ -17,6 +17,7 @@ Map<String, dynamic> computerJson(
 }) {
   now ??= DateTime.utc(2026, 9, 9);
   return {
+    'server_now': now.toIso8601String(),
     'machine_id': id,
     'owner_pubkey': owner,
     'coordinator_pubkey': 'a' * 64,
@@ -41,6 +42,39 @@ void main() {
         baseUrl: 'https://computers.example',
         nsec: keys.nsec,
       );
+  test(
+    'request latency consumes server validity and missing server clock is never fresh',
+    () async {
+      var elapsed = const Duration(minutes: 10);
+      final serverNow = DateTime.utc(2026, 9, 9);
+      final client = MachinesApi(
+        httpClient: MockClient((_) async {
+          elapsed += const Duration(seconds: 40);
+          return http.Response(
+            jsonEncode(
+              computerJson(
+                pubkeyFromNsec(keys.nsec)!,
+                observed: true,
+                now: serverNow,
+              ),
+            ),
+            200,
+          );
+        }),
+        baseUrl: 'https://computers.example',
+        nsec: keys.nsec,
+        elapsed: () => elapsed,
+      );
+      final c = await client.get(computerId);
+      expect(c.freshAt(elapsed), isTrue);
+      expect(c.freshAt(const Duration(minutes: 12)), isFalse);
+      final missing = EnrolledComputer.fromJson(
+        computerJson('b' * 64, observed: true)..remove('server_now'),
+      );
+      expect(missing.freshAt(Duration.zero), isFalse);
+      expect(missing.statusAt(Duration.zero), 'Status unavailable');
+    },
+  );
   test(
     'real signing binds full cursor URI and emits distinct replay nonces',
     () async {
@@ -156,12 +190,12 @@ void main() {
             ..['reported_state'] = state,
         );
         expect(c.runtimeLabel, isNotEmpty);
-        expect(c.freshAt(now), isTrue);
-        expect(c.freshAt(now.add(const Duration(seconds: 120))), isFalse);
+        expect(c.freshAt(Duration.zero), isTrue);
+        expect(c.freshAt(const Duration(seconds: 120)), isFalse);
       }
     }
     expect(
-      EnrolledComputer.fromJson(computerJson('b' * 64)).statusAt(now),
+      EnrolledComputer.fromJson(computerJson('b' * 64)).statusAt(Duration.zero),
       'No update yet',
     );
   });

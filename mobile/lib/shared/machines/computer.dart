@@ -12,6 +12,8 @@ class EnrolledComputer {
     this.observedAt,
     this.receivedAt,
     this.expiresAt,
+    this.freshUntil,
+    this.expiredWhenRead = false,
   });
 
   final String id;
@@ -25,10 +27,15 @@ class EnrolledComputer {
   final DateTime? observedAt;
   final DateTime? receivedAt;
   final DateTime? expiresAt;
+  final Duration? freshUntil;
+  final bool expiredWhenRead;
 
-  /// A cached report cannot remain fresh after its server-supplied deadline.
-  bool freshAt(DateTime now) =>
-      serverFresh && expiresAt != null && now.isBefore(expiresAt!);
+  /// The server's remaining validity is anchored before the request begins.
+  /// Network time is subtracted conservatively; phone wall-clock skew is irrelevant.
+  bool freshAt(Duration elapsed) =>
+      serverFresh && freshUntil != null && elapsed < freshUntil!;
+  bool expiredAt(Duration elapsed) =>
+      expiredWhenRead || (freshUntil != null && elapsed >= freshUntil!);
 
   String get runtimeLabel => switch (runtime) {
     'hermes' => 'Hermes',
@@ -38,10 +45,10 @@ class EnrolledComputer {
     _ => throw StateError('Unsupported computer runtime'),
   };
 
-  String statusAt(DateTime now) => reportedState == null
+  String statusAt(Duration now) => reportedState == null
       ? 'No update yet'
       : !freshAt(now)
-      ? expiresAt != null && !now.isBefore(expiresAt!)
+      ? expiredAt(now)
             ? 'Update expired'
             : 'Status unavailable'
       : switch (reportedState!) {
@@ -50,7 +57,10 @@ class EnrolledComputer {
           ComputerReportedState.unavailable => 'Unavailable',
         };
 
-  factory EnrolledComputer.fromJson(Map<String, dynamic> json) {
+  factory EnrolledComputer.fromJson(
+    Map<String, dynamic> json, {
+    Duration requestStartedAt = Duration.zero,
+  }) {
     String text(String key) {
       final value = json[key];
       if (value is! String || value.trim().isEmpty) {
@@ -85,6 +95,7 @@ class EnrolledComputer {
     final observed = timestamp('observed_at');
     final received = timestamp('received_at');
     final expires = timestamp('expires_at');
+    final serverNow = timestamp('server_now');
     if (!isComputerId(id) ||
         !RegExp(r'^[0-9a-f]{64}$').hasMatch(owner) ||
         !RegExp(r'^[0-9a-f]{64}$').hasMatch(coordinator) ||
@@ -122,6 +133,12 @@ class EnrolledComputer {
         'Incomplete or unbounded computer observation',
       );
     }
+    final remaining = expires == null || serverNow == null
+        ? null
+        : expires.difference(serverNow);
+    if (remaining != null && remaining > const Duration(seconds: 120)) {
+      throw const FormatException('Unbounded server freshness');
+    }
     return EnrolledComputer(
       id: id,
       ownerPubkey: owner,
@@ -134,6 +151,10 @@ class EnrolledComputer {
       observedAt: observed,
       receivedAt: received,
       expiresAt: expires,
+      freshUntil: fresh && remaining != null && remaining > Duration.zero
+          ? requestStartedAt + remaining
+          : null,
+      expiredWhenRead: remaining != null && remaining <= Duration.zero,
     );
   }
 }

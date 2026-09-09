@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:buzz/features/computers/computers_page.dart';
-import 'package:buzz/features/computers/computer_presentation.dart';
+import 'package:buzz/shared/machines/computer_clock.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/machines/machines_api.dart';
@@ -36,7 +36,7 @@ void main() {
   Future<void> mount(
     WidgetTester tester,
     Future<http.Response> Function(http.Request) handler, {
-    DateTime Function()? clock,
+    Duration Function()? clock,
   }) async {
     container = ProviderContainer(
       overrides: [
@@ -63,6 +63,45 @@ void main() {
     await tester.pump();
   }
 
+  testWidgets('skewed local wall clock cannot extend a fresh report', (
+    tester,
+  ) async {
+    final serverNow = DateTime.utc(2026, 9, 9);
+    var elapsed = const Duration(minutes: 10);
+    await mount(
+      tester,
+      (_) async => page([computerJson(owner, observed: true, now: serverNow)]),
+      clock: () => elapsed,
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining('Reported ready'), findsOneWidget);
+    elapsed += const Duration(seconds: 120);
+    await tester.pump(const Duration(seconds: 120, milliseconds: 2));
+    expect(find.textContaining('Reported ready'), findsNothing);
+    expect(find.textContaining('Update expired'), findsOneWidget);
+  });
+  testWidgets(
+    'detail authorization loss clears the parent private list before back',
+    (tester) async {
+      await mount(
+        tester,
+        (r) async => r.url.path.endsWith(computerId)
+            ? http.Response('{}', 403)
+            : page([computerJson(owner)], computerId),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Office computer'));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('access to this community changed'),
+        findsOneWidget,
+      );
+      await tester.tap(find.byTooltip('Back to Computers'));
+      await tester.pumpAndSettle();
+      expect(find.text('Office computer'), findsNothing);
+      expect(find.text('Load more'), findsNothing);
+    },
+  );
   testWidgets(
     'signed pagination, detail and reload show actual runtime and observation',
     (tester) async {
@@ -117,12 +156,13 @@ void main() {
   testWidgets('cached ready label expires while the screen stays open', (
     tester,
   ) async {
-    var now = DateTime.utc(2026, 9, 9);
+    final now = DateTime.utc(2026, 9, 9);
+    var elapsed = Duration.zero;
     final record = computerJson(owner, observed: true, now: now);
-    await mount(tester, (_) async => page([record]), clock: () => now);
+    await mount(tester, (_) async => page([record]), clock: () => elapsed);
     await tester.pumpAndSettle();
     expect(find.textContaining('Reported ready'), findsOneWidget);
-    now = now.add(const Duration(seconds: 120));
+    elapsed = const Duration(seconds: 120);
     await tester.pump(const Duration(seconds: 120, milliseconds: 2));
     expect(find.textContaining('Update expired'), findsOneWidget);
     expect(find.textContaining('Reported ready'), findsNothing);
@@ -193,7 +233,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Private computer'), findsNothing);
       expect(
-        find.textContaining('No computers have been added'),
+        find.textContaining('You haven’t added any computers'),
         findsOneWidget,
       );
     },

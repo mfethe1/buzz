@@ -107,7 +107,21 @@ mod postgres_tests {
             .as_str()
             .unwrap()
             .starts_with("duplicate:"));
-        assert_eq!(f.request("GET", &path, &f.owner, None).await.1, current);
+        // Only the response clock may advance. Replay must preserve all durable
+        // projection fields, including observation expiry and signed events.
+        let mut replayed = f.request("GET", &path, &f.owner, None).await.1;
+        let mut current = current;
+        assert!(replayed
+            .as_object_mut()
+            .unwrap()
+            .remove("server_now")
+            .is_some());
+        assert!(current
+            .as_object_mut()
+            .unwrap()
+            .remove("server_now")
+            .is_some());
+        assert_eq!(replayed, current);
         for filter in [
             json!({"ids":[enrolled.id.to_hex(),obs.id.to_hex()]}),
             json!({"kinds":[47210,47211]}),

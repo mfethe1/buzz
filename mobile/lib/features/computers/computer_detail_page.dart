@@ -19,11 +19,13 @@ class ComputerDetailPage extends HookConsumerWidget {
     required this.id,
     required this.onBack,
     required this.visible,
+    required this.onAccessLost,
   });
   final MachinesApi api;
   final String id;
   final VoidCallback onBack;
   final bool visible;
+  final ValueChanged<ComputerApiException> onAccessLost;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -32,6 +34,18 @@ class ComputerDetailPage extends HookConsumerWidget {
     // An earlier computer or identity must never remain visible while reading.
     final snapshot = useFuture(future, preserveState: false);
     final computer = snapshot.data;
+    useEffect(() {
+      final error = snapshot.error;
+      if (error is! ComputerApiException ||
+          (error.statusCode != 401 && error.statusCode != 403)) {
+        return null;
+      }
+      var disposed = false;
+      scheduleMicrotask(() {
+        if (!disposed) onAccessLost(error);
+      });
+      return () => disposed = true;
+    }, [snapshot.error]);
     final now = useComputerObservationClock(
       ref,
       computer == null ? [] : [computer],
@@ -137,8 +151,7 @@ class ComputerDetailPage extends HookConsumerWidget {
                   computer.reportedState == null
                       ? 'This computer has been added, but has not sent an update yet.'
                       : !computer.freshAt(now)
-                      ? computer.expiresAt != null &&
-                                !now.isBefore(computer.expiresAt!)
+                      ? computer.expiredAt(now)
                             ? 'The last update has expired. Refresh to check for a new update.'
                             : 'A current status is unavailable. Refresh to check for a new update.'
                       : computer.reportedState ==

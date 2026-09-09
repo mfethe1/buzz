@@ -79,6 +79,56 @@ impl Fixture {
     }
 }
 
+// The response clock advances on every read; every persisted field, freshness
+// decision and signed event must still remain equal after a rejected/replayed write.
+fn without_response_clock(mut value: Value) -> Value {
+    assert!(value
+        .as_object_mut()
+        .unwrap()
+        .remove("server_now")
+        .is_some());
+    value
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn private_machine_projection_supplies_bounded_statement_clock() {
+    let f = Fixture::new().await;
+    let enrollment = f.enrollment();
+    f.db.apply_machine_command(f.community, &enrollment)
+        .await
+        .unwrap();
+    let observation = f.observation(&enrollment, 1, Timestamp::now().as_secs(), &f.coordinator);
+    f.db.apply_machine_command(f.community, &observation)
+        .await
+        .unwrap();
+    let before: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    let detail = f.read().await;
+    let list =
+        f.db.list_machines(f.community, &f.owner.public_key().to_bytes(), None, 1)
+            .await
+            .unwrap();
+    let after: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    for row in [detail, list[0].clone()] {
+        let server_now =
+            chrono::DateTime::parse_from_rfc3339(row["server_now"].as_str().unwrap()).unwrap();
+        let expires =
+            chrono::DateTime::parse_from_rfc3339(row["expires_at"].as_str().unwrap()).unwrap();
+        assert!(server_now >= before && server_now <= after);
+        assert_eq!(row["fresh"], true);
+        let remaining = expires - server_now;
+        assert!(
+            remaining > chrono::Duration::zero() && remaining <= chrono::Duration::seconds(120)
+        );
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn private_machine_atomic_enrollment_duplicate_and_owner_pagination() {
@@ -226,7 +276,10 @@ async fn private_machine_replacements_moves_and_foreign_ownership_roll_back() {
     .await
     .unwrap();
     assert!(absent);
-    assert_eq!(f.read().await, original);
+    assert_eq!(
+        without_response_clock(f.read().await),
+        without_response_clock(original)
+    );
     f.coordinator = original_coordinator;
     f.machine = Uuid::new_v4();
     // The coordinator consents to the proposed new machine, so rejection must
@@ -281,19 +334,31 @@ async fn private_machine_observation_binding_order_expiry_and_replay() {
         .apply_machine_command(f.community, &observation)
         .await
         .unwrap());
-    assert_eq!(f.read().await, first);
+    assert_eq!(
+        without_response_clock(f.read().await),
+        without_response_clock(first.clone())
+    );
     for event in [
         f.observation(&enrollment, 2, now, &f.owner),
         f.observation(&enrollment, 1, now + 1, &f.coordinator),
         f.observation(&enrollment, 2, now - 31, &f.coordinator),
-        f.observation(&enrollment, 2, now + 6, &f.coordinator),
+        // Leave headroom for scheduling across a whole-second boundary.
+        f.observation(
+            &enrollment,
+            2,
+            Timestamp::now().as_secs() + 60,
+            &f.coordinator,
+        ),
     ] {
         assert!(f
             .db
             .apply_machine_command(f.community, &event)
             .await
             .is_err());
-        assert_eq!(f.read().await, first);
+        assert_eq!(
+            without_response_clock(f.read().await),
+            without_response_clock(first.clone())
+        );
     }
     let fake = EventBuilder::new(Kind::Custom(47210), "fake")
         .sign_with_keys(&f.owner)
@@ -305,7 +370,7 @@ async fn private_machine_observation_binding_order_expiry_and_replay() {
         .is_err());
     let new = f.observation(&enrollment, 2, now, &f.coordinator);
     assert!(f.db.apply_machine_command(f.community, &new).await.unwrap());
-    sqlx::query("UPDATE machines SET observed_at=clock_timestamp()-interval '130 seconds',received_at=clock_timestamp()-interval '130 seconds',expires_at=clock_timestamp()-interval '10 seconds' WHERE community_id=$1").bind(f.community.as_uuid()).execute(&f.pool).await.unwrap();
+    sqlx::query("UPDATE machines SET observed_at=statement_timestamp()-interval '130 seconds',received_at=statement_timestamp()-interval '130 seconds',expires_at=statement_timestamp()-interval '10 seconds' WHERE community_id=$1").bind(f.community.as_uuid()).execute(&f.pool).await.unwrap();
     assert_eq!(f.read().await["fresh"], false);
     assert!(!f.db.apply_machine_command(f.community, &new).await.unwrap());
     assert_eq!(f.read().await["fresh"], false);

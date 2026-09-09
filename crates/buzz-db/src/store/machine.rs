@@ -83,7 +83,7 @@ impl Db {
         if !(1..=101).contains(&limit) {
             return Err(DbError::InvalidData("invalid machine limit".into()));
         }
-        let rows = sqlx::query("SELECT m.*, e.signed_event AS enrollment, o.signed_event AS observation, (m.expires_at > clock_timestamp() AND EXISTS(SELECT 1 FROM users u JOIN users owner ON owner.community_id=u.community_id AND owner.pubkey=m.owner_pubkey WHERE u.community_id=m.community_id AND u.pubkey=m.coordinator_pubkey AND u.agent_owner_pubkey=m.owner_pubkey AND u.machine_id=m.machine_id::text AND u.agent_type=m.runtime AND u.deactivated_at IS NULL AND owner.deactivated_at IS NULL)) AS fresh FROM machines m JOIN machine_control_events e ON e.community_id=m.community_id AND e.event_id=m.registration_event_id LEFT JOIN machine_control_events o ON o.community_id=m.community_id AND o.event_id=m.observation_event_id WHERE m.community_id=$1 AND m.owner_pubkey=$2 AND ($3::uuid IS NULL OR m.machine_id>$3) ORDER BY m.machine_id LIMIT $4")
+        let rows = sqlx::query("SELECT m.*, statement_timestamp() AS server_now, e.signed_event AS enrollment, o.signed_event AS observation, (m.expires_at > statement_timestamp() AND EXISTS(SELECT 1 FROM users u JOIN users owner ON owner.community_id=u.community_id AND owner.pubkey=m.owner_pubkey WHERE u.community_id=m.community_id AND u.pubkey=m.coordinator_pubkey AND u.agent_owner_pubkey=m.owner_pubkey AND u.machine_id=m.machine_id::text AND u.agent_type=m.runtime AND u.deactivated_at IS NULL AND owner.deactivated_at IS NULL)) AS fresh FROM machines m JOIN machine_control_events e ON e.community_id=m.community_id AND e.event_id=m.registration_event_id LEFT JOIN machine_control_events o ON o.community_id=m.community_id AND o.event_id=m.observation_event_id WHERE m.community_id=$1 AND m.owner_pubkey=$2 AND ($3::uuid IS NULL OR m.machine_id>$3) ORDER BY m.machine_id LIMIT $4")
             .bind(community.as_uuid()).bind(owner).bind(after).bind(limit).fetch_all(&self.pool).await?;
         rows.iter().map(machine_json).collect()
     }
@@ -96,7 +96,7 @@ impl Db {
         owner: &[u8],
         machine: Uuid,
     ) -> Result<Option<Value>> {
-        let row = sqlx::query("SELECT m.*, e.signed_event AS enrollment, o.signed_event AS observation, (m.expires_at > clock_timestamp() AND EXISTS(SELECT 1 FROM users u JOIN users owner ON owner.community_id=u.community_id AND owner.pubkey=m.owner_pubkey WHERE u.community_id=m.community_id AND u.pubkey=m.coordinator_pubkey AND u.agent_owner_pubkey=m.owner_pubkey AND u.machine_id=m.machine_id::text AND u.agent_type=m.runtime AND u.deactivated_at IS NULL AND owner.deactivated_at IS NULL)) AS fresh FROM machines m JOIN machine_control_events e ON e.community_id=m.community_id AND e.event_id=m.registration_event_id LEFT JOIN machine_control_events o ON o.community_id=m.community_id AND o.event_id=m.observation_event_id WHERE m.community_id=$1 AND m.owner_pubkey=$2 AND m.machine_id=$3")
+        let row = sqlx::query("SELECT m.*, statement_timestamp() AS server_now, e.signed_event AS enrollment, o.signed_event AS observation, (m.expires_at > statement_timestamp() AND EXISTS(SELECT 1 FROM users u JOIN users owner ON owner.community_id=u.community_id AND owner.pubkey=m.owner_pubkey WHERE u.community_id=m.community_id AND u.pubkey=m.coordinator_pubkey AND u.agent_owner_pubkey=m.owner_pubkey AND u.machine_id=m.machine_id::text AND u.agent_type=m.runtime AND u.deactivated_at IS NULL AND owner.deactivated_at IS NULL)) AS fresh FROM machines m JOIN machine_control_events e ON e.community_id=m.community_id AND e.event_id=m.registration_event_id LEFT JOIN machine_control_events o ON o.community_id=m.community_id AND o.event_id=m.observation_event_id WHERE m.community_id=$1 AND m.owner_pubkey=$2 AND m.machine_id=$3")
             .bind(community.as_uuid()).bind(owner).bind(machine).fetch_optional(&self.pool).await?;
         row.as_ref().map(machine_json).transpose()
     }
@@ -112,6 +112,7 @@ fn machine_json(row: &sqlx::postgres::PgRow) -> Result<Value> {
         "registration_event_id": hex::encode(row.try_get::<Vec<u8>,_>("registration_event_id")?),
         "observation_sequence": row.try_get::<i64,_>("observation_sequence")?,
         "reported_state": row.try_get::<Option<String>,_>("observed_state")?,
+        "server_now": row.try_get::<chrono::DateTime<chrono::Utc>,_>("server_now")?,
         "fresh": row.try_get::<Option<bool>,_>("fresh")?.unwrap_or(false),
         "observed_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("observed_at")?,
         "received_at": row.try_get::<Option<chrono::DateTime<chrono::Utc>>,_>("received_at")?,

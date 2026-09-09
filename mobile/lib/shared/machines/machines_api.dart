@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import '../community/community_provider.dart';
 import '../relay/relay.dart';
 import 'computer.dart';
+import 'computer_clock.dart';
 
 /// Read-only owner API. No development-auth fallback or execution operation.
 class MachinesApi {
@@ -13,18 +14,22 @@ class MachinesApi {
     required http.Client httpClient,
     required String baseUrl,
     required String nsec,
+    Duration Function() elapsed = computerElapsed,
   }) : _http = httpClient,
        _baseUrl = baseUrl,
-       _nsec = nsec;
+       _nsec = nsec,
+       _elapsed = elapsed;
 
   final http.Client _http;
   final String _baseUrl;
   final String _nsec;
+  final Duration Function() _elapsed;
 
   Future<ComputerPage> list({String? after, int limit = 20}) async {
     if (limit < 1 || limit > 100 || (after != null && !isComputerId(after))) {
       throw ArgumentError('Invalid computer page');
     }
+    final requestStartedAt = _elapsed();
     final object = await _get('/api/machines', {
       'limit': '$limit',
       'after': ?after,
@@ -36,25 +41,34 @@ class MachinesApi {
       throw const FormatException('Invalid computer page');
     }
     return ComputerPage(
-      computers: List.unmodifiable(rows.map(_computer)),
+      computers: List.unmodifiable(
+        rows.map((row) => _computer(row, requestStartedAt)),
+      ),
       nextCursor: next as String?,
     );
   }
 
   Future<EnrolledComputer> get(String id) async {
     if (!isComputerId(id)) throw ArgumentError('Invalid computer ID');
-    final computer = _computer(await _get('/api/machines/$id'));
+    final requestStartedAt = _elapsed();
+    final computer = _computer(
+      await _get('/api/machines/$id'),
+      requestStartedAt,
+    );
     if (computer.id != id) {
       throw const FormatException('Computer identity changed');
     }
     return computer;
   }
 
-  EnrolledComputer _computer(Object? raw) {
+  EnrolledComputer _computer(Object? raw, Duration requestStartedAt) {
     if (raw is! Map<String, dynamic>) {
       throw const FormatException('Invalid computer');
     }
-    final computer = EnrolledComputer.fromJson(raw);
+    final computer = EnrolledComputer.fromJson(
+      raw,
+      requestStartedAt: requestStartedAt,
+    );
     if (computer.ownerPubkey != pubkeyFromNsec(_nsec)) {
       throw const FormatException(
         'Computer owner does not match this identity',
@@ -116,5 +130,6 @@ final machinesApiProvider = Provider<MachinesApi?>((ref) {
     httpClient: ref.watch(machinesHttpClientProvider),
     baseUrl: config.baseUrl,
     nsec: nsec,
+    elapsed: ref.watch(computerClockProvider),
   );
 });

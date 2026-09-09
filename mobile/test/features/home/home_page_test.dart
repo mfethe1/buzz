@@ -159,7 +159,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(ComputersPage), findsOneWidget);
       expect(
-        find.textContaining('No computers have been added'),
+        find.textContaining('You haven’t added any computers'),
         findsOneWidget,
       );
       for (final label in ['Home', 'Activity', 'Search']) {

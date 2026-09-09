@@ -46,6 +46,15 @@ class ComputerListQuery extends ValueNotifier<ComputerListState> {
     return _active ??= Future<void>.microtask(() => _run(append: false));
   }
 
+  /// A denied detail read revokes this cached list too, including pending pages.
+  void invalidateAccess(ComputerApiException error) {
+    if (_disposed) return;
+    _generation++;
+    _refreshRequested = false;
+    _seenCursors.clear();
+    value = ComputerListState(loading: false, error: error);
+  }
+
   /// Loads only the next requested page. Failure preserves its retry cursor.
   Future<void> loadMore() {
     if (_disposed || _active != null || value.nextCursor == null) {
