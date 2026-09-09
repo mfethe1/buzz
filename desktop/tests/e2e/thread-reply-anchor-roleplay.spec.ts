@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/thread-reply-anchor-roleplay";
@@ -155,7 +156,7 @@ async function screenshotThreadPanel(
   const panel = page.getByTestId("message-thread-panel");
   await expect(panel).toBeVisible();
   await page.mouse.move(360, 24);
-  await page.waitForTimeout(100);
+  await waitForAnimations(page);
   await panel.screenshot({ path });
 }
 
@@ -202,8 +203,18 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
 
     await openThread(page);
     await expandReply(page, humanReply.id);
-    await expect(page.getByText("Nora: adding context")).toBeVisible();
-    await expect(page.getByText("Pinky: Got it")).toBeVisible();
+    // Exercise the visible reply while the same text is also announced.
+    await expect(
+      page.getByTestId("message-timeline-announcements"),
+    ).toContainText("Nora: adding context");
+    await expect(
+      page
+        .getByTestId("message-thread-replies")
+        .getByText("Nora: adding context"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("message-thread-replies").getByText("Pinky: Got it"),
+    ).toBeVisible();
     await expect(
       page.getByTestId("message-thread-replies").getByTestId("message-row"),
     ).toHaveCount(2);
@@ -253,8 +264,14 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
     );
 
     await openThread(page);
-    await expect(page.getByText("Nora: adding context")).toBeVisible();
-    await expect(page.getByText("Pinky: Got it")).toBeVisible();
+    await expect(
+      page
+        .getByTestId("message-thread-replies")
+        .getByText("Nora: adding context"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("message-thread-replies").getByText("Pinky: Got it"),
+    ).toBeVisible();
     await expect(
       page.getByTestId("message-thread-replies").getByTestId("message-row"),
     ).toHaveCount(2);
@@ -292,7 +309,11 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
     );
 
     await openThread(page);
-    await expect(page.getByText("Pinky: Starting the audit")).toBeVisible();
+    await expect(
+      page
+        .getByTestId("message-thread-replies")
+        .getByText("Pinky: Starting the audit"),
+    ).toBeVisible();
     await expect(
       page.getByTestId("message-thread-replies").getByTestId("message-row"),
     ).toHaveCount(1);
@@ -339,8 +360,14 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
 
     await openThread(page);
     await expandReply(page, brainReply.id);
-    await expect(page.getByText("Brain: Check the anchor")).toBeVisible();
-    await expect(page.getByText("Pinky: Good catch")).toBeVisible();
+    await expect(
+      page
+        .getByTestId("message-thread-replies")
+        .getByText("Brain: Check the anchor"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("message-thread-replies").getByText("Pinky: Good catch"),
+    ).toBeVisible();
     await expect(
       page.getByTestId("message-thread-replies").getByTestId("message-row"),
     ).toHaveCount(2);
