@@ -75,6 +75,13 @@ mod postgres_tests {
         );
     }
 
+    async fn expect_community_sync(socket: &mut Socket) {
+        assert_eq!(
+            next_json(socket).await,
+            json!(["BUZZ_TASKS_SYNC_REQUIRED", null])
+        );
+    }
+
     async fn expect_no_notification(socket: &mut Socket) {
         // Heartbeats are independent of task activity. Reject every application
         // frame and unexpected close while servicing the ordinary Ping/Pong flow.
@@ -99,6 +106,32 @@ mod postgres_tests {
         }
     }
 
+    struct Background(Vec<tokio::task::JoinHandle<()>>);
+    impl Drop for Background {
+        fn drop(&mut self) {
+            for handle in &self.0 {
+                handle.abort();
+            }
+        }
+    }
+
+    async fn start_conn_control(state: Arc<crate::state::AppState>) -> Background {
+        let mut rx = state.pubsub.subscribe_conn_control();
+        let subscriber = {
+            let pubsub = state.pubsub.clone();
+            tokio::spawn(async move { pubsub.run_conn_control_subscriber().await })
+        };
+        let consumer = tokio::spawn(async move {
+            while let Ok(scoped) = rx.recv().await {
+                state.apply_conn_control(scoped).await;
+            }
+        });
+        // The production subscriber owns a dedicated Redis connection but has
+        // no readiness callback. Bound startup before issuing the first write.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Background(vec![subscriber, consumer])
+    }
+
     async fn serve(f: &mut Fixture) -> Server {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -116,6 +149,244 @@ mod postgres_tests {
         Server(tokio::spawn(async move {
             axum::serve(listener, router).await.expect("serve");
         }))
+    }
+
+    async fn peer_state(f: &Fixture) -> Arc<crate::state::AppState> {
+        let config = (*f.state.config).clone();
+        let redis_pool = f.state.redis_pool.clone();
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("peer pubsub"),
+        );
+        let audit = buzz_audit::AuditService::new(f.pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(f.pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            f.state.db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("peer media");
+        let (mut state, _audit_shutdown) = crate::state::AppState::new(
+            config,
+            f.state.db.clone(),
+            redis_pool.clone(),
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+        state.nip98_replay = Arc::new(buzz_pubsub::RedisNip98ReplayGuard::new(redis_pool));
+        Arc::new(state)
+    }
+
+    async fn serve_state(state: Arc<crate::state::AppState>) -> (Server, String) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let base = format!("http://{}", listener.local_addr().expect("address"));
+        let router = crate::router::build_router(state);
+        let server = Server(tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve");
+        }));
+        (server, base)
+    }
+
+    async fn request_at(
+        f: &Fixture,
+        base: &str,
+        method: &str,
+        path: &str,
+        keys: &Keys,
+        body: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let body_bytes = body.map(str::as_bytes).unwrap_or_default();
+        let auth = super::super::route_authz::nip98_auth_header(
+            keys,
+            method,
+            &format!("https://{}{path}", f.host),
+            body_bytes,
+        );
+        let response = reqwest::Client::new()
+            .request(method.parse().expect("method"), format!("{base}{path}"))
+            .header(axum::http::header::HOST, &f.host)
+            .header(axum::http::header::AUTHORIZATION, auth)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(body_bytes.to_vec())
+            .send()
+            .await
+            .expect("HTTP response");
+        let status = response.status();
+        let json = response.json().await.expect("HTTP JSON response");
+        (status, json)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn community_tasks_and_channel_tasks_refresh_another_relay_instance() {
+        let mut f = fixture().await.expect("Postgres and Redis fixture");
+        let other = fixture().await.expect("second isolated community");
+        let _server_a = serve(&mut f).await;
+        let peer = peer_state(&f).await;
+        let _peer_conn_control = start_conn_control(peer.clone()).await;
+        let (_server_b, base_b) = serve_state(peer).await;
+
+        let mut owner = connect(&base_b, &f.host, Some(&f.owner)).await;
+        let mut outsider = connect(&base_b, &f.host, Some(&f.outsider)).await;
+        let mut unauthenticated = connect(&base_b, &f.host, None).await;
+        let mut foreign = connect(&base_b, &other.host, Some(&other.owner)).await;
+
+        let community_body = json!({"title":"community task from relay A"}).to_string();
+        let (status, created) = f
+            .request("POST", "/api/tasks", &f.owner, Some(&community_body))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        expect_community_sync(&mut owner).await;
+        expect_community_sync(&mut outsider).await;
+        expect_no_notification(&mut unauthenticated).await;
+        expect_no_notification(&mut foreign).await;
+        let community_path = format!(
+            "/api/tasks/{}",
+            created["id"].as_str().expect("community task id")
+        );
+        let (status, detail) =
+            request_at(&f, &base_b, "GET", &community_path, &f.owner, None).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["task"]["title"], "community task from relay A");
+
+        let (status, updated) = f
+            .request(
+                "PATCH",
+                &community_path,
+                &f.owner,
+                Some(r#"{"priority":4,"expected_revision":0}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        expect_community_sync(&mut owner).await;
+        expect_community_sync(&mut outsider).await;
+        let community_event_path = format!("{community_path}/events");
+        let (status, event) = f
+            .request(
+                "POST",
+                &community_event_path,
+                &f.owner,
+                Some(r#"{"body":"community event from relay A"}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{event}");
+        expect_community_sync(&mut owner).await;
+        expect_community_sync(&mut outsider).await;
+        let (status, detail) =
+            request_at(&f, &base_b, "GET", &community_path, &f.owner, None).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["task"]["revision"], 1);
+        assert!(detail["events"].as_array().is_some_and(|events| events
+            .iter()
+            .any(|event| event["body"] == "community event from relay A")));
+
+        let channel_body = json!({
+            "title":"channel task from relay A",
+            "channel_id":f.private_channel_id,
+        })
+        .to_string();
+        let (status, channel_task) = f
+            .request("POST", "/api/tasks", &f.owner, Some(&channel_body))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{channel_task}");
+        expect_sync(&mut owner, f.private_channel_id).await;
+        expect_no_notification(&mut outsider).await;
+
+        f.state
+            .db
+            .add_member(
+                f.community,
+                f.private_channel_id,
+                &f.outsider.public_key().to_bytes(),
+                buzz_core::channel::MemberRole::Member,
+                Some(&f.owner.public_key().to_bytes()),
+            )
+            .await
+            .expect("grant private-channel membership");
+        let channel_path = format!(
+            "/api/tasks/{}",
+            channel_task["id"].as_str().expect("channel task id")
+        );
+        let (status, updated) = f
+            .request(
+                "PATCH",
+                &channel_path,
+                &f.owner,
+                Some(r#"{"priority":2,"expected_revision":0}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        expect_sync(&mut owner, f.private_channel_id).await;
+        expect_sync(&mut outsider, f.private_channel_id).await;
+
+        f.state
+            .db
+            .remove_member(
+                f.community,
+                f.private_channel_id,
+                &f.outsider.public_key().to_bytes(),
+                &f.owner.public_key().to_bytes(),
+            )
+            .await
+            .expect("revoke private-channel membership");
+        let channel_event_path = format!("{channel_path}/events");
+        let (status, event) = f
+            .request(
+                "POST",
+                &channel_event_path,
+                &f.owner,
+                Some(r#"{"body":"private event after revocation"}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{event}");
+        expect_sync(&mut owner, f.private_channel_id).await;
+        expect_no_notification(&mut outsider).await;
+
+        f.state
+            .db
+            .remove_relay_member(f.community, &f.outsider.public_key().to_hex())
+            .await
+            .expect("revoke relay membership");
+        let (status, updated) = f
+            .request(
+                "PATCH",
+                &community_path,
+                &f.owner,
+                Some(r#"{"priority":5,"expected_revision":1}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        expect_community_sync(&mut owner).await;
+        expect_no_notification(&mut outsider).await;
+
+        let tenant = buzz_core::TenantContext::resolved(f.community, &f.host);
+        let duplicate = buzz_pubsub::conn_control::ConnControl::InvalidateTasks {
+            channel_id: None,
+            origin_generation: f.state.task_invalidation_generation,
+        };
+        f.state
+            .pubsub
+            .publish_conn_control(&tenant, &duplicate)
+            .await
+            .expect("first duplicate advisory");
+        f.state
+            .pubsub
+            .publish_conn_control(&tenant, &duplicate)
+            .await
+            .expect("second duplicate advisory");
+        expect_community_sync(&mut owner).await;
+        expect_community_sync(&mut owner).await;
+        expect_no_notification(&mut outsider).await;
+        expect_no_notification(&mut unauthenticated).await;
+        expect_no_notification(&mut foreign).await;
     }
 
     #[tokio::test]

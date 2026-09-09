@@ -136,7 +136,6 @@ async fn unknown_control_before_auth_ok_still_rejects_connection() {
 fn malformed_task_advisories_remain_protocol_errors() {
     for frame in [
         json!(["BUZZ_TASKS_SYNC_REQUIRED"]),
-        json!(["BUZZ_TASKS_SYNC_REQUIRED", null]),
         json!(["BUZZ_TASKS_SYNC_REQUIRED", "not-a-channel-id"]),
         json!(["BUZZ_TASKS_SYNC_REQUIRED", Uuid::new_v4(), "extra"]),
     ] {
@@ -148,4 +147,12 @@ fn malformed_task_advisories_remain_protocol_errors() {
             "malformed advisory was accepted: {frame}"
         );
     }
+}
+
+#[test]
+fn community_task_advisory_is_a_compatible_control_frame() {
+    assert!(matches!(
+        parse_relay_message(r#"["BUZZ_TASKS_SYNC_REQUIRED",null]"#),
+        Ok(RelayMessage::TasksSyncRequired)
+    ));
 }

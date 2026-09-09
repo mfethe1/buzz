@@ -74,6 +74,13 @@ class WorkPage extends HookConsumerWidget {
       );
       return listener.dispose;
     }, [query, visible]);
+    useEffect(() {
+      if (!visible) return null;
+      final timer = Timer.periodic(const Duration(seconds: 30), (_) {
+        unawaited(query.refresh());
+      });
+      return timer.cancel;
+    }, [query, visible]);
 
     return Scaffold(
       backgroundColor: context.colors.surface,

@@ -1055,25 +1055,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(scoped) => match scoped.command {
-                        buzz_pubsub::conn_control::ConnControl::DisconnectCommunity => {
-                            state_for_conn_ctrl
-                                .community_connections
-                                .disconnect_community(scoped.community_id);
-                        }
-                        buzz_pubsub::conn_control::ConnControl::DisconnectPubkey {
-                            pubkey,
-                            event_id,
-                            reason,
-                        } => {
-                            state_for_conn_ctrl.conn_manager.disconnect_pubkey(
-                                scoped.community_id,
-                                &pubkey,
-                                &event_id,
-                                &reason,
-                            );
-                        }
-                    },
+                    Ok(scoped) => state_for_conn_ctrl.apply_conn_control(scoped).await,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         metrics::counter!("buzz_conn_control_lag_total").increment(n);
                         tracing::warn!("Connection-control consumer lagged by {n} messages");

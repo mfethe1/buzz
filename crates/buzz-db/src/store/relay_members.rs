@@ -664,6 +664,17 @@ pub async fn backfill_from_allowlist(pool: &PgPool, community: CommunityId) -> R
 }
 
 impl Db {
+    /// Check relay membership on the writer for immediate authorization
+    /// decisions that must observe a just-committed revocation.
+    #[datastore_span(name = "is_relay_member_writer", system = "postgresql")]
+    pub async fn is_relay_member_writer(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+    ) -> Result<bool> {
+        is_relay_member(&self.pool, community, pubkey).await
+    }
+
     /// Returns `true` if `pubkey` (64-char hex) is a member of `community`.
     ///
     /// Replica-routed on the bounded arm — the one PERMISSION read routed by

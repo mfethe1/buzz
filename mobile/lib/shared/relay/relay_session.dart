@@ -673,8 +673,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       case 'BUZZ_TASKS_SYNC_REQUIRED':
         if (_socketConnected &&
             data.length == 2 &&
-            data[1] is String &&
-            Uuid.isValidUUID(fromString: data[1] as String)) {
+            (data[1] == null ||
+                (data[1] is String &&
+                    Uuid.isValidUUID(fromString: data[1] as String)))) {
           _invalidateTasks?.call();
         }
     }

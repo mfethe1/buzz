@@ -1,6 +1,8 @@
 //! Task HTTP writes invalidate live clients after the durable mutation commits.
 
 use super::{AppState, CommunityId, ConnectionManager, HashMap, Uuid, WsMessage};
+use buzz_core::TenantContext;
+use buzz_pubsub::conn_control::ConnControl;
 use std::time::Duration;
 
 impl ConnectionManager {
@@ -53,42 +55,120 @@ impl ConnectionManager {
 }
 
 impl AppState {
-    /// Notify this relay's authenticated, channel-visible sockets after a commit.
-    ///
-    /// This advisory frame carries only the channel UUID. Permission checks read
-    /// the writer, never cached positive membership. No task data is broadcast.
-    /// Clients refetch authorized state on the frame and after reconnect; missed
-    /// notifications (including across relay nodes) are recovered by that refetch.
-    /// TODO: propagate invalidations between relay instances for live cross-node refresh.
-    /// The whole fanout has a fixed deadline and runs inside the HTTP request,
-    /// avoiding an unbounded detached task per write. A committed write remains
-    /// successful if the advisory delivery times out or permission lookup fails.
-    pub(crate) async fn invalidate_tasks_for_channel(
+    async fn task_recipient_is_relay_member(
         &self,
         community_id: CommunityId,
-        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<bool, buzz_db::DbError> {
+        if !self.config.require_relay_membership {
+            return Ok(true);
+        }
+        if self
+            .db
+            .is_relay_member_writer(community_id, &hex::encode(pubkey))
+            .await?
+        {
+            return Ok(true);
+        }
+        if !self.config.allow_nip_oa_auth {
+            return Ok(false);
+        }
+        let owner = self
+            .db
+            .get_agent_channel_policy(community_id, pubkey)
+            .await?
+            .and_then(|(_, owner)| owner);
+        match owner {
+            Some(owner) => {
+                self.db
+                    .is_relay_member_writer(community_id, &hex::encode(owner))
+                    .await
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Notify local and remote authenticated sockets after a committed task write.
+    ///
+    /// Channel advisories carry only their UUID and use a fresh writer-backed
+    /// access read, never a cached allow. Community advisories carry `null`.
+    /// No task contents or task identifiers are broadcast. Both local fanout
+    /// and Redis publication are bounded; advisory failure cannot turn a
+    /// committed HTTP write into an error.
+    pub(crate) async fn invalidate_tasks(
+        &self,
+        community_id: CommunityId,
+        channel_id: Option<Uuid>,
+    ) {
+        self.deliver_task_invalidation(community_id, channel_id)
+            .await;
+
+        let tenant = TenantContext::resolved(community_id, "task-invalidation.internal");
+        let command = ConnControl::InvalidateTasks {
+            channel_id,
+            origin_generation: self.task_invalidation_generation,
+        };
+        match tokio::time::timeout(
+            Duration::from_secs(1),
+            self.pubsub.publish_conn_control(&tenant, &command),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%community_id, %error, "task invalidation publish failed");
+                metrics::counter!("buzz_tasks_invalidation_publish_errors_total").increment(1);
+            }
+            Err(_) => {
+                tracing::warn!(%community_id, "task invalidation publish timed out");
+                metrics::counter!("buzz_tasks_invalidation_publish_timeouts_total").increment(1);
+            }
+        }
+    }
+
+    /// Apply a task invalidation only to sockets held by this relay process.
+    /// Cross-node consumers call this without re-publishing.
+    pub async fn deliver_task_invalidation(
+        &self,
+        community_id: CommunityId,
+        channel_id: Option<Uuid>,
     ) {
         let recipients = self.conn_manager.task_recipients(community_id);
         let fanout = async {
             let frame = WsMessage::Text(
-                crate::protocol::RelayMessage::tasks_sync_required(&channel_id).into(),
+                crate::protocol::RelayMessage::tasks_sync_required(channel_id.as_ref()).into(),
             );
             for (pubkey, connections) in recipients {
-                let channels = match self
-                    .db
-                    .get_accessible_channel_ids(community_id, &pubkey)
+                match self
+                    .task_recipient_is_relay_member(community_id, &pubkey)
                     .await
                 {
-                    Ok(channels) => channels,
+                    Ok(true) => {}
+                    Ok(false) => continue,
                     Err(error) => {
-                        tracing::warn!(%community_id, %error, "task invalidation access lookup failed");
+                        tracing::warn!(%community_id, %error, "task invalidation relay membership lookup failed");
                         metrics::counter!("buzz_tasks_invalidation_access_errors_total")
                             .increment(1);
                         continue;
                     }
-                };
-                if !channels.contains(&channel_id) {
-                    continue;
+                }
+                if let Some(channel_id) = channel_id {
+                    let channels = match self
+                        .db
+                        .get_accessible_channel_ids(community_id, &pubkey)
+                        .await
+                    {
+                        Ok(channels) => channels,
+                        Err(error) => {
+                            tracing::warn!(%community_id, %error, "task invalidation access lookup failed");
+                            metrics::counter!("buzz_tasks_invalidation_access_errors_total")
+                                .increment(1);
+                            continue;
+                        }
+                    };
+                    if !channels.contains(&channel_id) {
+                        continue;
+                    }
                 }
                 for connection_id in connections {
                     self.conn_manager.send_task_invalidation(

@@ -806,6 +806,9 @@ pub struct AppState {
     /// admissions when an in-memory audio room is recreated at the same roster
     /// revision after a restart. Mesh rooms use their Redis-fenced generation.
     pub huddle_liveness_generation: Uuid,
+    /// Per-process generation used to suppress Redis task-invalidation echoes
+    /// after this relay has already delivered the advisory locally.
+    pub task_invalidation_generation: Uuid,
 
     /// Recently-published event IDs for local-echo deduplication, keyed by
     /// `(community_id, event_id)`. Events fanned out in-process are added here;
@@ -1018,6 +1021,7 @@ impl AppState {
             workflow_engine,
             relay_keypair,
             huddle_liveness_generation: Uuid::new_v4(),
+            task_invalidation_generation: Uuid::new_v4(),
 
             local_event_ids: Arc::new(
                 moka::sync::Cache::builder()
@@ -1301,6 +1305,39 @@ impl AppState {
             }
             CacheInvalidation::ChannelDeleted => {
                 self.invalidate_channel_deleted_local(community_id);
+            }
+        }
+    }
+
+    /// Apply one community-scoped cross-pod connection command locally.
+    /// Received task invalidations are generation-fenced so a publisher does
+    /// not redeliver its own already-applied advisory.
+    pub async fn apply_conn_control(&self, scoped: buzz_pubsub::conn_control::ScopedConnControl) {
+        match scoped.command {
+            ConnControl::InvalidateTasks {
+                channel_id,
+                origin_generation,
+            } => {
+                if origin_generation != self.task_invalidation_generation {
+                    self.deliver_task_invalidation(scoped.community_id, channel_id)
+                        .await;
+                }
+            }
+            ConnControl::DisconnectCommunity => {
+                self.community_connections
+                    .disconnect_community(scoped.community_id);
+            }
+            ConnControl::DisconnectPubkey {
+                pubkey,
+                event_id,
+                reason,
+            } => {
+                self.conn_manager.disconnect_pubkey(
+                    scoped.community_id,
+                    &pubkey,
+                    &event_id,
+                    &reason,
+                );
             }
         }
     }

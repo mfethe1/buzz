@@ -2,9 +2,9 @@
 //!
 //! Under horizontal scaling a member's live connections may land on any pod,
 //! so a moderation action taken on one pod (a ban) must reach the pod holding
-//! the victim's socket. This module carries connection-control intents — today
-//! only "disconnect this pubkey" — to every pod, which each apply locally
-//! against their own [`crate::ConnectionManager`].
+//! the victim's socket. This module carries connection-control intents to every
+//! pod, which each apply locally against their own live connections. Task
+//! invalidations are idempotent advisories; disconnects are imperative.
 //!
 //! This is deliberately a **separate** channel from `cache_invalidation`: a
 //! cache-key drop is a pure, idempotent hint (the DB is re-read on the next
@@ -54,6 +54,16 @@ pub fn parse_conn_control_channel(channel: &str) -> Option<CommunityId> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op")]
 pub enum ConnControl {
+    /// Tell authorized clients to refetch task state. `None` means the
+    /// community-wide task list changed; `Some` identifies a channel scope.
+    /// `origin_generation` lets the publishing relay suppress its Redis echo
+    /// after already delivering locally.
+    InvalidateTasks {
+        /// Channel whose tasks changed, or community-wide when absent.
+        channel_id: Option<Uuid>,
+        /// Per-process generation of the publishing relay.
+        origin_generation: Uuid,
+    },
     /// Disconnect every live socket bound to the carrying community.
     DisconnectCommunity,
     /// Disconnect every live connection authenticated as `pubkey` in the
@@ -225,5 +235,19 @@ mod tests {
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert_eq!(serde_json::from_str::<ConnControl>(&json).unwrap(), cmd);
+    }
+
+    #[test]
+    fn task_invalidation_scopes_roundtrip_without_task_content() {
+        for channel_id in [None, Some(Uuid::from_u128(0x1234))] {
+            let cmd = ConnControl::InvalidateTasks {
+                channel_id,
+                origin_generation: Uuid::from_u128(0x5678),
+            };
+            let json = serde_json::to_string(&cmd).unwrap();
+            assert!(!json.contains("title"));
+            assert!(!json.contains("task_id"));
+            assert_eq!(serde_json::from_str::<ConnControl>(&json).unwrap(), cmd);
+        }
     }
 }

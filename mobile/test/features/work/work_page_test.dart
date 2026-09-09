@@ -160,6 +160,29 @@ void main() {
       expect(find.text('After refresh'), findsOneWidget);
     },
   );
+
+  testWidgets(
+    'visible Work recovers a missed task advisory within 30 seconds',
+    (tester) async {
+      var current = 'Before missed advisory';
+      var reads = 0;
+      await mount(tester, (request) async {
+        reads++;
+        return page([task(current, revision: reads - 1)]);
+      });
+      expect(find.text('Before missed advisory'), findsOneWidget);
+      expect(reads, 1);
+
+      current = 'After missed advisory';
+      await tester.pump(const Duration(seconds: 30));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Before missed advisory'), findsNothing);
+      expect(find.text('After missed advisory'), findsOneWidget);
+      expect(reads, 2);
+    },
+  );
+
   testWidgets(
     'creates an assigned task without starting execution, then opens its real detail',
     (tester) async {

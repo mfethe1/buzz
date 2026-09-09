@@ -3925,8 +3925,13 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
             Ok(RelayMessage::Auth { challenge })
         }
         "BUZZ_TASKS_SYNC_REQUIRED" => {
-            let channel_id = arr.get(1).and_then(Value::as_str);
-            if arr.len() != 2 || channel_id.and_then(|id| Uuid::parse_str(id).ok()).is_none() {
+            let valid_scope = matches!(arr.get(1), Some(Value::Null))
+                || arr
+                    .get(1)
+                    .and_then(Value::as_str)
+                    .and_then(|id| Uuid::parse_str(id).ok())
+                    .is_some();
+            if arr.len() != 2 || !valid_scope {
                 return Err(RelayError::UnexpectedMessage(text.to_string()));
             }
             Ok(RelayMessage::TasksSyncRequired)
