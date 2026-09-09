@@ -4280,9 +4280,11 @@ mod tests {
     /// Run `initialize` against a script that replies with `init_result` as
     /// the JSON-RPC result, and return the resulting `steering_supported`.
     async fn steering_supported_after_initialize(init_result: &str) -> bool {
+        // Keep the shell itself waiting for teardown without an idle descendant
+        // that can retain the test process's inherited output handles.
         let script = format!(
             "read -r _init; printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{result}}}'; \
-             sleep 5",
+             read -r _done",
             result = init_result,
         );
         let mut client = spawn_script(&script).await;
@@ -4290,7 +4292,17 @@ mod tests {
             .initialize()
             .await
             .expect("initialize should succeed");
-        client.steering_supported()
+        let supported = client.steering_supported();
+        client.shutdown().await;
+        assert!(
+            client
+                .child
+                .try_wait()
+                .expect("fixture wait must succeed")
+                .is_some(),
+            "initialize fixture must be reaped before returning"
+        );
+        supported
     }
 
     /// Test 1a: an adapter advertising `_meta.steering.supported: true`
@@ -4339,7 +4351,7 @@ mod tests {
     async fn load_session_supported_after_initialize(init_result: &str) -> bool {
         let script = format!(
             "read -r _init; printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{result}}}'; \\
-             sleep 5",
+             read -r _done",
             result = init_result,
         );
         let mut client = spawn_script(&script).await;
@@ -4347,7 +4359,17 @@ mod tests {
             .initialize()
             .await
             .expect("initialize should succeed");
-        client.load_session_supported()
+        let supported = client.load_session_supported();
+        client.shutdown().await;
+        assert!(
+            client
+                .child
+                .try_wait()
+                .expect("fixture wait must succeed")
+                .is_some(),
+            "initialize fixture must be reaped before returning"
+        );
+        supported
     }
 
     #[tokio::test]
