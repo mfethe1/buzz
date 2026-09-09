@@ -164,11 +164,13 @@ class ChannelsPage extends HookConsumerWidget {
     required this.onSettingsTransitionProgress,
     this.tabReselection,
     this.onOpenWork,
+    this.onOpenComputers,
     super.key,
   });
 
   final WidgetBuilder settingsPageBuilder;
   final VoidCallback? onOpenWork;
+  final VoidCallback? onOpenComputers;
 
   /// Reports Settings route progress so its foreground and Home's background
   /// render from the same timeline.
@@ -368,6 +370,7 @@ class ChannelsPage extends HookConsumerWidget {
       ),
       body: _ChannelsBody(
         onOpenWork: onOpenWork,
+        onOpenComputers: onOpenComputers,
         channels: channels,
         channelsAsync: channelsAsync,
         showError: showError.value,

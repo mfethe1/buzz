@@ -15,6 +15,7 @@ import 'features/channels/channels_provider.dart';
 import 'features/channels/unread_badge/unread_badge_provider.dart';
 import 'features/home/home_page.dart';
 import 'features/work/work_page.dart';
+import 'features/computers/computers_page.dart';
 import 'shared/tasks/task_channel.dart';
 import 'shared/platform/app_icon_badge.dart';
 import 'features/invites/invite_create_page.dart';
@@ -390,6 +391,8 @@ class App extends HookConsumerWidget {
             child: HomePage(
               settingsPageBuilder: _buildSettingsPage,
               hasUnreadInbox: hasUnreadInbox,
+              computersPageBuilder: (context, onBack, visible) =>
+                  ComputersPage(onBack: onBack, visible: visible),
               workPageBuilder: (context, onBack, visible) =>
                   _WorkPageContent(onBack: onBack, visible: visible),
             ),
