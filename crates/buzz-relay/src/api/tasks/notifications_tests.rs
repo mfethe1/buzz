@@ -34,6 +34,15 @@ mod postgres_tests {
     }
 
     async fn connect(base: &str, host: &str, keys: Option<&Keys>) -> Socket {
+        connect_with_delegation(base, host, keys, None).await
+    }
+
+    async fn connect_with_delegation(
+        base: &str,
+        host: &str,
+        keys: Option<&Keys>,
+        owner: Option<&Keys>,
+    ) -> Socket {
         let mut request = base
             .replacen("http://", "ws://", 1)
             .into_client_request()
@@ -47,12 +56,18 @@ mod postgres_tests {
         let challenge = next_json(&mut socket).await;
         assert_eq!(challenge[0], "AUTH");
         if let Some(keys) = keys {
+            let mut tags = vec![
+                Tag::parse(["relay", &format!("wss://{host}")]).expect("relay tag"),
+                Tag::parse(["challenge", challenge[1].as_str().expect("challenge")])
+                    .expect("challenge tag"),
+            ];
+            if let Some(owner) = owner {
+                let signed = buzz_sdk::nip_oa::compute_auth_tag(owner, &keys.public_key(), "")
+                    .expect("signed delegation");
+                tags.push(buzz_sdk::nip_oa::parse_auth_tag(&signed).expect("delegation tag"));
+            }
             let event = EventBuilder::new(Kind::Authentication, "")
-                .tags([
-                    Tag::parse(["relay", &format!("wss://{host}")]).expect("relay tag"),
-                    Tag::parse(["challenge", challenge[1].as_str().expect("challenge")])
-                        .expect("challenge tag"),
-                ])
+                .tags(tags)
                 .sign_with_keys(keys)
                 .expect("signed NIP-42");
             let id = event.id.to_hex();
@@ -293,6 +308,127 @@ mod postgres_tests {
         let status = response.status();
         let json = response.json().await.expect("HTTP JSON response");
         (status, json)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn stored_agent_owner_does_not_authorize_a_revoked_direct_session() {
+        let mut f = fixture().await.expect("Postgres and Redis fixture");
+        let state = Arc::get_mut(&mut f.state).expect("exclusive fixture state");
+        let mut config = (*state.config).clone();
+        config.allow_nip_oa_auth = true;
+        state.config = Arc::new(config);
+        state
+            .db
+            .add_relay_member(
+                f.community,
+                &f.outsider.public_key().to_hex(),
+                "member",
+                None,
+            )
+            .await
+            .expect("direct agent membership");
+        assert!(state
+            .db
+            .set_agent_owner(
+                f.community,
+                &f.outsider.public_key().to_bytes(),
+                &f.owner.public_key().to_bytes(),
+            )
+            .await
+            .expect("stored owner relationship"));
+        let _server = serve(&mut f).await;
+        let base = f.http_base.as_deref().expect("HTTP base");
+        let mut owner = connect(base, &f.host, Some(&f.owner)).await;
+        // This NIP-42 session deliberately has no NIP-OA auth tag.
+        let mut agent = connect(base, &f.host, Some(&f.outsider)).await;
+        let (status, created) = f
+            .request(
+                "POST",
+                "/api/tasks",
+                &f.owner,
+                Some(r#"{"title":"before direct access revocation"}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        expect_community_sync(&mut owner).await;
+        expect_community_sync(&mut agent).await;
+        f.state
+            .db
+            .remove_relay_member(f.community, &f.outsider.public_key().to_hex())
+            .await
+            .expect("revoke direct agent membership");
+        let (status, denied) = f.request("GET", "/api/tasks", &f.outsider, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+        let (status, created) = f
+            .request(
+                "POST",
+                "/api/tasks",
+                &f.owner,
+                Some(r#"{"title":"after direct access revocation"}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        expect_community_sync(&mut owner).await;
+        expect_no_notification(&mut agent).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn verified_delegation_is_session_scoped_and_owner_revocation_is_immediate() {
+        let mut f = fixture().await.expect("Postgres and Redis fixture");
+        let state = Arc::get_mut(&mut f.state).expect("exclusive fixture state");
+        let mut config = (*state.config).clone();
+        config.allow_nip_oa_auth = true;
+        state.config = Arc::new(config);
+        let agent = Keys::generate();
+        state
+            .db
+            .add_relay_member(f.community, &agent.public_key().to_hex(), "member", None)
+            .await
+            .expect("direct agent membership");
+        let _server = serve(&mut f).await;
+        let base = f.http_base.as_deref().expect("HTTP base");
+        let mut direct = connect(base, &f.host, Some(&agent)).await;
+        f.state
+            .db
+            .remove_relay_member(f.community, &agent.public_key().to_hex())
+            .await
+            .expect("revoke direct membership");
+        // Same key, separate live connection, and an actual owner-signed auth tag.
+        let mut delegated =
+            connect_with_delegation(base, &f.host, Some(&agent), Some(&f.outsider)).await;
+        let mut publisher = connect(base, &f.host, Some(&f.owner)).await;
+        let (status, created) = f
+            .request(
+                "POST",
+                "/api/tasks",
+                &f.owner,
+                Some(r#"{"title":"verified delegation receives update"}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        expect_community_sync(&mut publisher).await;
+        expect_community_sync(&mut delegated).await;
+        expect_no_notification(&mut direct).await;
+
+        f.state
+            .db
+            .remove_relay_member(f.community, &f.outsider.public_key().to_hex())
+            .await
+            .expect("revoke delegation owner membership");
+        let (status, created) = f
+            .request(
+                "POST",
+                "/api/tasks",
+                &f.owner,
+                Some(r#"{"title":"revoked owner cannot receive update"}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        expect_community_sync(&mut publisher).await;
+        expect_no_notification(&mut delegated).await;
+        expect_no_notification(&mut direct).await;
     }
 
     #[tokio::test]
