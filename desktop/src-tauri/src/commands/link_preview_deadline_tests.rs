@@ -2,10 +2,9 @@
 use super::*;
 use axum::{
     body::Body,
-    extract::State,
     http::{Response, Uri},
-    routing::{get, post},
-    Json, Router,
+    routing::get,
+    Router,
 };
 use bytes::Bytes;
 use std::{
@@ -270,92 +269,5 @@ async fn explicit_cancellation_remains_faster_than_the_operation_deadline() {
     wait_until_bodies_drop(&traffic).await;
 }
 
-#[derive(Clone)]
-struct BridgeState {
-    transport: SocketAddr,
-    traffic: Arc<Traffic>,
-}
-
-/// Cross-language qualification uses the real JS loader and native command;
-/// only the IPC boundary and SSRF-pinned transport destination are replaced.
-#[tokio::test]
-#[ignore = "requires Node and installed desktop JS dependencies"]
-async fn renderer_scheduler_advances_after_two_native_slow_drips() {
-    let traffic = Arc::new(Traffic::default());
-    let transport = server(Router::new().fallback(get({
-        let traffic = Arc::clone(&traffic);
-        move |uri: Uri| {
-            let traffic = Arc::clone(&traffic);
-            async move {
-                traffic.paths.lock().unwrap().push(uri.path().into());
-                Response::builder()
-                    .header("content-type", "text/html")
-                    .body(if uri.path() == "/fast" {
-                        Body::from("<title>Fast preview</title>")
-                    } else {
-                        drip_body(traffic)
-                    })
-                    .unwrap()
-            }
-        }
-    })))
-    .await;
-    let bridge = server(Router::new().route("/invoke", post(
-        |State(state): State<BridgeState>, Json(input): Json<serde_json::Value>| async move {
-            let command = input["command"].as_str().unwrap();
-            let args = &input["args"];
-            match command {
-                "fetch_link_preview_metadata" => {
-                    let result = fetch(state.transport, args["href"].as_str().unwrap().into(),
-                        Some(args["requestId"].as_str().unwrap().into())).await;
-                    Json(match result {
-                        Ok(value) => serde_json::json!({"ok": value}),
-                        Err(error) => serde_json::json!({"error": error}),
-                    })
-                }
-                "release_link_preview_metadata" => {
-                    release_link_preview_metadata(args["requestId"].as_str().unwrap().into());
-                    Json(serde_json::json!({"ok": null}))
-                }
-                "cancel_link_preview_metadata" => {
-                    cancel_link_preview_metadata(args["requestId"].as_str().unwrap().into());
-                    Json(serde_json::json!({"ok": null}))
-                }
-                "fixture_paths" => Json(serde_json::json!({"ok": state.traffic.paths.lock().unwrap().clone()})),
-                _ => panic!("unexpected IPC command: {command}"),
-            }
-        }
-    )).with_state(BridgeState { transport: transport.address, traffic: Arc::clone(&traffic) })).await;
-    let desktop = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap();
-    let output = tokio::process::Command::new("node")
-        .args([
-            "--import",
-            "./test-loader.mjs",
-            "--experimental-strip-types",
-            "./scripts/qualify-link-preview-deadline.mjs",
-        ])
-        .arg(format!("http://{}/invoke", bridge.address))
-        .current_dir(desktop)
-        .kill_on_drop(true)
-        .output();
-    let output = tokio::time::timeout(Duration::from_secs(10), output)
-        .await
-        .unwrap()
-        .unwrap();
-    println!("{}", String::from_utf8_lossy(&output.stdout));
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    wait_until_bodies_drop(&traffic).await;
-    let paths = traffic.paths.lock().unwrap();
-    assert_eq!(paths.len(), 3);
-    assert_eq!(paths[2], "/fast");
-    let mut first = paths[..2].to_vec();
-    first.sort();
-    assert_eq!(first, ["/slow-one", "/slow-two"]);
-    assert!(traffic.chunks.load(Ordering::SeqCst) >= 6);
-}
+#[path = "link_preview_scheduler_tests.rs"]
+mod scheduler;
