@@ -63,8 +63,8 @@ void main() {
     );
     _goldenDirectory = selection.directory;
     if (!selection.qualified) {
-      // This preserves the prior canonical comparison on hosts such as CI's
-      // Linux runner; it is not qualification of that renderer fingerprint.
+      // An unobserved renderer retains the strict canonical comparison;
+      // passing that comparison does not qualify its fingerprint for updates.
       debugPrint(
         'Unqualified renderer: comparing canonical golden images strictly. '
         'Updates are disabled. ${jsonEncode(actual)}',
