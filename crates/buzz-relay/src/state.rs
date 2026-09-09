@@ -1,5 +1,6 @@
 //! Shared application state — Arc-wrapped, shared across all connections.
 
+mod connection_control;
 mod task_invalidation;
 
 use std::collections::{HashMap, HashSet};

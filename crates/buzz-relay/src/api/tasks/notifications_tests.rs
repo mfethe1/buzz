@@ -139,6 +139,7 @@ mod postgres_tests {
         gate: Option<tokio::sync::oneshot::Receiver<()>>,
     ) -> Background {
         let mut rx = state.pubsub.subscribe_conn_control();
+        let control_rx = state.pubsub.subscribe_conn_control();
         let subscriber = {
             let pubsub = state.pubsub.clone();
             tokio::spawn(async move {
@@ -158,7 +159,8 @@ mod postgres_tests {
         let probe_community = probe_ctx.community();
         let publisher = state.pubsub.clone();
         let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
-        let consumer = tokio::spawn(async move {
+        let consumer = tokio::spawn(state.run_connection_control(control_rx));
+        let readiness = tokio::spawn(async move {
             let mut ready_tx = Some(ready_tx);
             while let Ok(scoped) = rx.recv().await {
                 if scoped.community_id == probe_community
@@ -169,12 +171,11 @@ mod postgres_tests {
                     }
                     continue;
                 }
-                state.apply_conn_control(scoped).await;
             }
         });
         // Own the handles before awaiting readiness, so timeout/unwind also
         // aborts both tasks. Probe retries never replay HTTP task mutations.
-        let background = Background(vec![subscriber, consumer]);
+        let background = Background(vec![subscriber, consumer, readiness]);
         tokio::time::timeout(Duration::from_secs(5), async {
             let mut interval = tokio::time::interval(Duration::from_millis(50));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -747,6 +748,185 @@ mod postgres_tests {
         assert_eq!(recovered["task"]["priority"], 8);
         reconnected.close(None).await.expect("close");
     }
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn task_control_queue_coalesces_duplicates_and_recovers_scoped_overflow() {
+        let mut f = fixture().await.expect("Postgres and Redis fixture");
+        let other = fixture().await.expect("foreign community");
+        let _server = serve(&mut f).await;
+        let base = f.http_base.as_deref().expect("base");
+        let mut owner = connect(base, &f.host, Some(&f.owner)).await;
+        let mut foreign = connect(base, &other.host, Some(&other.owner)).await;
+        let mut lock = f.pool.begin().await.expect("gate transaction");
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *lock)
+            .await
+            .expect("gate pid");
+        sqlx::query("LOCK TABLE channel_members IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *lock)
+            .await
+            .expect("hold authorization");
+        let (tx, rx) = tokio::sync::broadcast::channel(1024);
+        let _consumer = Server(tokio::spawn(f.state.clone().run_connection_control(rx)));
+        let command = |channel| buzz_pubsub::conn_control::ScopedConnControl {
+            community_id: f.community,
+            command: buzz_pubsub::conn_control::ConnControl::InvalidateTasks {
+                channel_id: Some(channel),
+                origin_generation: uuid::Uuid::new_v4(),
+            },
+        };
+        tx.send(command(f.private_channel_id))
+            .expect("active advisory");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))")
+                    .bind(gate_pid).fetch_one(&f.pool).await.expect("observe blocked authorization");
+                if waiting { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("actual fanout is held by database lock");
+        for _ in 0..300 {
+            tx.send(command(f.private_channel_id))
+                .expect("duplicate advisory");
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while tx.len() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("production consumer consumed duplicate burst");
+        expect_no_notification(&mut owner).await;
+        for _ in 0..257 {
+            tx.send(command(uuid::Uuid::new_v4()))
+                .expect("distinct scope advisory");
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match owner.next().await {
+                    None | Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        owner.send(Message::Pong(data)).await.expect("pong")
+                    }
+                    frame => panic!("unexpected overflow recovery frame: {frame:?}"),
+                }
+            }
+        })
+        .await
+        .expect("bounded task queue overflow forces affected socket recovery");
+        expect_no_notification(&mut foreign).await;
+        lock.rollback().await.expect("release authorization gate");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn lost_control_commands_force_socket_reauthorization() {
+        let mut f = fixture().await.expect("Postgres and Redis fixture");
+        let _server = serve(&mut f).await;
+        let mut owner = connect(
+            f.http_base.as_deref().expect("base"),
+            &f.host,
+            Some(&f.owner),
+        )
+        .await;
+        // A deliberately undersized receiver deterministically loses a control
+        // command before the actual production consumer begins reading.
+        let (tx, rx) = tokio::sync::broadcast::channel(2);
+        for _ in 0..3 {
+            tx.send(buzz_pubsub::conn_control::ScopedConnControl {
+                community_id: f.community,
+                command: buzz_pubsub::conn_control::ConnControl::InvalidateTasks {
+                    channel_id: None,
+                    origin_generation: f.state.task_invalidation_generation,
+                },
+            })
+            .expect("receiver retained");
+        }
+        let consumer = Server(tokio::spawn(f.state.clone().run_connection_control(rx)));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match owner.next().await {
+                    None | Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        owner.send(Message::Pong(data)).await.expect("pong")
+                    }
+                    frame => panic!("unexpected recovery frame: {frame:?}"),
+                }
+            }
+        })
+        .await
+        .expect("loss of control commands must force fresh authorization");
+        drop(consumer);
+        drop(tx);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn urgent_disconnect_does_not_wait_for_task_authorization() {
+        let mut f = fixture().await.expect("Postgres and Redis fixture");
+        let _server = serve(&mut f).await;
+        let _control = start_conn_control(f.state.clone()).await;
+        let mut owner = connect(
+            f.http_base.as_deref().expect("base"),
+            &f.host,
+            Some(&f.owner),
+        )
+        .await;
+        let mut lock = f.pool.begin().await.expect("gate transaction");
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *lock)
+            .await
+            .expect("gate pid");
+        sqlx::query("LOCK TABLE channel_members IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *lock)
+            .await
+            .expect("hold advisory authorization");
+        let ctx = buzz_core::TenantContext::resolved(f.community, &f.host);
+        f.state
+            .pubsub
+            .publish_conn_control(
+                &ctx,
+                &buzz_pubsub::conn_control::ConnControl::InvalidateTasks {
+                    channel_id: Some(f.private_channel_id),
+                    origin_generation: uuid::Uuid::new_v4(),
+                },
+            )
+            .await
+            .expect("publish task advisory through actual Redis");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))")
+                    .bind(gate_pid).fetch_one(&f.pool).await.expect("observe blocked permission query");
+                if waiting { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("production consumer entered blocked authorization");
+        f.state
+            .pubsub
+            .publish_conn_control(
+                &ctx,
+                &buzz_pubsub::conn_control::ConnControl::DisconnectCommunity,
+            )
+            .await
+            .expect("publish urgent disconnect through actual Redis");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match owner.next().await {
+                    None | Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        owner.send(Message::Pong(data)).await.expect("pong")
+                    }
+                    frame => panic!("unexpected frame while awaiting disconnect: {frame:?}"),
+                }
+            }
+        })
+        .await
+        .expect("urgent disconnect must not await the five-second task permission deadline");
+        lock.rollback().await.expect("release authorization gate");
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres and Redis"]
     async fn task_notification_access_deadline_preserves_committed_http_success() {
