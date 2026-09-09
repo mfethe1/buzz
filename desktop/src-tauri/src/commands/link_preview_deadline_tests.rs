@@ -54,23 +54,35 @@ struct Traffic {
     live_bodies: AtomicUsize,
 }
 
-struct Drip(Arc<Traffic>);
+struct Drip {
+    traffic: Arc<Traffic>,
+    initial_chunks: usize,
+}
 
 impl Drop for Drip {
     fn drop(&mut self) {
-        self.0.live_bodies.fetch_sub(1, Ordering::SeqCst);
+        self.traffic.live_bodies.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
 fn drip_body(traffic: Arc<Traffic>) -> Body {
     traffic.live_bodies.fetch_add(1, Ordering::SeqCst);
     Body::from_stream(futures_util::stream::unfold(
-        Drip(traffic),
-        |state| async move {
-            // Every chunk arrives well inside the production read-idle limit;
-            // byte limits are not reached during this bounded regression.
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            state.0.chunks.fetch_add(1, Ordering::SeqCst);
+        Drip {
+            traffic,
+            initial_chunks: 3,
+        },
+        |mut state| async move {
+            // Establish body progress immediately, then keep the unfinished
+            // response alive with a slow drip. Requiring three timer wakes in
+            // the image stage's remaining 130 ms made this fixture depend on
+            // runner scheduling, despite the operation deadline working.
+            if state.initial_chunks > 0 {
+                state.initial_chunks -= 1;
+            } else {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            state.traffic.chunks.fetch_add(1, Ordering::SeqCst);
             Some((Ok::<_, Infallible>(Bytes::from_static(b" ")), state))
         },
     ))
