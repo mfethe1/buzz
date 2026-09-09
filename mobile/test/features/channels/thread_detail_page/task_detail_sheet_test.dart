@@ -239,11 +239,11 @@ void main() {
       expect(find.textContaining('To do'), findsOneWidget);
       // 'In progress' appears in the header status and the transition row.
       expect(find.textContaining('In progress'), findsWidgets);
-      // Actor pubkeys render truncated, plain text.
+      // Actor pubkeys render as the canonical compact npub label, plain text.
       final actorText = tester.widget<Text>(
         find.byKey(const ValueKey('task-event-actor-1')),
       );
-      expect(actorText.data, '${'a' * 8}\u2026');
+      expect(actorText.data, 'npub1424…rcaj');
     });
 
     testWidgets('omits the summary section entirely when absent', (
