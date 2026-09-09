@@ -1174,6 +1174,131 @@ mod postgres_tests {
         delete_test_community(&pool, community).await;
     }
 
+    /// HW-017: the interleaving the guard exists for. Two connections race on
+    /// one task: writer A holds the `FOR UPDATE` row lock while writer B — on
+    /// its own pool, blocked mid-`update_task` — waits for that lock. A then
+    /// commits a real change (revision 0 -> 1). B, whose snapshot predates A's
+    /// commit, must be rejected with `StaleRevision` once it acquires the lock,
+    /// not silently overwrite A. Sequential rejection is covered above; this
+    /// test proves the guard under a genuine overlapping-transaction race.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_grounded_writer_loses_against_an_interleaved_commit() {
+        let a_pool = setup_pool().await;
+        let b_pool = PgPool::connect(&test_database_url())
+            .await
+            .expect("writer B's own connection");
+        let community = make_test_community(&a_pool).await;
+        let creator = make_test_user(&a_pool, community, 0x61).await;
+
+        let task = create_task(
+            &a_pool,
+            community,
+            NewTask {
+                created_by_pubkey: Some(creator.clone()),
+                title: "interleaved".to_owned(),
+                ..NewTask::default()
+            },
+        )
+        .await
+        .expect("create task");
+
+        // Writer A opens a transaction and takes the row lock, but does not
+        // commit yet — it pauses with the lock held.
+        let mut a_tx = a_pool.begin().await.expect("writer A begin");
+        sqlx::query(concat!(
+            "SELECT ",
+            task_columns!(),
+            " FROM tasks WHERE community_id = $1 AND id = $2 FOR UPDATE"
+        ))
+        .bind(community.as_uuid())
+        .bind(task.id)
+        .fetch_one(&mut *a_tx)
+        .await
+        .expect("writer A locks the row");
+
+        // Writer B starts a guarded PATCH against its revision-0 snapshot on a
+        // SEPARATE pool. It enters `update_task`, issues its own FOR UPDATE,
+        // and blocks on A's lock.
+        let b_community = community;
+        let b_task_id = task.id;
+        let b_creator = creator.clone();
+        let writer_b = tokio::spawn(async move {
+            update_task(
+                &b_pool,
+                b_community,
+                b_task_id,
+                &TaskPatch {
+                    title: Some("writer B clobbers".to_owned()),
+                    expected_revision: Some(task.revision),
+                    ..TaskPatch::default()
+                },
+                Some(&b_creator),
+            )
+            .await
+        });
+
+        // Give writer B time to actually reach the blocked lock wait; without
+        // this the test can degrade into the sequential case by accident.
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if writer_b.is_finished() {
+                break;
+            }
+            let blocked = sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' \
+                   AND query ILIKE '%tasks%' \
+                   AND pid <> pg_backend_pid()",
+            )
+            .fetch_one(&a_pool)
+            .await
+            .unwrap_or(0);
+            if blocked > 0 {
+                break;
+            }
+            // B is still connecting or executing prior statements; keep polling.
+        }
+
+        // Writer A commits its real change, releasing the lock: revision
+        // 0 -> 1 under the same history semantics as any other write.
+        sqlx::query(concat!(
+            "UPDATE tasks SET title = 'writer A won' ",
+            "WHERE community_id = $1 AND id = $2"
+        ))
+        .bind(community.as_uuid())
+        .bind(task.id)
+        .execute(&mut *a_tx)
+        .await
+        .expect("writer A writes");
+        a_tx.commit().await.expect("writer A commits");
+
+        // Writer B now acquires the lock, re-reads the row, and must see
+        // revision 1 against its expected 0 -> rejected, row untouched.
+        let b_result = writer_b.await.expect("writer B task panicked");
+        match b_result {
+            Err(DbError::StaleRevision {
+                expected, actual, ..
+            }) => {
+                assert_eq!(expected, 0, "B's snapshot revision");
+                assert_eq!(actual, 1, "A's committed revision");
+            }
+            Ok(record) => panic!(
+                "interleaved stale write silently won (title now {:?})",
+                record.title
+            ),
+            other => panic!("expected StaleRevision, got {other:?}"),
+        }
+
+        let after = get_task(&a_pool, community, task.id)
+            .await
+            .expect("re-fetch after the race");
+        assert_eq!(after.title, "writer A won");
+        assert_eq!(after.revision, 1);
+
+        delete_test_community(&a_pool, community).await;
+    }
+
     /// HW-017: a body carrying only `expected_revision` asks for no change, so
     /// `is_empty` must report it as empty. Otherwise it passes the relay's
     /// "patch must change at least one field" gate and reaches the database as

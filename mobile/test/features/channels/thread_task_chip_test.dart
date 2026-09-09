@@ -13,6 +13,7 @@ Task _task({
 }) => Task(
   id: id,
   title: title,
+  revision: 0,
   status: status,
   priority: 0,
   createdAt: DateTime.fromMillisecondsSinceEpoch(
