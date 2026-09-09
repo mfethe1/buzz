@@ -374,6 +374,7 @@ void main() {
   testWidgets('Manage refreshes metadata after saving from actions', (
     tester,
   ) async {
+    final updates = <(String, String?, String?)>[];
     await tester.pumpWidget(
       _modalApp(
         channel: _channel(),
@@ -386,7 +387,9 @@ void main() {
         ],
         createChannelActions: (ref) => _FakeChannelActions(
           ref,
-          onUpdateChannel: (channelId, name, description) async {},
+          onUpdateChannel: (channelId, name, description) async {
+            updates.add((channelId, name, description));
+          },
         ),
       ),
     );
@@ -396,20 +399,32 @@ void main() {
     await tester.tap(find.text('Manage channel'));
     await tester.pumpAndSettle();
 
+    final originalNameController = tester
+        .widget<TextField>(find.byKey(const ValueKey('manage-channel-name')))
+        .controller;
     await tester.enterText(
       find.byKey(const ValueKey('manage-channel-name')),
       'renamed',
     );
+    await tester.pump();
     await tester.tap(find.byKey(const ValueKey('manage-channel-save-details')));
     await tester.pumpAndSettle();
 
-    expect(find.widgetWithText(ListTile, 'Manage channel'), findsOneWidget);
-    await tester.tap(find.widgetWithText(ListTile, 'Manage channel'));
+    expect(updates, [('channel-id', 'renamed', null)]);
+    expect(find.byType(ManageChannelSheet), findsNothing);
+    final manageAction = find
+        .widgetWithText(ListTile, 'Manage channel')
+        .hitTestable();
+    expect(manageAction, findsOneWidget);
+    await tester.tap(manageAction);
     await tester.pumpAndSettle();
+    expect(find.byType(ManageChannelSheet), findsOneWidget);
     final nameField = tester.widget<TextField>(
       find.byKey(const ValueKey('manage-channel-name')),
     );
+    expect(nameField.controller, isNot(same(originalNameController)));
     expect(nameField.controller?.text, 'renamed');
+    expect(updates, [('channel-id', 'renamed', null)]);
   });
 
   testWidgets('non-member cannot edit canvas from Manage channel', (
