@@ -986,7 +986,10 @@ test.describe("thread unread indicator", () => {
     const openMenu = async () => {
       await expect(toggle).toHaveCount(0);
       await page.mouse.move(0, 0);
-      await page.getByText("Toggle me").hover();
+      await page
+        .locator(`[data-message-id="${messageId}"]`)
+        .getByText("Toggle me", { exact: true })
+        .hover();
       await moreActions.click();
       await expect(toggle).toHaveCount(1);
     };

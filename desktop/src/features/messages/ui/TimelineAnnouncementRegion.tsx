@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import type { TimelineMessage } from "@/features/messages/types";
+import { messageAnnouncement } from "@/features/messages/lib/messageAnnouncement";
 
 const ANNOUNCEMENT_COALESCE_MS = 500;
 
@@ -44,7 +45,7 @@ function messageKey(message: TimelineMessage): string {
 
 function announcementForMessage(message: TimelineMessage): string | null {
   const author = message.author.trim();
-  const body = message.body.replace(/\s+/g, " ").trim();
+  const body = messageAnnouncement(message.body);
   if (!author || !body) return null;
   return `${message.isAgent ? "Agent " : ""}${author}: ${body}`;
 }

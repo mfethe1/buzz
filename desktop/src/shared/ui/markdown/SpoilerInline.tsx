@@ -87,7 +87,12 @@ export function SpoilerInline({
           data-spoiler=""
         >
           <SpoilerParticles active contentRef={contentRef} />
-          <div className="buzz-spoiler__content" ref={setContentElement}>
+          <div
+            aria-hidden="true"
+            inert
+            className="buzz-spoiler__content"
+            ref={setContentElement}
+          >
             <SpoilerHiddenContext.Provider value={true}>
               {children}
             </SpoilerHiddenContext.Provider>
@@ -103,7 +108,12 @@ export function SpoilerInline({
         data-spoiler=""
       >
         <SpoilerParticles active contentRef={contentRef} />
-        <span className="buzz-spoiler__content" ref={setContentElement}>
+        <span
+          aria-hidden="true"
+          inert
+          className="buzz-spoiler__content"
+          ref={setContentElement}
+        >
           <SpoilerHiddenContext.Provider value={true}>
             {children}
           </SpoilerHiddenContext.Provider>
@@ -121,7 +131,12 @@ export function SpoilerInline({
         data-spoiler=""
       >
         <SpoilerParticles active={!revealed} contentRef={contentRef} />
-        <div className="buzz-spoiler__content" ref={setContentElement}>
+        <div
+          aria-hidden={!revealed}
+          inert={!revealed}
+          className="buzz-spoiler__content"
+          ref={setContentElement}
+        >
           <SpoilerHiddenContext.Provider value={!revealed}>
             {children}
           </SpoilerHiddenContext.Provider>
@@ -138,7 +153,12 @@ export function SpoilerInline({
       data-spoiler=""
     >
       <SpoilerParticles active={!revealed} contentRef={contentRef} />
-      <span className="buzz-spoiler__content" ref={setContentElement}>
+      <span
+        aria-hidden={!revealed}
+        inert={!revealed}
+        className="buzz-spoiler__content"
+        ref={setContentElement}
+      >
         <SpoilerHiddenContext.Provider value={!revealed}>
           {children}
         </SpoilerHiddenContext.Provider>
