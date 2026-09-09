@@ -705,9 +705,15 @@ mod postgres_tests {
         // upstream carries 44 (0032-0034 and 0040 adopted from our PRs);
         // fork adds 0046_task_system (PR #6425 pending upstream) and 0047
         // structured task history, 0048 machine homes, 0049 capability grants,
-        // 0050 task revisions, 0051 workflow approvals, and 0052 fleet admission.
+        // 0050 task revisions, 0051 workflow approvals, 0052 fleet admission, and
+        // 0053 private machine control.
         // Deployed migration checksums stay unchanged.
-        assert_eq!(migrations.len(), 51);
+        assert_eq!(migrations.len(), 52);
+        assert_eq!(migrations[51].version, 53);
+        assert!(migrations[51]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE machine_control_events"));
         assert_eq!(migrations[44].version, 46);
         assert_eq!(migrations[45].version, 47);
         assert_eq!(migrations[46].version, 48);
@@ -1941,6 +1947,8 @@ mod postgres_tests {
             (49, "agent_capability_grants"),
             (49, "agent_capability_events"),
             (52, "fleet_attempts"),
+            (53, "machines"),
+            (53, "machine_control_events"),
         ] {
             let introduced = MIGRATOR
                 .iter()

@@ -319,6 +319,29 @@ pub fn verify_auth_tag_for_auth_event(
     Ok(owner_pubkey)
 }
 
+/// Verify owner delegation for a concrete signed action, including every kind
+/// and strict timestamp clause. Unlike connection admission, kind restrictions
+/// are enforced here; auth-only credentials cannot authorize registration.
+pub fn verify_auth_tag_for_event(
+    auth_tag_json: &str,
+    agent_pubkey: &PublicKey,
+    kind: u32,
+    created_at: u64,
+) -> Result<PublicKey, SdkError> {
+    let owner = verify_auth_tag_for_auth_event(auth_tag_json, agent_pubkey, created_at)?;
+    let parsed = parse_auth_tag_fields(auth_tag_json)?;
+    for clause in parsed.conditions.split('&') {
+        if let Some(value) = clause.strip_prefix("kind=") {
+            if value.parse::<u32>().ok() != Some(kind) {
+                return Err(SdkError::InvalidInput(
+                    "owner proof does not authorize this event kind".into(),
+                ));
+            }
+        }
+    }
+    Ok(owner)
+}
+
 /// Parse a NIP-OA `auth` tag JSON string into a [`Tag`] without verifying the
 /// signature.
 ///
@@ -697,5 +720,37 @@ mod tests {
         let bad =
             serde_json::json!(["auth", OWNER_PUBKEY_HEX, "kind=1&", "a".repeat(128)]).to_string();
         assert!(parse_auth_tag(&bad).is_err());
+    }
+}
+
+#[cfg(test)]
+mod machine_action_tests {
+    use super::*;
+    #[test]
+    fn machine_action_proof_enforces_kind_and_every_time_bound() {
+        let owner = Keys::generate();
+        let agent = Keys::generate().public_key();
+        for condition in [
+            "kind=27235",
+            "kind=47210&kind=27235",
+            "created_at<100",
+            "created_at>100",
+            "kind=47210&created_at<101&created_at>100",
+        ] {
+            let proof = compute_auth_tag(&owner, &agent, condition).unwrap();
+            assert!(
+                verify_auth_tag_for_event(&proof, &agent, 47210, 100).is_err(),
+                "{condition}"
+            );
+        }
+        let proof =
+            compute_auth_tag(&owner, &agent, "kind=47210&created_at>99&created_at<101").unwrap();
+        assert_eq!(
+            verify_auth_tag_for_event(&proof, &agent, 47210, 100).unwrap(),
+            owner.public_key()
+        );
+        assert!(
+            verify_auth_tag_for_event(&proof, &Keys::generate().public_key(), 47210, 100).is_err()
+        );
     }
 }

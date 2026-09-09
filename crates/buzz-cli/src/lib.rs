@@ -240,6 +240,9 @@ enum Cmd {
     /// Durable community work items for humans and agents
     #[command(subcommand)]
     Tasks(TasksCmd),
+    /// Private computer enrollment and coordinator observations
+    #[command(subcommand)]
+    Machines(MachinesCmd),
     /// Validate and canonicalize local Buzz CML task snapshots
     #[command(subcommand)]
     Cml(CmlCmd),
@@ -2030,6 +2033,43 @@ pub enum PackCmd {
     },
 }
 
+/// Private machine commands; writes consume the versioned typed JSON document.
+#[derive(Subcommand)]
+pub enum MachinesCmd {
+    /// Create a short-lived NIP-OA enrollment proof as the owner (local only)
+    Authorize {
+        #[arg(long)]
+        coordinator: String,
+    },
+    /// Sign exact enrollment consent as the coordinator (local only; never publishes)
+    Consent {
+        #[arg(long)]
+        file: String,
+    },
+    /// List this signing owner's registered machines
+    List {
+        #[arg(long, value_parser=commands::machines::parse_id)]
+        after: Option<uuid::Uuid>,
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+    /// Read one owned machine and its signed enrollment/current observation
+    Get {
+        #[arg(value_parser=commands::machines::parse_id)]
+        id: uuid::Uuid,
+    },
+    /// Sign enrollment as the owner; JSON requires owner proof and coordinator-signed consent
+    Enroll {
+        #[arg(long)]
+        file: String,
+    },
+    /// Sign a fresh observation as the enrolled coordinator
+    Observe {
+        #[arg(long)]
+        file: String,
+    },
+}
+
 /// Durable task commands share the relay's host-derived community boundary.
 #[derive(Subcommand)]
 pub enum TasksCmd {
@@ -2323,6 +2363,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Tasks(sub) => commands::tasks::dispatch(sub, &client, &cli.format).await,
+        Cmd::Machines(sub) => commands::machines::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Cml(sub) => match sub {
             CmlCmd::Validate { path } => commands::cml::cmd_validate(path.as_str()),

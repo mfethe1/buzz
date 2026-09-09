@@ -49,6 +49,7 @@ pub(crate) use runtime::{
     insert_mentions_in_transaction, observability, route_proof, ReadSessionInner, RouteDecision,
     RoutePredicate,
 };
+pub use store::machine;
 pub use store::{
     admin_moderation, agent_capability_grants, allowlist, api_token, archived_identities, channel,
     channel_members, community, deletion, dm, event, feed, fleet_attempt, git_repo, moderation,

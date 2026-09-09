@@ -58,3 +58,6 @@ pub mod usage;
 pub mod user;
 /// Workflow, run, and approval persistence.
 pub mod workflow;
+
+/// Private machine enrollment and observations.
+pub mod machine;
