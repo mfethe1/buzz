@@ -975,7 +975,31 @@ mod postgres_tests {
             .await
             .expect("committed task");
         assert_eq!((persisted.revision, persisted.priority), (1, 11));
-        expect_no_notification(&mut owner).await;
-        owner.close(None).await.expect("close");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match owner.next().await {
+                    None | Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        owner.send(Message::Pong(data)).await.expect("pong")
+                    }
+                    frame => panic!("unexpected frame while awaiting recovery: {frame:?}"),
+                }
+            }
+        })
+        .await
+        .expect("lost task invalidation must force client recovery");
+        let mut recovered = connect(
+            f.http_base.as_deref().expect("base"),
+            &f.host,
+            Some(&f.owner),
+        )
+        .await;
+        let (status, latest) = f
+            .request("GET", &format!("/api/tasks/{}", f.task_id), &f.owner, None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{latest}");
+        assert_eq!(latest["task"]["revision"], 1);
+        assert_eq!(latest["task"]["priority"], 11);
+        recovered.close(None).await.expect("close recovered socket");
     }
 }

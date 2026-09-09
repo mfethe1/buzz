@@ -3,7 +3,7 @@
 use super::{AppState, CommunityId, ConnectionManager, HashMap, Uuid, WsMessage};
 use buzz_core::TenantContext;
 use buzz_pubsub::conn_control::ConnControl;
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct TaskRecipientScope {
@@ -54,6 +54,17 @@ impl ConnectionManager {
         scope: &TaskRecipientScope,
         frame: WsMessage,
     ) {
+        self.finish_task_invalidation(lease, community_id, scope, Some(frame));
+    }
+
+    /// A missing advisory forces recovery, fenced to the captured session.
+    fn finish_task_invalidation(
+        &self,
+        lease: TaskRecipientLease,
+        community_id: CommunityId,
+        scope: &TaskRecipientScope,
+        frame: Option<WsMessage>,
+    ) {
         let Some(entry) = self.connections.get(&lease.connection_id) else {
             return;
         };
@@ -72,7 +83,8 @@ impl ConnectionManager {
         {
             return;
         }
-        if entry.ctrl_tx.try_send(frame).is_err() {
+        let delivered = frame.is_some_and(|frame| entry.ctrl_tx.try_send(frame).is_ok());
+        if !delivered {
             entry.cancel.cancel();
             metrics::counter!("buzz_tasks_invalidation_dropped_total").increment(1);
         }
@@ -156,17 +168,21 @@ impl AppState {
         channel_id: Option<Uuid>,
     ) {
         let recipients = self.conn_manager.task_recipients(community_id);
+        let mut completed = HashSet::new();
         let fanout = async {
             let frame = WsMessage::Text(
                 crate::protocol::RelayMessage::tasks_sync_required(channel_id.as_ref()).into(),
             );
-            for (scope, connections) in recipients {
+            for (scope, connections) in &recipients {
                 match self
-                    .task_recipient_is_relay_member(community_id, &scope)
+                    .task_recipient_is_relay_member(community_id, scope)
                     .await
                 {
                     Ok(true) => {}
-                    Ok(false) => continue,
+                    Ok(false) => {
+                        completed.insert(scope.clone());
+                        continue;
+                    }
                     Err(error) => {
                         tracing::warn!(%community_id, %error, "task invalidation relay membership lookup failed");
                         metrics::counter!("buzz_tasks_invalidation_access_errors_total")
@@ -189,17 +205,19 @@ impl AppState {
                         }
                     };
                     if !channels.contains(&channel_id) {
+                        completed.insert(scope.clone());
                         continue;
                     }
                 }
-                for lease in connections {
+                for &lease in connections {
                     self.conn_manager.send_task_invalidation(
                         lease,
                         community_id,
-                        &scope,
+                        scope,
                         frame.clone(),
                     );
                 }
+                completed.insert(scope.clone());
             }
         };
         if tokio::time::timeout(Duration::from_secs(5), fanout)
@@ -208,6 +226,17 @@ impl AppState {
         {
             tracing::warn!(%community_id, "task invalidation fanout timed out");
             metrics::counter!("buzz_tasks_invalidation_timeouts_total").increment(1);
+        }
+        // A failed lookup is not a denial. Recover only unresolved sessions;
+        // never disclose a channel identifier without successful authorization.
+        for (scope, connections) in recipients {
+            if completed.contains(&scope) {
+                continue;
+            }
+            for lease in connections {
+                self.conn_manager
+                    .finish_task_invalidation(lease, community_id, &scope, None);
+            }
         }
     }
 }
@@ -315,6 +344,39 @@ mod tests {
         assert!(recipients
             .keys()
             .any(|scope| scope.delegation_owner == Some(vec![2; 32])));
+    }
+
+    #[test]
+    fn recovery_disconnect_is_fenced_to_the_captured_session_and_community() {
+        let manager = ConnectionManager::new();
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        let other_community = CommunityId::from_uuid(Uuid::new_v4());
+        let (id, mut rx, cancel) = connection(&manager, community, &[1; 32]);
+        let (_other_id, _other_rx, other_cancel) = connection(&manager, other_community, &[1; 32]);
+        let (old_scope, old_lease) = snapshot(&manager, community);
+        manager.set_authenticated_session(id, vec![1; 32], Some(vec![2; 32]));
+        manager.set_authenticated_pubkey(id, vec![1; 32]);
+        manager.finish_task_invalidation(old_lease, community, &old_scope, None);
+        assert!(
+            !cancel.is_cancelled(),
+            "old generation cannot cancel a new session"
+        );
+        let (scope, lease) = snapshot(&manager, community);
+        manager.finish_task_invalidation(lease, other_community, &scope, None);
+        assert!(!cancel.is_cancelled(), "community must match the lease");
+        manager.finish_task_invalidation(lease, community, &scope, None);
+        assert!(
+            cancel.is_cancelled(),
+            "unresolved current session must reconnect"
+        );
+        assert!(
+            !other_cancel.is_cancelled(),
+            "other communities remain connected"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "recovery carries no channel advisory"
+        );
     }
 
     #[test]
