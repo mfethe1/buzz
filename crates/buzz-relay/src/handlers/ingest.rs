@@ -437,6 +437,7 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 /// Returns `Err` for unknown kinds — the relay rejects them.
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
+        buzz_core::kind::KIND_MACHINE_ENROLLMENT | buzz_core::kind::KIND_MACHINE_OBSERVATION => Ok(Scope::UsersWrite),
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
@@ -2440,6 +2441,28 @@ async fn ingest_event_inner(
                 )));
             }
         }
+    }
+
+    if matches!(
+        kind_u32,
+        buzz_core::kind::KIND_MACHINE_ENROLLMENT | buzz_core::kind::KIND_MACHINE_OBSERVATION
+    ) {
+        if auth.channel_ids().is_some() {
+            return Err(IngestError::AuthFailed(
+                "restricted: machine commands require a global token".into(),
+            ));
+        }
+        let inserted = super::machine::handle(state, tenant, &event).await?;
+        emit_product_feedback_success(tracer, tenant, &event, &auth);
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: if inserted {
+                String::new()
+            } else {
+                "duplicate: machine command already accepted".into()
+            },
+        });
     }
 
     let mut channel_id = if kind_u32 == KIND_REACTION {

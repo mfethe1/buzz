@@ -195,7 +195,7 @@ mod route_authz {
     /// Clone of the invites.rs NIP-98 helper: signs kind:27235 over the
     /// exact URL the relay will reconstruct (scheme from config.relay_url,
     /// host from the tenant, path + raw query).
-    fn nip98_auth_header(keys: &Keys, method: &str, url: &str, body: &[u8]) -> String {
+    pub(super) fn nip98_auth_header(keys: &Keys, method: &str, url: &str, body: &[u8]) -> String {
         let hash: [u8; 32] = Sha256::digest(body).into();
         let tags = vec![
             nostr::Tag::parse(["u", url]).expect("u tag"),
@@ -748,3 +748,6 @@ mod task_notifications;
 
 #[path = "fleet_tests.rs"]
 mod fleet_admission;
+
+#[path = "machine_tests.rs"]
+mod machine_control;

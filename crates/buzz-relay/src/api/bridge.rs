@@ -948,11 +948,19 @@ async fn submit_event_authed(
             };
         }
     };
-    if let Some(owner) = nip_oa_owner {
-        super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
-    }
-
     let kind_u32 = buzz_core::kind::event_kind_u32(&event);
+    // Machine commands own their atomic owner/home materialization. In
+    // particular, a rejected observation or standalone consent must not mint an owner side effect.
+    if !matches!(
+        kind_u32,
+        buzz_core::kind::KIND_MACHINE_ENROLLMENT
+            | buzz_core::kind::KIND_MACHINE_OBSERVATION
+            | buzz_core::kind::KIND_MACHINE_ENROLLMENT_CONSENT
+    ) {
+        if let Some(owner) = nip_oa_owner {
+            super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
+        }
+    }
     let auth = IngestAuth::Http {
         pubkey,
         scopes: buzz_auth::Scope::all_known(), // Pure Nostr: full scopes, channel access via membership

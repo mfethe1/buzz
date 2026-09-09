@@ -683,6 +683,9 @@ pub const KIND_PROJECT: u32 = 30621;
 
 /// All registered kind constants — used for duplicate detection and iteration.
 pub const ALL_KINDS: &[u32] = &[
+    KIND_MACHINE_ENROLLMENT_CONSENT,
+    KIND_MACHINE_ENROLLMENT,
+    KIND_MACHINE_OBSERVATION,
     KIND_PROFILE,
     KIND_TEXT_NOTE,
     KIND_CONTACT_LIST,
@@ -946,6 +949,14 @@ const _: () = assert!(!is_ephemeral(KIND_REPORT));
 const _: () = assert!(is_moderation_command_kind(KIND_MODERATION_BAN));
 const _: () = assert!(is_moderation_command_kind(KIND_MODERATION_RESOLVE_REPORT));
 const _: () = assert!(!is_moderation_command_kind(KIND_REPORT));
+
+/// Owner-signed private machine enrollment (never ordinary event storage).
+pub const KIND_MACHINE_ENROLLMENT: u32 = 47210;
+/// Coordinator-signed private machine observation (never ordinary event storage).
+pub const KIND_MACHINE_OBSERVATION: u32 = 47211;
+
+/// Embedded coordinator enrollment consent; standalone submission is forbidden.
+pub const KIND_MACHINE_ENROLLMENT_CONSENT: u32 = 47212;
 
 #[cfg(test)]
 mod tests {

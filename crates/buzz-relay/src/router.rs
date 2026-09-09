@@ -122,6 +122,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(api::invites::accept_policy),
         )
         .route("/api/invites/claim", post(api::invites::claim_invite))
+        .route("/api/machines", get(api::machines::list_machines))
+        .route("/api/machines/{id}", get(api::machines::get_machine))
         // Tasks: relay-owned work items (NIP-98 auth + relay membership).
         // Host-derived tenant, like every other route here — the community is
         // never a path segment.
