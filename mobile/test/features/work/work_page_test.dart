@@ -193,7 +193,16 @@ void main() {
 
       generation++;
       container.read(tasksSyncSignalProvider.notifier).bump();
-      await tester.pumpAndSettle();
+      // A background read need not schedule a frame before its response.
+      // Native/live bindings can be idle while the refresh is still pending.
+      // Wait for its visible result, with a bounded failure if it never arrives.
+      for (
+        var frame = 0;
+        frame < 100 && find.text('Second changed').evaluate().isEmpty;
+        frame++
+      ) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
       expect(find.text('First unchanged'), findsOneWidget);
       expect(find.text('Second old'), findsNothing);
       expect(find.text('Second changed'), findsOneWidget);
