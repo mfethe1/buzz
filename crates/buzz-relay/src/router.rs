@@ -64,6 +64,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/", get(nip11_or_ws_handler))
         .route("/info", get(relay_info_handler))
         .route("/.well-known/nostr.json", get(api::nip05::nostr_nip05))
+        // RFC 9728 Protected Resource Metadata (REG-3 MCP spike)
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(api::mcp::protected_resource_metadata),
+        )
+        // MCP Streamable HTTP endpoint (spike: 401 discovery only)
+        .route("/mcp", post(api::mcp::mcp_unauthorized))
         // Health endpoints
         .route("/health", get(health_handler))
         .route("/_liveness", get(liveness_handler))
