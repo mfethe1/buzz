@@ -889,7 +889,7 @@ mobile-test:
 mobile-emoji-data:
     node {{mobile_dir}}/scripts/generate-emoji-data.mjs
 
-# Compile an unsigned Android debug APK (worktree-aware debug identity)
+# Compile an Android debug APK signed with the debug key (worktree-aware identity)
 mobile-build-android:
     ./scripts/mobile-worktree-overrides.sh
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter build apk --debug --no-pub
