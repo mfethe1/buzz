@@ -1947,7 +1947,9 @@ mod postgres_tests {
                 .find(|migration| migration.version == version)
                 .expect("embedded tenant-table migration");
             assert!(
-                surface(introduced.sql.as_ref()).fence_attachments.contains(table),
+                surface(introduced.sql.as_ref())
+                    .fence_attachments
+                    .contains(table),
                 "migration {version} is missing the write-fence attachment for {table}"
             );
             expected_fences.insert(table.to_owned());
