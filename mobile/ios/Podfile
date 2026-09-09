@@ -39,4 +39,9 @@ post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
   end
+  require File.expand_path(
+    '.symlinks/plugins/google_mlkit_commons/ios/scripts/apple_silicon_simulator',
+    __dir__,
+  )
+  mlkit_apple_silicon_simulator_patch(installer)
 end
