@@ -28,6 +28,7 @@ const MAX_IMAGE_FETCH_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION: u32 = 4096;
 const MAX_IMAGE_PIXELS: u64 = 16_000_000;
 const MAX_SANITIZED_DIMENSION: u32 = 1200;
+const PREVIEW_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 const TRANSPORT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const TRANSPORT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const DNS_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(15);
@@ -64,15 +65,24 @@ pub async fn fetch_link_preview_metadata(
     request_id: Option<String>,
 ) -> Result<Option<LinkPreviewMetadata>, String> {
     let cancellation = cancellation::begin(request_id.as_deref());
-    let result = match cancellation {
-        Some(cancellation) => {
-            tokio::select! {
-                result = fetch_link_preview_metadata_for_url(href) => result,
-                () = cancellation.cancelled() => Err("link preview request cancelled".to_string()),
+    // One budget spans DNS, redirects, bodies, image work and cooldown waits.
+    // A progressing response may outlive an idle timeout, but not this budget.
+    let timeout = PREVIEW_OPERATION_TIMEOUT;
+    #[cfg(test)]
+    let timeout = deadline_tests::operation_timeout(timeout);
+    let result = tokio::time::timeout(timeout, async {
+        match cancellation {
+            Some(cancellation) => {
+                tokio::select! {
+                    result = fetch_link_preview_metadata_for_url(href) => result,
+                    () = cancellation.cancelled() => Err("link preview request cancelled".to_string()),
+                }
             }
+            None => fetch_link_preview_metadata_for_url(href).await,
         }
-        None => fetch_link_preview_metadata_for_url(href).await,
-    };
+    })
+    .await
+    .unwrap_or_else(|_| Err("link preview operation timed out".to_string()));
     cancellation::finish(request_id.as_deref());
     result
 }
@@ -93,14 +103,14 @@ async fn fetch_link_preview_metadata_for_url(
     href: String,
 ) -> Result<Option<LinkPreviewMetadata>, String> {
     let mut url = Url::parse(href.trim()).map_err(|error| format!("invalid URL: {error}"))?;
-    validate_metadata_url(&url).await?;
+    validate_public_https_url(&url).await?;
 
     if youtube::is_video_url(&url) {
         return youtube::fetch_oembed_metadata(&url).await;
     }
 
     for redirect_count in 0..=MAX_REDIRECTS {
-        let response = send_metadata_request(&url, "text/html,application/xhtml+xml;q=0.9").await?;
+        let response = send_pinned_request(&url, "text/html,application/xhtml+xml;q=0.9").await?;
 
         if response.status().is_redirection() {
             if redirect_count == MAX_REDIRECTS {
@@ -115,7 +125,7 @@ async fn fetch_link_preview_metadata_for_url(
             url = url
                 .join(location)
                 .map_err(|error| format!("invalid link preview redirect: {error}"))?;
-            validate_metadata_url(&url).await?;
+            validate_public_https_url(&url).await?;
             continue;
         }
 
@@ -178,16 +188,12 @@ fn apply_image_result(
     }
 }
 
-async fn validate_metadata_url(url: &Url) -> Result<(), String> {
+async fn validate_public_https_url(url: &Url) -> Result<(), String> {
     #[cfg(test)]
     if METADATA_TEST_SERVER.try_with(|_| ()).is_ok() {
         return Ok(());
     }
 
-    validate_public_https_url(url).await
-}
-
-async fn validate_public_https_url(url: &Url) -> Result<(), String> {
     if url.scheme() != "https" || url.username() != "" || url.password().is_some() {
         return Err("link previews require an HTTPS URL without credentials".to_string());
     }
@@ -228,21 +234,12 @@ tokio::task_local! {
     static METADATA_TEST_SERVER: std::net::SocketAddr;
 }
 
-async fn send_metadata_request(url: &Url, accept: &str) -> Result<reqwest::Response, String> {
+async fn send_pinned_request(url: &Url, accept: &str) -> Result<reqwest::Response, String> {
     #[cfg(test)]
     if let Ok(address) = METADATA_TEST_SERVER.try_with(|address| *address) {
-        return reqwest::Client::new()
-            .get(format!("http://{address}{}", url.path()))
-            .header(ACCEPT, accept)
-            .send()
-            .await
-            .map_err(|error| format!("link preview test request failed: {error}"));
+        return deadline_tests::send_request(address, url, accept).await;
     }
 
-    send_pinned_request(url, accept).await
-}
-
-async fn send_pinned_request(url: &Url, accept: &str) -> Result<reqwest::Response, String> {
     let host = url
         .host_str()
         .ok_or_else(|| "link preview URL has no host".to_string())?;
@@ -795,3 +792,7 @@ fn decode_html_entities(value: &str) -> String {
 #[cfg(test)]
 #[path = "link_preview_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "link_preview_deadline_tests.rs"]
+mod deadline_tests;

@@ -35,8 +35,8 @@ async fn test_response(router: Router, path: &str) -> reqwest::Response {
         .unwrap()
 }
 
-#[tokio::test(start_paused = true)]
-async fn metadata_pipeline_remains_pending_beyond_former_aggregate_deadline() {
+#[tokio::test]
+async fn metadata_pipeline_allows_useful_response_beyond_ten_seconds() {
     let (request_started_tx, request_started_rx) = oneshot::channel::<()>();
     let request_started_tx = Arc::new(Mutex::new(Some(request_started_tx)));
     let (release_response_tx, release_response_rx) = oneshot::channel::<()>();
@@ -70,7 +70,8 @@ async fn metadata_pipeline_remains_pending_beyond_former_aggregate_deadline() {
     ));
 
     request_started_rx.await.unwrap();
-    tokio::time::advance(std::time::Duration::from_secs(11)).await;
+    // Real socket I/O must not race the paused clock auto-advancing to an idle timer.
+    tokio::time::sleep(std::time::Duration::from_secs(11)).await;
     assert!(!fetch.is_finished());
 
     release_response_tx.send(()).unwrap();

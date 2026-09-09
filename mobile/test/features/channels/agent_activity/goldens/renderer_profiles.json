@@ -37,5 +37,31 @@
       "abi": "windows_x64",
       "testerSha256": "fe4d5c563b653486c1de9a53441d03ed5f4fc90bf69f9efcc72d59f9d5e2fc4e"
     }
+  },
+  {
+    "directory": "linux-x64-flutter-3-41-7",
+    "fingerprint": {
+      "platform": "linux",
+      "osVersion": "Linux 6.17.0-1022-azure #22-Ubuntu SMP Mon Jul 27 17:24:03 UTC 2026",
+      "abi": "linux_x64",
+      "flutter": "3.41.7",
+      "framework": "cc0734ac716fbb8b90f3f9db8020958b1553afa7",
+      "engine": "59aa584fdf100e6c78c785d8a5b565d1de4b48ab",
+      "testerSha256": "4542c5cec954f0aa5d08d6012c10e1e79762dd2e79ddb5d6dfd24b1d831b5171",
+      "fontsSha256": "6b7db69026d649261d441120392bffae8bbccf1d61f368d8752b4ff2f780847a"
+    }
+  },
+  {
+    "directory": "linux-x64-flutter-3-41-7",
+    "fingerprint": {
+      "platform": "linux",
+      "osVersion": "Linux 6.8.0-117-generic #117-Ubuntu SMP PREEMPT_DYNAMIC Thu May  7 17:26:37 UTC 2026",
+      "abi": "linux_x64",
+      "flutter": "3.41.7",
+      "framework": "cc0734ac716fbb8b90f3f9db8020958b1553afa7",
+      "engine": "59aa584fdf100e6c78c785d8a5b565d1de4b48ab",
+      "testerSha256": "4542c5cec954f0aa5d08d6012c10e1e79762dd2e79ddb5d6dfd24b1d831b5171",
+      "fontsSha256": "6b7db69026d649261d441120392bffae8bbccf1d61f368d8752b4ff2f780847a"
+    }
   }
 ]
