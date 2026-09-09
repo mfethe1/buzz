@@ -122,9 +122,7 @@ class _ComputerList extends HookConsumerWidget {
                 borderRadius: BorderRadius.circular(Radii.dialog),
               ),
               child: ListTile(
-                subtitleTextStyle: context.textTheme.bodyMedium?.copyWith(
-                  color: context.colors.onSurfaceVariant,
-                ),
+                textColor: context.colors.onSurface,
                 key: ValueKey('computer-${computer.id}'),
                 leading: Icon(
                   LucideIcons.monitor,

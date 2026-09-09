@@ -124,15 +124,13 @@ class ComputerDetailPage extends HookConsumerWidget {
                   child: Column(
                     children: [
                       ListTile(
-                        subtitleTextStyle: context.textTheme.bodyMedium
-                            ?.copyWith(color: context.colors.onSurfaceVariant),
+                        textColor: context.colors.onSurface,
                         title: const Text('Agent runtime'),
                         subtitle: Text(computer.runtimeLabel),
                         leading: const Icon(LucideIcons.bot),
                       ),
                       ListTile(
-                        subtitleTextStyle: context.textTheme.bodyMedium
-                            ?.copyWith(color: context.colors.onSurfaceVariant),
+                        textColor: context.colors.onSurface,
                         title: const Text('Last update'),
                         subtitle: Text(
                           computer.observedAt == null

@@ -8,6 +8,7 @@ import 'package:buzz/shared/machines/machines_api.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/legacy.dart';
@@ -37,6 +38,7 @@ void main() {
     WidgetTester tester,
     Future<http.Response> Function(http.Request) handler, {
     Duration Function()? clock,
+    ThemeData? theme,
   }) async {
     container = ProviderContainer(
       overrides: [
@@ -51,7 +53,7 @@ void main() {
       UncontrolledProviderScope(
         container: container,
         child: MaterialApp(
-          theme: AppTheme.light(),
+          theme: theme ?? AppTheme.light(),
           home: Consumer(
             builder: (context, ref, _) =>
                 ComputersPage(onBack: () {}, visible: ref.watch(_visible)),
@@ -62,6 +64,36 @@ void main() {
     await tester.pump();
     await tester.pump();
   }
+
+  testWidgets('computer details remain readable in the real dark palette', (
+    tester,
+  ) async {
+    final theme = AppTheme.dark(
+      colorScheme: generateColorScheme(findTheme('github-dark')!),
+    );
+    await mount(
+      tester,
+      (r) async => r.url.path.endsWith(computerId)
+          ? http.Response(jsonEncode(computerJson(owner)), 200)
+          : page([computerJson(owner)]),
+      theme: theme,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Office computer'));
+    await tester.pumpAndSettle();
+    final surface = theme.colorScheme.surfaceContainerHigh.computeLuminance();
+    for (final label in ['Hermes', 'No update received']) {
+      final paragraph = tester.renderObject<RenderParagraph>(find.text(label));
+      final foreground = paragraph.text.style!.color!.computeLuminance();
+      final light = foreground > surface ? foreground : surface;
+      final dark = foreground < surface ? foreground : surface;
+      expect(
+        (light + .05) / (dark + .05),
+        greaterThanOrEqualTo(4.5),
+        reason: label,
+      );
+    }
+  });
 
   testWidgets('skewed local wall clock cannot extend a fresh report', (
     tester,
