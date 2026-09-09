@@ -791,7 +791,7 @@ mod postgres_tests {
                 .expect("duplicate advisory");
         }
         tokio::time::timeout(Duration::from_secs(1), async {
-            while tx.len() != 0 {
+            while !tx.is_empty() {
                 tokio::task::yield_now().await;
             }
         })
