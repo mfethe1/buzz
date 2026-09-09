@@ -13,7 +13,7 @@ void main() {
       'native segmentation processes two file images in ${mode.name} mode',
       (tester) async {
         expect(Platform.isIOS || Platform.isAndroid, isTrue);
-        await tester.runAsync(() async {
+        final masks = await tester.runAsync(() async {
           final directory = await Directory.systemTemp.createTemp(
             'buzz-native-segmentation-',
           );
@@ -21,6 +21,7 @@ void main() {
             mode: mode,
             enableRawSizeMask: false,
           );
+          final results = <SegmentationMask?>[];
           try {
             for (var frame = 0; frame < 2; frame++) {
               final input = image.Image(width: 64, height: 64, numChannels: 3);
@@ -30,22 +31,13 @@ void main() {
               );
               final file = File('${directory.path}/frame-$frame.png');
               await file.writeAsBytes(image.encodePng(input));
-
-              final mask = await segmenter
-                  .processImage(InputImage.fromFilePath(file.path))
-                  .timeout(const Duration(seconds: 60));
-
-              expect(mask, isNotNull);
-              expect(mask!.width, 64);
-              expect(mask.height, 64);
-              expect(mask.confidences, hasLength(64 * 64));
-              expect(
-                mask.confidences.every(
-                  (value) => value.isFinite && value >= 0 && value <= 1,
-                ),
-                isTrue,
+              results.add(
+                await segmenter
+                    .processImage(InputImage.fromFilePath(file.path))
+                    .timeout(const Duration(seconds: 60)),
               );
             }
+            return results;
           } finally {
             try {
               await segmenter.close().timeout(const Duration(seconds: 10));
@@ -54,6 +46,23 @@ void main() {
             }
           }
         });
+
+        // runAsync can return null after reporting an asynchronous error.
+        // Assert completion and results outside that error-catching boundary.
+        expect(masks, isNotNull);
+        expect(masks, hasLength(2));
+        for (final mask in masks!) {
+          expect(mask, isNotNull);
+          expect(mask!.width, 64);
+          expect(mask.height, 64);
+          expect(mask.confidences, hasLength(64 * 64));
+          expect(
+            mask.confidences.every(
+              (value) => value.isFinite && value >= 0 && value <= 1,
+            ),
+            isTrue,
+          );
+        }
       },
     );
   }
