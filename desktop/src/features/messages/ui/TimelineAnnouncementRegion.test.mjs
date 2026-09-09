@@ -108,6 +108,40 @@ test("one incoming tail message produces one concise announcement", () => {
   assert.deepEqual(result.announcements, ["Bob: Deploy finished"]);
 });
 
+test("announcements use visible Markdown text and conceal parsed spoilers", () => {
+  const cases = [
+    [
+      "Before ||**hidden note** and [secret](https://private.example/hidden)|| after",
+      "Before Hidden spoiler after",
+    ],
+    [
+      "||\n\n# hidden heading\n\n![hidden image](https://private.example/image)\n\n||",
+      "Hidden spoiler",
+    ],
+    ["> Before ||hidden quote|| after", "Before Hidden spoiler after"],
+    [
+      "[visible ||hidden label||](https://private.example/destination)",
+      "visible Hidden spoiler",
+    ],
+    [
+      "`||literal code||` and ||hidden||",
+      "||literal code|| and Hidden spoiler",
+    ],
+    ["Unmatched ||visible text", "Unmatched ||visible text"],
+    [
+      "| Name | Value |\n| --- | --- |\n| visible | \\|\\|hidden cell\\|\\| |",
+      "Name Value visible Hidden spoiler",
+    ],
+  ];
+  for (const [body, expected] of cases) {
+    const seeded = advance(null, "alpha", []);
+    const result = advance(seeded.state, "alpha", [
+      message("new", "Bob", body),
+    ]);
+    assert.deepEqual(result.announcements, [`Bob: ${expected}`], body);
+  }
+});
+
 test("history prepends and replacement snapshots remain silent", () => {
   const seeded = advance(null, "alpha", [message("newer", "Bob", "Current")]);
   const prepended = advance(seeded.state, "alpha", [

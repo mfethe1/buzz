@@ -6,6 +6,7 @@ import {
   resolveAgentCardAvatarUrl,
 } from "@/features/agents/lib/agentCardAvatar";
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
+import { effectiveAgentDescription } from "@/features/agents/lib/agentDescription";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import type { AgentAvailabilityReader } from "@/features/agents/lib/useAgentAvailability";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
@@ -315,6 +316,7 @@ function AgentPersonaCard({
     : null;
   const hermesProfile = agent ? hermesProfileNameFromAgent(agent) : null;
   const runtimeSubtitle = [
+    effectiveAgentDescription(persona),
     subtitle,
     hermesProfile ? `Hermes · ${hermesProfile}` : null,
   ]

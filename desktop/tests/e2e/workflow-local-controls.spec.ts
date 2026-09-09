@@ -149,6 +149,15 @@ test("inserts template variables with keyboard control and restores the caret", 
   page,
 }) => {
   const dialog = await openCreateWorkflow(page, "template_variables_keyboard");
+  await expect(
+    dialog.getByRole("switch", { name: "Enable workflow" }),
+  ).toHaveCount(0);
+  await expect(
+    dialog.getByRole("button", {
+      name: "Trigger: Message posted",
+      exact: true,
+    }),
+  ).toBeVisible();
   await dialog.getByRole("button", { name: "Add step", exact: true }).click();
   await page.getByRole("menuitem", { name: "Send Message" }).click();
 

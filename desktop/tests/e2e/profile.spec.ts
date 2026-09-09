@@ -1909,7 +1909,9 @@ test("an older agent message stays exact while persona navigation selects the li
   await page.goto("/");
 
   await page.getByTestId("open-agents-view").click();
-  await page.getByTestId(`persona-agent-row-${personaId}`).click();
+  await page
+    .getByTestId(`persona-agent-row-${personaId}::current parity agent`)
+    .click();
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
   ).toHaveAttribute("aria-label", "Stop");
