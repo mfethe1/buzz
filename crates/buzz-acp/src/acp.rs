@@ -4828,7 +4828,7 @@ mod tests {
             ID=$(printf '%s' "$REQ" | sed -E 's/.*"id":([0-9]+).*/\1/')
             echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"wire-session","update":{"sessionUpdate":"usage_update","cost":{"amount":0.5,"currency":"USD"}}}}'
             echo '{"jsonrpc":"2.0","id":'"$ID"',"result":{"stopReason":"end_turn","usage":{"inputTokens":7,"outputTokens":3,"totalTokens":10,"cachedReadTokens":2}}}'
-            sleep 1
+            read -r _done
         "#;
         let (mut client, dir) = spawn_named_script("claude-code", script).await;
         assert_eq!(client.standard_adapter, Some(StandardAdapterKind::Claude));
@@ -4851,6 +4851,15 @@ mod tests {
         assert_eq!(usage.turn_output_tokens, Some(3));
         assert_eq!(usage.turn_cost_usd, Some(0.5));
         assert_eq!(usage.cumulative_cost_usd, Some(0.5));
+        client.shutdown().await;
+        assert!(
+            client
+                .child
+                .try_wait()
+                .expect("fixture wait must succeed")
+                .is_some(),
+            "named wire fixture must be reaped before returning"
+        );
         drop(client);
         let _ = std::fs::remove_dir_all(dir);
     }
