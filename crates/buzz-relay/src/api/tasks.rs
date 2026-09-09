@@ -322,11 +322,9 @@ pub async fn create_task(
         .await
         .map_err(|error| map_task_error("create task", error))?;
 
-    if let Some(channel_id) = task.channel_id {
-        state
-            .invalidate_tasks_for_channel(tenant.community(), channel_id)
-            .await;
-    }
+    state
+        .invalidate_tasks(tenant.community(), task.channel_id)
+        .await;
 
     Ok(Json(task_json(&task)))
 }
@@ -520,11 +518,9 @@ pub async fn update_task(
     // The DB commit precedes notification. Rejected and semantic no-op writes
     // do not announce a new revision; clients obtain task data via authorized GET.
     if task.revision != existing.revision {
-        if let Some(channel_id) = task.channel_id {
-            state
-                .invalidate_tasks_for_channel(tenant.community(), channel_id)
-                .await;
-        }
+        state
+            .invalidate_tasks(tenant.community(), task.channel_id)
+            .await;
     }
 
     Ok(Json(task_json(&task)))
@@ -592,11 +588,9 @@ pub async fn append_task_event(
         .await
         .map_err(|error| map_task_error("append task event", error))?;
 
-    if let Some(channel_id) = task.channel_id {
-        state
-            .invalidate_tasks_for_channel(tenant.community(), channel_id)
-            .await;
-    }
+    state
+        .invalidate_tasks(tenant.community(), task.channel_id)
+        .await;
 
     Ok(Json(task_event_json(&event)))
 }

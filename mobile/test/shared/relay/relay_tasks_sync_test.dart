@@ -6,7 +6,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
   test(
-    'task invalidation requires a connected session and one channel UUID',
+    'task invalidation accepts channel and community scopes only while connected',
     () {
       final container = ProviderContainer(
         overrides: [authProvider.overrideWith(_Unauthenticated.new)],
@@ -31,9 +31,13 @@ void main() {
       expect(container.read(tasksSyncSignalProvider), 0);
       session.debugHandleMessage(frame);
       expect(container.read(tasksSyncSignalProvider), 1);
+      session.debugHandleMessage(['BUZZ_TASKS_SYNC_REQUIRED', null]);
+      expect(container.read(tasksSyncSignalProvider), 2);
+      session.debugHandleMessage(['BUZZ_TASKS_SYNC_REQUIRED', null]);
+      expect(container.read(tasksSyncSignalProvider), 3);
       session.debugDispose();
       session.debugHandleMessage(frame);
-      expect(container.read(tasksSyncSignalProvider), 1);
+      expect(container.read(tasksSyncSignalProvider), 3);
     },
   );
 

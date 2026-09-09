@@ -47,6 +47,10 @@ class WorkPage extends HookConsumerWidget {
       return () => disposed = true;
     }, [channels]);
     final selectedStatus = status.value;
+    final lifecycle = useState(
+      WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed,
+    );
+    final resumeEpoch = useState(0);
     final query = useMemoized(
       () => TaskListQuery(
         (before) =>
@@ -59,21 +63,32 @@ class WorkPage extends HookConsumerWidget {
     final signal = ref.watch(tasksSyncSignalProvider);
     useEffect(() {
       var cancelled = false;
-      if (visible) {
+      final enabled = visible && lifecycle.value == AppLifecycleState.resumed;
+      query.setEnabled(enabled);
+      if (enabled) {
         scheduleMicrotask(() {
-          if (!cancelled) query.refresh();
+          if (!cancelled) unawaited(query.reconcile(invalidate: true));
         });
       }
       return () => cancelled = true;
-    }, [query, signal, visible]);
+    }, [query, signal, visible, lifecycle.value, resumeEpoch.value]);
     useEffect(() {
       final listener = AppLifecycleListener(
-        onResume: () {
-          if (visible) unawaited(query.refresh());
+        onStateChange: (state) {
+          query.setEnabled(visible && state == AppLifecycleState.resumed);
+          lifecycle.value = state;
+          if (state == AppLifecycleState.resumed) resumeEpoch.value++;
         },
       );
       return listener.dispose;
     }, [query, visible]);
+    useEffect(() {
+      if (!visible || lifecycle.value != AppLifecycleState.resumed) return null;
+      final timer = Timer.periodic(const Duration(seconds: 30), (_) {
+        unawaited(query.reconcile());
+      });
+      return timer.cancel;
+    }, [query, visible, lifecycle.value]);
 
     return Scaffold(
       backgroundColor: context.colors.surface,
@@ -193,10 +208,14 @@ class WorkPage extends HookConsumerWidget {
                           Text(
                             state.tasks.isEmpty
                                 ? "Couldn't load your tasks."
+                                : state.reconciliationFailed
+                                ? "Couldn't refresh your tasks."
                                 : "Couldn't load more tasks.",
                           ),
                           TextButton(
-                            onPressed: state.tasks.isEmpty
+                            onPressed: state.reconciliationFailed
+                                ? () => query.reconcile(invalidate: true)
+                                : state.tasks.isEmpty
                                 ? query.refresh
                                 : query.loadMore,
                             child: const Text('Try again'),

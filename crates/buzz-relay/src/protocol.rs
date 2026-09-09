@@ -29,12 +29,13 @@
 //!
 //! ```text
 //! ["BUZZ_TASKS_SYNC_REQUIRED","<channel_id>"]
+//! ["BUZZ_TASKS_SYNC_REQUIRED",null]
 //! ```
 //!
-//! Advisory invalidation signal telling clients that tasks in the
-//! named channel changed and they should refetch through the existing
-//! authorized HTTP API. Delivered on the connection's priority control
-//! channel. The payload carries only the channel UUID — no task content
+//! Advisory invalidation signal telling clients that tasks in the named
+//! channel, or community-wide tasks when the scope is `null`, changed and they
+//! should refetch through the existing authorized HTTP API. Delivered on the
+//! connection's priority control channel. The payload carries only the scope — no task content
 //! (no id, title, status, assignee, or actor). A connection that lacks
 //! existing channel visibility receives no frame at all, so the signal
 //! cannot become an existence oracle. Clients treat the frame as advice
@@ -305,12 +306,11 @@ impl RelayMessage {
 
     /// Format a `BUZZ_TASKS_SYNC_REQUIRED` extension frame (see module docs).
     ///
-    /// Advisory task invalidation signal. The `channel_id` is the UUID
-    /// of the channel whose tasks changed — the only payload field, and the
-    /// only thing the client needs to invalidate its query cache. No task
-    /// content is carried. Delivered on the priority control channel to
-    /// connections that already have visibility into the channel.
-    pub fn tasks_sync_required(channel_id: &uuid::Uuid) -> String {
+    /// Advisory task invalidation signal. `Some(channel_id)` identifies the
+    /// channel whose tasks changed; `None` is community-wide. No task content
+    /// is carried. Channel-scoped frames are delivered only to connections
+    /// that have current visibility into that channel.
+    pub fn tasks_sync_required(channel_id: Option<&uuid::Uuid>) -> String {
         serde_json::json!(["BUZZ_TASKS_SYNC_REQUIRED", channel_id]).to_string()
     }
 }
@@ -610,10 +610,13 @@ mod tests {
                 "tasks_sync_required",
                 Box::new(|| {
                     let channel_id = uuid::Uuid::nil();
-                    let msg = RelayMessage::tasks_sync_required(&channel_id);
+                    let msg = RelayMessage::tasks_sync_required(Some(&channel_id));
                     let v: Value = serde_json::from_str(&msg).unwrap();
                     assert_eq!(v[0], "BUZZ_TASKS_SYNC_REQUIRED");
                     assert_eq!(v[1], "00000000-0000-0000-0000-000000000000");
+                    let community: Value =
+                        serde_json::from_str(&RelayMessage::tasks_sync_required(None)).unwrap();
+                    assert!(community[1].is_null());
                 }),
             ),
         ];

@@ -39,6 +39,7 @@ void main() {
     TaskAssigneeDirectory? directory,
     Future<void> Function()? refreshChannels,
     ValueNotifier<AsyncValue<List<TaskChannel>>>? channelOptions,
+    ValueNotifier<bool>? visibility,
   }) async {
     final api = TasksApi(
       httpClient: MockClient(handler),
@@ -59,23 +60,33 @@ void main() {
           const AsyncData([TaskChannel(id: 'room', name: 'General')]),
         );
     if (channelOptions == null) addTearDown(options.dispose);
+    final shown = visibility ?? ValueNotifier(true);
+    if (visibility == null) addTearDown(shown.dispose);
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
         child: MaterialApp(
           theme: AppTheme.light(),
-          home: ValueListenableBuilder(
-            valueListenable: options,
-            builder: (context, value, _) => WorkPage(
-              onBack: () {},
-              channels: value,
-              onRefreshChannels: refreshChannels ?? () async {},
+          home: ValueListenableBuilder<bool>(
+            valueListenable: shown,
+            builder: (context, visible, _) => ValueListenableBuilder(
+              valueListenable: options,
+              builder: (context, value, _) => WorkPage(
+                onBack: () {},
+                channels: value,
+                onRefreshChannels: refreshChannels ?? () async {},
+                visible: visible,
+              ),
             ),
           ),
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    if (shown.value) {
+      await tester.pumpAndSettle();
+    } else {
+      await tester.pump();
+    }
   }
 
   testWidgets(
@@ -131,7 +142,7 @@ void main() {
   });
 
   testWidgets(
-    'refresh discards an in-flight old page and reads the first page again',
+    'refresh fences an in-flight page while preserving the visible snapshot',
     (tester) async {
       final delayed = Completer<http.Response>();
       final freshPage = Completer<http.Response>();
@@ -152,7 +163,7 @@ void main() {
       delayed.complete(page([task('Stale page')]));
       await tester.pump();
       expect(find.text('Stale page'), findsNothing);
-      expect(find.text('Before refresh'), findsNothing);
+      expect(find.text('Before refresh'), findsOneWidget);
       freshPage.complete(page([task('After refresh')]));
       await tester.pumpAndSettle();
       expect(find.text('Stale page'), findsNothing);
@@ -160,6 +171,208 @@ void main() {
       expect(find.text('After refresh'), findsOneWidget);
     },
   );
+
+  testWidgets(
+    'reconciliation preserves two-page continuity and removes stale rows',
+    (tester) async {
+      var generation = 0;
+      await mount(tester, (request) async {
+        final second = request.url.queryParameters['before'] == 'cursor-1';
+        if (generation == 0) {
+          return second
+              ? page([task('Second old')])
+              : page([task('First unchanged')], 'cursor-1');
+        }
+        return second
+            ? page([task('Second changed', revision: 1)])
+            : page([task('First unchanged')], 'cursor-1');
+      });
+      await tester.tap(find.text('Load more'));
+      await tester.pumpAndSettle();
+      expect(find.text('Second old'), findsOneWidget);
+
+      generation++;
+      container.read(tasksSyncSignalProvider.notifier).bump();
+      await tester.pumpAndSettle();
+      expect(find.text('First unchanged'), findsOneWidget);
+      expect(find.text('Second old'), findsNothing);
+      expect(find.text('Second changed'), findsOneWidget);
+    },
+  );
+
+  testWidgets('transient reconciliation failure keeps loaded pages visible', (
+    tester,
+  ) async {
+    var fail = false;
+    await mount(tester, (request) async {
+      if (fail) throw http.ClientException('temporary');
+      return request.url.queryParameters.containsKey('before')
+          ? page([task('Older visible')])
+          : page([task('Newest visible')], 'cursor-1');
+    });
+    await tester.tap(find.text('Load more'));
+    await tester.pumpAndSettle();
+    fail = true;
+    container.read(tasksSyncSignalProvider.notifier).bump();
+    await tester.pumpAndSettle();
+    expect(find.text('Newest visible'), findsOneWidget);
+    expect(find.text('Older visible'), findsOneWidget);
+  });
+
+  testWidgets(
+    'background refresh retains the loaded viewport and scroll position',
+    (tester) async {
+      var reads = 0;
+      await mount(tester, (request) async {
+        reads++;
+        final second = request.url.queryParameters.containsKey('before');
+        return page(
+          List.generate(20, (i) => task('Task ${i + (second ? 20 : 0)}')),
+          second ? null : 'next-page',
+        );
+      });
+      await tester.scrollUntilVisible(find.text('Load more'), 250);
+      await tester.tap(find.text('Load more'));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(find.text('Task 25'), 200);
+      await tester.pumpAndSettle();
+      final position = tester
+          .state<ScrollableState>(find.byType(Scrollable).first)
+          .position;
+      final before = position.pixels;
+      final visibleBefore = tester.getTopLeft(find.text('Task 25'));
+      await tester.pump(const Duration(seconds: 30));
+      await tester.pumpAndSettle();
+      expect(reads, 4);
+      expect(find.text('Task 25'), findsOneWidget);
+      expect(position.pixels, before);
+      expect(tester.getTopLeft(find.text('Task 25')), visibleBefore);
+    },
+  );
+
+  testWidgets('background failure retries the complete loaded window', (
+    tester,
+  ) async {
+    var fail = false;
+    var reads = 0;
+    await mount(tester, (request) async {
+      reads++;
+      if (fail) throw http.ClientException('temporary transport outage');
+      return request.url.queryParameters.containsKey('before')
+          ? page([task('Second page retained')])
+          : page([task('First page retained')], 'next-page');
+    });
+    await tester.tap(find.text('Load more'));
+    await tester.pumpAndSettle();
+    fail = true;
+    await tester.pump(const Duration(seconds: 30));
+    await tester.pumpAndSettle();
+    expect(find.text('Second page retained'), findsOneWidget);
+    expect(find.text("Couldn't refresh your tasks."), findsOneWidget);
+    final beforeRetry = reads;
+    fail = false;
+    await tester.tap(find.text('Try again'));
+    await tester.pumpAndSettle();
+    expect(reads - beforeRetry, 2);
+    expect(find.text("Couldn't refresh your tasks."), findsNothing);
+    expect(find.text('Second page retained'), findsOneWidget);
+  });
+
+  for (final status in [401, 403, 404]) {
+    testWidgets('background access denial $status clears previous rows', (
+      tester,
+    ) async {
+      var denied = false;
+      await mount(
+        tester,
+        (_) async => denied
+            ? http.Response('{"error":"access removed"}', status)
+            : page([task('Previously accessible')]),
+      );
+      denied = true;
+      await tester.pump(const Duration(seconds: 30));
+      await tester.pumpAndSettle();
+      expect(find.text('Previously accessible'), findsNothing);
+      expect(find.text("Couldn't load your tasks."), findsOneWidget);
+      expect(find.text('Try again'), findsOneWidget);
+    });
+  }
+
+  testWidgets(
+    'failed background reads cannot preserve stale rows beyond 90 seconds',
+    (tester) async {
+      var fail = false;
+      await mount(tester, (_) async {
+        if (fail) throw http.ClientException('unreachable');
+        return page([task('Last confirmed snapshot')]);
+      });
+      fail = true;
+      await tester.pump(const Duration(seconds: 30));
+      await tester.pumpAndSettle();
+      expect(find.text('Last confirmed snapshot'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 61));
+      await tester.pumpAndSettle();
+      expect(find.text('Last confirmed snapshot'), findsNothing);
+      expect(find.text('Try again'), findsOneWidget);
+    },
+  );
+
+  testWidgets('pausing in a window read prevents later pages until resume', (
+    tester,
+  ) async {
+    final delayed = Completer<http.Response>();
+    var reads = 0;
+    await mount(tester, (request) async {
+      reads++;
+      if (reads == 3) return delayed.future;
+      return request.url.queryParameters.containsKey('before')
+          ? page([task('Second visible')])
+          : page([task('First visible')], 'next-page');
+    });
+    await tester.tap(find.text('Load more'));
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 30));
+    await tester.pump();
+    expect(reads, 3);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    delayed.complete(page([task('Retired response')], 'next-page'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 60));
+    expect(reads, 3);
+    expect(find.text('Retired response'), findsNothing);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(reads, 5);
+    expect(find.text('Second visible'), findsOneWidget);
+  });
+
+  testWidgets(
+    'visible Work recovers a missed task advisory within 30 seconds',
+    (tester) async {
+      var current = 'Before missed advisory';
+      var reads = 0;
+      await mount(tester, (request) async {
+        reads++;
+        return page([task(current, revision: reads - 1)]);
+      });
+      expect(find.text('Before missed advisory'), findsOneWidget);
+      expect(reads, 1);
+
+      current = 'After missed advisory';
+      await tester.pump(const Duration(seconds: 30));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Before missed advisory'), findsNothing);
+      expect(find.text('After missed advisory'), findsOneWidget);
+      expect(reads, 2);
+    },
+  );
+
   testWidgets(
     'creates an assigned task without starting execution, then opens its real detail',
     (tester) async {
@@ -440,13 +653,35 @@ void main() {
       );
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 60));
+      expect(reads, 1);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
       tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
       await tester.pumpAndSettle();
+      expect(reads, 2);
       expect(find.text('Before resume'), findsNothing);
       expect(find.text('After resume'), findsOneWidget);
     },
   );
+
+  testWidgets('hidden Work neither polls nor refreshes until selected', (
+    tester,
+  ) async {
+    final visibility = ValueNotifier(false);
+    addTearDown(visibility.dispose);
+    var reads = 0;
+    await mount(tester, (_) async {
+      reads++;
+      return page([task('Visible after selection')]);
+    }, visibility: visibility);
+    expect(reads, 0);
+    await tester.pump(const Duration(seconds: 60));
+    expect(reads, 0);
+    visibility.value = true;
+    await tester.pumpAndSettle();
+    expect(reads, 1);
+  });
   testWidgets(
     'conversation removal updates an open form without submitting its old selection',
     (tester) async {

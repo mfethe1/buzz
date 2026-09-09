@@ -34,6 +34,15 @@ mod postgres_tests {
     }
 
     async fn connect(base: &str, host: &str, keys: Option<&Keys>) -> Socket {
+        connect_with_delegation(base, host, keys, None).await
+    }
+
+    async fn connect_with_delegation(
+        base: &str,
+        host: &str,
+        keys: Option<&Keys>,
+        owner: Option<&Keys>,
+    ) -> Socket {
         let mut request = base
             .replacen("http://", "ws://", 1)
             .into_client_request()
@@ -47,12 +56,18 @@ mod postgres_tests {
         let challenge = next_json(&mut socket).await;
         assert_eq!(challenge[0], "AUTH");
         if let Some(keys) = keys {
+            let mut tags = vec![
+                Tag::parse(["relay", &format!("wss://{host}")]).expect("relay tag"),
+                Tag::parse(["challenge", challenge[1].as_str().expect("challenge")])
+                    .expect("challenge tag"),
+            ];
+            if let Some(owner) = owner {
+                let signed = buzz_sdk::nip_oa::compute_auth_tag(owner, &keys.public_key(), "")
+                    .expect("signed delegation");
+                tags.push(buzz_sdk::nip_oa::parse_auth_tag(&signed).expect("delegation tag"));
+            }
             let event = EventBuilder::new(Kind::Authentication, "")
-                .tags([
-                    Tag::parse(["relay", &format!("wss://{host}")]).expect("relay tag"),
-                    Tag::parse(["challenge", challenge[1].as_str().expect("challenge")])
-                        .expect("challenge tag"),
-                ])
+                .tags(tags)
                 .sign_with_keys(keys)
                 .expect("signed NIP-42");
             let id = event.id.to_hex();
@@ -72,6 +87,13 @@ mod postgres_tests {
         assert_eq!(
             next_json(socket).await,
             json!(["BUZZ_TASKS_SYNC_REQUIRED", channel])
+        );
+    }
+
+    async fn expect_community_sync(socket: &mut Socket) {
+        assert_eq!(
+            next_json(socket).await,
+            json!(["BUZZ_TASKS_SYNC_REQUIRED", null])
         );
     }
 
@@ -99,6 +121,104 @@ mod postgres_tests {
         }
     }
 
+    struct Background(Vec<tokio::task::JoinHandle<()>>);
+    impl Drop for Background {
+        fn drop(&mut self) {
+            for handle in &self.0 {
+                handle.abort();
+            }
+        }
+    }
+
+    async fn start_conn_control(state: Arc<crate::state::AppState>) -> Background {
+        start_conn_control_gated(state, None).await
+    }
+
+    async fn start_conn_control_gated(
+        state: Arc<crate::state::AppState>,
+        gate: Option<tokio::sync::oneshot::Receiver<()>>,
+    ) -> Background {
+        let mut rx = state.pubsub.subscribe_conn_control();
+        let control_rx = state.pubsub.subscribe_conn_control();
+        let subscriber = {
+            let pubsub = state.pubsub.clone();
+            tokio::spawn(async move {
+                if let Some(gate) = gate {
+                    gate.await.expect("subscriber startup released");
+                }
+                pubsub.run_conn_control_subscriber().await;
+            })
+        };
+        // A fresh, nonexistent community makes the probe disjoint from every
+        // fixture socket. Observe it on this exact subscriber, not merely the
+        // Redis PUBLISH subscriber count (which can describe another relay).
+        let probe_ctx = buzz_core::TenantContext::resolved(
+            buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4()),
+            "readiness.invalid",
+        );
+        let probe_community = probe_ctx.community();
+        let publisher = state.pubsub.clone();
+        let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
+        let consumer = tokio::spawn(state.run_connection_control(control_rx));
+        let readiness = tokio::spawn(async move {
+            let mut ready_tx = Some(ready_tx);
+            while let Ok(scoped) = rx.recv().await {
+                if scoped.community_id == probe_community
+                    && scoped.command == buzz_pubsub::conn_control::ConnControl::DisconnectCommunity
+                {
+                    if let Some(tx) = ready_tx.take() {
+                        let _ = tx.send(());
+                    }
+                    continue;
+                }
+            }
+        });
+        // Own the handles before awaiting readiness, so timeout/unwind also
+        // aborts both tasks. Probe retries never replay HTTP task mutations.
+        let background = Background(vec![subscriber, consumer, readiness]);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut interval = tokio::time::interval(Duration::from_millis(50));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    result = &mut ready_rx => {
+                        result.expect("readiness consumer remains alive");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        publisher.publish_conn_control(
+                            &probe_ctx,
+                            &buzz_pubsub::conn_control::ConnControl::DisconnectCommunity,
+                        ).await.expect("publish isolated readiness probe");
+                    }
+                }
+            }
+        })
+        .await
+        .expect("this Redis subscriber must observe readiness within five seconds");
+        background
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn connection_control_readiness_waits_for_the_actual_subscriber() {
+        let f = fixture().await.expect("Postgres and Redis fixture");
+        // Another healthy subscriber must not satisfy this relay's readiness.
+        let other = peer_state(&f).await;
+        let _other_background = start_conn_control(other).await;
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let startup = start_conn_control_gated(f.state.clone(), Some(gate));
+        tokio::pin!(startup);
+        tokio::select! {
+            _ = &mut startup => panic!("readiness reported before the subscriber was released"),
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+        }
+        release.send(()).expect("release subscriber startup");
+        let _background = tokio::time::timeout(Duration::from_secs(5), startup)
+            .await
+            .expect("actual Redis readiness must be bounded");
+    }
+
     async fn serve(f: &mut Fixture) -> Server {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -116,6 +236,365 @@ mod postgres_tests {
         Server(tokio::spawn(async move {
             axum::serve(listener, router).await.expect("serve");
         }))
+    }
+
+    async fn peer_state(f: &Fixture) -> Arc<crate::state::AppState> {
+        let config = (*f.state.config).clone();
+        let redis_pool = f.state.redis_pool.clone();
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("peer pubsub"),
+        );
+        let audit = buzz_audit::AuditService::new(f.pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(f.pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            f.state.db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("peer media");
+        let (mut state, _audit_shutdown) = crate::state::AppState::new(
+            config,
+            f.state.db.clone(),
+            redis_pool.clone(),
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+        state.nip98_replay = Arc::new(buzz_pubsub::RedisNip98ReplayGuard::new(redis_pool));
+        Arc::new(state)
+    }
+
+    async fn serve_state(state: Arc<crate::state::AppState>) -> (Server, String) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let base = format!("http://{}", listener.local_addr().expect("address"));
+        let router = crate::router::build_router(state);
+        let server = Server(tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve");
+        }));
+        (server, base)
+    }
+
+    async fn request_at(
+        f: &Fixture,
+        base: &str,
+        method: &str,
+        path: &str,
+        keys: &Keys,
+        body: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let body_bytes = body.map(str::as_bytes).unwrap_or_default();
+        let auth = super::super::route_authz::nip98_auth_header(
+            keys,
+            method,
+            &format!("https://{}{path}", f.host),
+            body_bytes,
+        );
+        let response = reqwest::Client::new()
+            .request(method.parse().expect("method"), format!("{base}{path}"))
+            .header(axum::http::header::HOST, &f.host)
+            .header(axum::http::header::AUTHORIZATION, auth)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(body_bytes.to_vec())
+            .send()
+            .await
+            .expect("HTTP response");
+        let status = response.status();
+        let json = response.json().await.expect("HTTP JSON response");
+        (status, json)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn stored_agent_owner_does_not_authorize_a_revoked_direct_session() {
+        let mut f = fixture().await.expect("Postgres and Redis fixture");
+        let state = Arc::get_mut(&mut f.state).expect("exclusive fixture state");
+        let mut config = (*state.config).clone();
+        config.allow_nip_oa_auth = true;
+        state.config = Arc::new(config);
+        state
+            .db
+            .add_relay_member(
+                f.community,
+                &f.outsider.public_key().to_hex(),
+                "member",
+                None,
+            )
+            .await
+            .expect("direct agent membership");
+        assert!(state
+            .db
+            .set_agent_owner(
+                f.community,
+                &f.outsider.public_key().to_bytes(),
+                &f.owner.public_key().to_bytes(),
+            )
+            .await
+            .expect("stored owner relationship"));
+        let _server = serve(&mut f).await;
+        let base = f.http_base.as_deref().expect("HTTP base");
+        let mut owner = connect(base, &f.host, Some(&f.owner)).await;
+        // This NIP-42 session deliberately has no NIP-OA auth tag.
+        let mut agent = connect(base, &f.host, Some(&f.outsider)).await;
+        let (status, created) = f
+            .request(
+                "POST",
+                "/api/tasks",
+                &f.owner,
+                Some(r#"{"title":"before direct access revocation"}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        expect_community_sync(&mut owner).await;
+        expect_community_sync(&mut agent).await;
+        f.state
+            .db
+            .remove_relay_member(f.community, &f.outsider.public_key().to_hex())
+            .await
+            .expect("revoke direct agent membership");
+        let (status, denied) = f.request("GET", "/api/tasks", &f.outsider, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+        let (status, created) = f
+            .request(
+                "POST",
+                "/api/tasks",
+                &f.owner,
+                Some(r#"{"title":"after direct access revocation"}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        expect_community_sync(&mut owner).await;
+        expect_no_notification(&mut agent).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn verified_delegation_is_session_scoped_and_owner_revocation_is_immediate() {
+        let mut f = fixture().await.expect("Postgres and Redis fixture");
+        let state = Arc::get_mut(&mut f.state).expect("exclusive fixture state");
+        let mut config = (*state.config).clone();
+        config.allow_nip_oa_auth = true;
+        state.config = Arc::new(config);
+        let agent = Keys::generate();
+        state
+            .db
+            .add_relay_member(f.community, &agent.public_key().to_hex(), "member", None)
+            .await
+            .expect("direct agent membership");
+        let _server = serve(&mut f).await;
+        let base = f.http_base.as_deref().expect("HTTP base");
+        let mut direct = connect(base, &f.host, Some(&agent)).await;
+        f.state
+            .db
+            .remove_relay_member(f.community, &agent.public_key().to_hex())
+            .await
+            .expect("revoke direct membership");
+        // Same key, separate live connection, and an actual owner-signed auth tag.
+        let mut delegated =
+            connect_with_delegation(base, &f.host, Some(&agent), Some(&f.outsider)).await;
+        let mut publisher = connect(base, &f.host, Some(&f.owner)).await;
+        let (status, created) = f
+            .request(
+                "POST",
+                "/api/tasks",
+                &f.owner,
+                Some(r#"{"title":"verified delegation receives update"}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        expect_community_sync(&mut publisher).await;
+        expect_community_sync(&mut delegated).await;
+        expect_no_notification(&mut direct).await;
+
+        f.state
+            .db
+            .remove_relay_member(f.community, &f.outsider.public_key().to_hex())
+            .await
+            .expect("revoke delegation owner membership");
+        let (status, created) = f
+            .request(
+                "POST",
+                "/api/tasks",
+                &f.owner,
+                Some(r#"{"title":"revoked owner cannot receive update"}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        expect_community_sync(&mut publisher).await;
+        expect_no_notification(&mut delegated).await;
+        expect_no_notification(&mut direct).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn community_tasks_and_channel_tasks_refresh_another_relay_instance() {
+        let mut f = fixture().await.expect("Postgres and Redis fixture");
+        let other = fixture().await.expect("second isolated community");
+        let _server_a = serve(&mut f).await;
+        let peer = peer_state(&f).await;
+        let _peer_conn_control = start_conn_control(peer.clone()).await;
+        let (_server_b, base_b) = serve_state(peer).await;
+
+        let mut owner = connect(&base_b, &f.host, Some(&f.owner)).await;
+        let mut outsider = connect(&base_b, &f.host, Some(&f.outsider)).await;
+        let mut unauthenticated = connect(&base_b, &f.host, None).await;
+        let mut foreign = connect(&base_b, &other.host, Some(&other.owner)).await;
+
+        let community_body = json!({"title":"community task from relay A"}).to_string();
+        let (status, created) = f
+            .request("POST", "/api/tasks", &f.owner, Some(&community_body))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        expect_community_sync(&mut owner).await;
+        expect_community_sync(&mut outsider).await;
+        expect_no_notification(&mut unauthenticated).await;
+        expect_no_notification(&mut foreign).await;
+        let community_path = format!(
+            "/api/tasks/{}",
+            created["id"].as_str().expect("community task id")
+        );
+        let (status, detail) =
+            request_at(&f, &base_b, "GET", &community_path, &f.owner, None).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["task"]["title"], "community task from relay A");
+
+        let (status, updated) = f
+            .request(
+                "PATCH",
+                &community_path,
+                &f.owner,
+                Some(r#"{"priority":4,"expected_revision":0}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        expect_community_sync(&mut owner).await;
+        expect_community_sync(&mut outsider).await;
+        let community_event_path = format!("{community_path}/events");
+        let (status, event) = f
+            .request(
+                "POST",
+                &community_event_path,
+                &f.owner,
+                Some(r#"{"body":"community event from relay A"}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{event}");
+        expect_community_sync(&mut owner).await;
+        expect_community_sync(&mut outsider).await;
+        let (status, detail) =
+            request_at(&f, &base_b, "GET", &community_path, &f.owner, None).await;
+        assert_eq!(status, StatusCode::OK, "{detail}");
+        assert_eq!(detail["task"]["revision"], 1);
+        assert!(detail["events"].as_array().is_some_and(|events| events
+            .iter()
+            .any(|event| event["body"] == "community event from relay A")));
+
+        let channel_body = json!({
+            "title":"channel task from relay A",
+            "channel_id":f.private_channel_id,
+        })
+        .to_string();
+        let (status, channel_task) = f
+            .request("POST", "/api/tasks", &f.owner, Some(&channel_body))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{channel_task}");
+        expect_sync(&mut owner, f.private_channel_id).await;
+        expect_no_notification(&mut outsider).await;
+
+        f.state
+            .db
+            .add_member(
+                f.community,
+                f.private_channel_id,
+                &f.outsider.public_key().to_bytes(),
+                buzz_core::channel::MemberRole::Member,
+                Some(&f.owner.public_key().to_bytes()),
+            )
+            .await
+            .expect("grant private-channel membership");
+        let channel_path = format!(
+            "/api/tasks/{}",
+            channel_task["id"].as_str().expect("channel task id")
+        );
+        let (status, updated) = f
+            .request(
+                "PATCH",
+                &channel_path,
+                &f.owner,
+                Some(r#"{"priority":2,"expected_revision":0}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        expect_sync(&mut owner, f.private_channel_id).await;
+        expect_sync(&mut outsider, f.private_channel_id).await;
+
+        f.state
+            .db
+            .remove_member(
+                f.community,
+                f.private_channel_id,
+                &f.outsider.public_key().to_bytes(),
+                &f.owner.public_key().to_bytes(),
+            )
+            .await
+            .expect("revoke private-channel membership");
+        let channel_event_path = format!("{channel_path}/events");
+        let (status, event) = f
+            .request(
+                "POST",
+                &channel_event_path,
+                &f.owner,
+                Some(r#"{"body":"private event after revocation"}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{event}");
+        expect_sync(&mut owner, f.private_channel_id).await;
+        expect_no_notification(&mut outsider).await;
+
+        f.state
+            .db
+            .remove_relay_member(f.community, &f.outsider.public_key().to_hex())
+            .await
+            .expect("revoke relay membership");
+        let (status, updated) = f
+            .request(
+                "PATCH",
+                &community_path,
+                &f.owner,
+                Some(r#"{"priority":5,"expected_revision":1}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{updated}");
+        expect_community_sync(&mut owner).await;
+        expect_no_notification(&mut outsider).await;
+
+        let tenant = buzz_core::TenantContext::resolved(f.community, &f.host);
+        let duplicate = buzz_pubsub::conn_control::ConnControl::InvalidateTasks {
+            channel_id: None,
+            origin_generation: f.state.task_invalidation_generation,
+        };
+        f.state
+            .pubsub
+            .publish_conn_control(&tenant, &duplicate)
+            .await
+            .expect("first duplicate advisory");
+        f.state
+            .pubsub
+            .publish_conn_control(&tenant, &duplicate)
+            .await
+            .expect("second duplicate advisory");
+        expect_community_sync(&mut owner).await;
+        expect_community_sync(&mut owner).await;
+        expect_no_notification(&mut outsider).await;
+        expect_no_notification(&mut unauthenticated).await;
+        expect_no_notification(&mut foreign).await;
     }
 
     #[tokio::test]
@@ -269,6 +748,185 @@ mod postgres_tests {
         assert_eq!(recovered["task"]["priority"], 8);
         reconnected.close(None).await.expect("close");
     }
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn task_control_queue_coalesces_duplicates_and_recovers_scoped_overflow() {
+        let mut f = fixture().await.expect("Postgres and Redis fixture");
+        let other = fixture().await.expect("foreign community");
+        let _server = serve(&mut f).await;
+        let base = f.http_base.as_deref().expect("base");
+        let mut owner = connect(base, &f.host, Some(&f.owner)).await;
+        let mut foreign = connect(base, &other.host, Some(&other.owner)).await;
+        let mut lock = f.pool.begin().await.expect("gate transaction");
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *lock)
+            .await
+            .expect("gate pid");
+        sqlx::query("LOCK TABLE channel_members IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *lock)
+            .await
+            .expect("hold authorization");
+        let (tx, rx) = tokio::sync::broadcast::channel(1024);
+        let _consumer = Server(tokio::spawn(f.state.clone().run_connection_control(rx)));
+        let command = |channel| buzz_pubsub::conn_control::ScopedConnControl {
+            community_id: f.community,
+            command: buzz_pubsub::conn_control::ConnControl::InvalidateTasks {
+                channel_id: Some(channel),
+                origin_generation: uuid::Uuid::new_v4(),
+            },
+        };
+        tx.send(command(f.private_channel_id))
+            .expect("active advisory");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))")
+                    .bind(gate_pid).fetch_one(&f.pool).await.expect("observe blocked authorization");
+                if waiting { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("actual fanout is held by database lock");
+        for _ in 0..300 {
+            tx.send(command(f.private_channel_id))
+                .expect("duplicate advisory");
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while tx.len() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("production consumer consumed duplicate burst");
+        expect_no_notification(&mut owner).await;
+        for _ in 0..257 {
+            tx.send(command(uuid::Uuid::new_v4()))
+                .expect("distinct scope advisory");
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match owner.next().await {
+                    None | Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        owner.send(Message::Pong(data)).await.expect("pong")
+                    }
+                    frame => panic!("unexpected overflow recovery frame: {frame:?}"),
+                }
+            }
+        })
+        .await
+        .expect("bounded task queue overflow forces affected socket recovery");
+        expect_no_notification(&mut foreign).await;
+        lock.rollback().await.expect("release authorization gate");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn lost_control_commands_force_socket_reauthorization() {
+        let mut f = fixture().await.expect("Postgres and Redis fixture");
+        let _server = serve(&mut f).await;
+        let mut owner = connect(
+            f.http_base.as_deref().expect("base"),
+            &f.host,
+            Some(&f.owner),
+        )
+        .await;
+        // A deliberately undersized receiver deterministically loses a control
+        // command before the actual production consumer begins reading.
+        let (tx, rx) = tokio::sync::broadcast::channel(2);
+        for _ in 0..3 {
+            tx.send(buzz_pubsub::conn_control::ScopedConnControl {
+                community_id: f.community,
+                command: buzz_pubsub::conn_control::ConnControl::InvalidateTasks {
+                    channel_id: None,
+                    origin_generation: f.state.task_invalidation_generation,
+                },
+            })
+            .expect("receiver retained");
+        }
+        let consumer = Server(tokio::spawn(f.state.clone().run_connection_control(rx)));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match owner.next().await {
+                    None | Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        owner.send(Message::Pong(data)).await.expect("pong")
+                    }
+                    frame => panic!("unexpected recovery frame: {frame:?}"),
+                }
+            }
+        })
+        .await
+        .expect("loss of control commands must force fresh authorization");
+        drop(consumer);
+        drop(tx);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn urgent_disconnect_does_not_wait_for_task_authorization() {
+        let mut f = fixture().await.expect("Postgres and Redis fixture");
+        let _server = serve(&mut f).await;
+        let _control = start_conn_control(f.state.clone()).await;
+        let mut owner = connect(
+            f.http_base.as_deref().expect("base"),
+            &f.host,
+            Some(&f.owner),
+        )
+        .await;
+        let mut lock = f.pool.begin().await.expect("gate transaction");
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *lock)
+            .await
+            .expect("gate pid");
+        sqlx::query("LOCK TABLE channel_members IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *lock)
+            .await
+            .expect("hold advisory authorization");
+        let ctx = buzz_core::TenantContext::resolved(f.community, &f.host);
+        f.state
+            .pubsub
+            .publish_conn_control(
+                &ctx,
+                &buzz_pubsub::conn_control::ConnControl::InvalidateTasks {
+                    channel_id: Some(f.private_channel_id),
+                    origin_generation: uuid::Uuid::new_v4(),
+                },
+            )
+            .await
+            .expect("publish task advisory through actual Redis");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))")
+                    .bind(gate_pid).fetch_one(&f.pool).await.expect("observe blocked permission query");
+                if waiting { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("production consumer entered blocked authorization");
+        f.state
+            .pubsub
+            .publish_conn_control(
+                &ctx,
+                &buzz_pubsub::conn_control::ConnControl::DisconnectCommunity,
+            )
+            .await
+            .expect("publish urgent disconnect through actual Redis");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match owner.next().await {
+                    None | Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        owner.send(Message::Pong(data)).await.expect("pong")
+                    }
+                    frame => panic!("unexpected frame while awaiting disconnect: {frame:?}"),
+                }
+            }
+        })
+        .await
+        .expect("urgent disconnect must not await the five-second task permission deadline");
+        lock.rollback().await.expect("release authorization gate");
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres and Redis"]
     async fn task_notification_access_deadline_preserves_committed_http_success() {
