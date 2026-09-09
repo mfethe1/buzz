@@ -12,7 +12,7 @@ async fn main() {
         .parent()
         .and_then(|p| p.parent())
         .expect("repo root (crates/buzz-db parent x2)");
-    let m = Migrator::new(&root.join("migrations"))
+    let m = Migrator::new(root.join("migrations").as_path())
         .await
         .expect("load migrations");
     m.run(&db).await.expect("run migrations");
