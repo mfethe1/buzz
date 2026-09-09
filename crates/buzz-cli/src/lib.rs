@@ -2568,6 +2568,7 @@ mod tests {
             "feed",
             "gifs",
             "issues",
+            "machines",
             "media",
             "mem",
             "messages",
