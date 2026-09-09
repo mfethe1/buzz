@@ -1989,6 +1989,18 @@ pub enum CmlEventsCmd {
         #[arg(long)]
         prev: Option<String>,
     },
+    /// Sign and publish a typed terminal or unknown fleet receipt
+    Receipt {
+        /// Channel UUID hosting the task
+        #[arg(long)]
+        channel: String,
+        /// Path to the typed receipt JSON
+        #[arg(long)]
+        receipt_file: String,
+        /// Frozen publication timestamp; completion time remains in the receipt
+        #[arg(long)]
+        created_at: u64,
+    },
     /// Fetch a task's CML events and print the observation-time workstream card
     Card {
         /// Channel UUID hosting the task
@@ -2038,6 +2050,14 @@ pub enum TasksCmd {
     },
     /// Get one task with its append-only event history
     Get { task: String },
+    /// Recheck a particular newly accepted fleet start on the relay's primary
+    Admission {
+        task: String,
+        #[arg(long)]
+        attempt: String,
+        #[arg(long)]
+        start_event: String,
+    },
     /// Create a task
     Create {
         #[arg(long)]
@@ -2328,6 +2348,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         prev.as_deref(),
                     )
                     .await
+                }
+                CmlEventsCmd::Receipt {
+                    channel,
+                    receipt_file,
+                    created_at,
+                } => {
+                    commands::cml::cmd_events_receipt(&client, &channel, &receipt_file, created_at)
+                        .await
                 }
                 CmlEventsCmd::Card {
                     channel,
@@ -2725,7 +2753,7 @@ mod tests {
             ("reactions", 3),
             ("repos", 5),
             ("social", 7),
-            ("tasks", 6),
+            ("tasks", 7),
             ("upload", 1),
             ("users", 5),
             ("workflows", 8),

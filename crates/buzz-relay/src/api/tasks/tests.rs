@@ -201,6 +201,9 @@ mod route_authz {
             nostr::Tag::parse(["u", url]).expect("u tag"),
             nostr::Tag::parse(["method", method]).expect("method tag"),
             nostr::Tag::parse(["payload", hex::encode(hash).as_str()]).expect("payload tag"),
+            // Each helper call is a fresh HTTP request, even when its signed
+            // stored-event body repeats in the same second.
+            nostr::Tag::parse(["nonce", &Uuid::new_v4().to_string()]).expect("nonce tag"),
         ];
         let event = nostr::EventBuilder::new(nostr::Kind::HttpAuth, "")
             .tags(tags)
@@ -742,3 +745,6 @@ mod postgres_tests {
 
 #[path = "notifications_tests.rs"]
 mod task_notifications;
+
+#[path = "fleet_tests.rs"]
+mod fleet_admission;

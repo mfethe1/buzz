@@ -24,6 +24,8 @@ pub mod dm;
 pub mod event;
 /// Home feed queries.
 pub mod feed;
+/// Atomic fixed fleet attempt admission and signed receipt projection.
+pub mod fleet_attempt;
 /// Git repository name registry (NIP-34 kind:30617).
 pub mod git_repo;
 /// Community moderation: reports, bans/timeouts, audit actions.

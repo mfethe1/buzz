@@ -399,6 +399,18 @@ fn validate_resolution_snapshot(
     Ok(())
 }
 
+/// Validate one exact successor after both event envelopes were validated.
+/// A database projection can use this while holding its task/attempt row lock.
+pub fn validate_successor(
+    previous: &ValidatedCmlEvent,
+    current: &ValidatedCmlEvent,
+) -> Result<(), CmlEventError> {
+    if current.previous != Some(previous.id) {
+        return invalid("successor does not name current predecessor");
+    }
+    validate_transition(previous, current)
+}
+
 fn validate_transition(
     previous: &ValidatedCmlEvent,
     current: &ValidatedCmlEvent,

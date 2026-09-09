@@ -134,6 +134,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(api::tasks::get_task).patch(api::tasks::update_task),
         )
         .route(
+            "/api/tasks/{task_id}/attempts/{attempt_id}/admission",
+            get(api::tasks::get_fleet_admission),
+        )
+        .route(
             "/api/tasks/{task_id}/events",
             post(api::tasks::append_task_event),
         )

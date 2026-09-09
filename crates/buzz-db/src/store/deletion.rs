@@ -4310,6 +4310,12 @@ mod postgres_tests {
         )
         .await
         .expect("grant with history before purge");
+        let fleet = crate::store::fleet_attempt::fixtures::Fixture::in_community(
+            db.pool.clone(),
+            request.community_id,
+        )
+        .await;
+        fleet.start().await;
         let host = request.community_host.clone();
         let read_state_d_tag = format!("read-state:{}", "a".repeat(32));
         sqlx::query(
@@ -4395,8 +4401,9 @@ mod postgres_tests {
             .expect("bindings");
         let first = store.purge_postgres(&token).await.expect("purge postgres");
         assert_eq!(first.len(), EXPECTED_SCOPED_TABLES.len());
-        assert_eq!(first["agent_capability_grants"], 1);
-        assert_eq!(first["agent_capability_events"], 1);
+        assert_eq!(first["agent_capability_grants"], 2);
+        assert_eq!(first["agent_capability_events"], 2);
+        assert_eq!(first["fleet_attempts"], 1);
         assert!(
             store.purge_postgres(&token).await.is_err(),
             "completed stage cannot be replayed under stale checkpoint state"
