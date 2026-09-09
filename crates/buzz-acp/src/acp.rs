@@ -134,6 +134,46 @@ fn build_initialize_params() -> serde_json::Value {
     })
 }
 
+/// Parsed `agentCapabilities.sessionCapabilities` from the `initialize`
+/// response. Each field gates one rung of the resume → load → new ladder.
+/// An agent can advertise `loadSession: true` without `sessionCapabilities.resume`
+/// — each rung is gated independently.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionCapabilities {
+    /// Whether the agent supports `session/fork`.
+    pub fork: bool,
+    /// Whether the agent supports `session/list`.
+    pub list: bool,
+    /// Whether the agent supports `session/resume` — reattach to a live
+    /// session without replaying history.
+    pub resume: bool,
+}
+
+impl SessionCapabilities {
+    /// Parse from a JSON value at `/agentCapabilities/sessionCapabilities`.
+    /// Returns `None` when the key is absent. Individual fields default to
+    /// `false` when the object is present but a sub-key is missing.
+    fn parse(result: &serde_json::Value) -> Option<Self> {
+        result
+            .pointer("/agentCapabilities/sessionCapabilities")
+            .and_then(|v| v.as_object())?;
+        Some(Self {
+            fork: result
+                .pointer("/agentCapabilities/sessionCapabilities/fork")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            list: result
+                .pointer("/agentCapabilities/sessionCapabilities/list")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            resume: result
+                .pointer("/agentCapabilities/sessionCapabilities/resume")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        })
+    }
+}
+
 /// ACP client that owns an agent subprocess and communicates over its stdio.
 ///
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
@@ -204,6 +244,11 @@ pub struct AcpClient {
     steering_supported: bool,
     /// Whether the agent advertised `agentCapabilities.loadSession == true`.
     load_session_supported: bool,
+    /// Parsed `agentCapabilities.sessionCapabilities` from the `initialize`
+    /// response. `None` when the agent does not advertise the object at all.
+    /// Each rung of the resume/load/new ladder is gated independently on the
+    /// corresponding field here, NOT on `load_session_supported` alone.
+    session_capabilities: Option<SessionCapabilities>,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -565,6 +610,7 @@ impl AcpClient {
             active_run_id: None,
             steering_supported: false,
             load_session_supported: false,
+            session_capabilities: None,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
@@ -627,6 +673,7 @@ impl AcpClient {
             .pointer("/agentCapabilities/loadSession")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        self.session_capabilities = SessionCapabilities::parse(&result);
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
     }
@@ -731,6 +778,48 @@ impl AcpClient {
         self.send_request("session/load", params).await?;
         tracing::info!(target: "acp::session", "session loaded: {session_id}");
         Ok(())
+    }
+
+    /// Send `session/resume` — reattach to a live agent session without
+    /// replaying the transcript. Unlike `session/load`, this does NOT send
+    /// `mcpServers` or `cwd`; the agent retains those from the original
+    /// session. Gated by `sessionCapabilities.resume` in the `initialize`
+    /// response. If the agent doesn't support resume, returns
+    /// `AcpError::Protocol` so the caller can fall back to `session/load`.
+    pub async fn session_resume(&mut self, session_id: &str) -> Result<(), AcpError> {
+        let caps = self.session_capabilities.as_ref().ok_or_else(|| {
+            AcpError::Protocol(
+                "session/resume requested but agentCapabilities.sessionCapabilities not advertised"
+                    .into(),
+            )
+        })?;
+        if !caps.resume {
+            return Err(AcpError::Protocol(
+                "agent does not advertise sessionCapabilities.resume".into(),
+            ));
+        }
+        let params = serde_json::json!({
+            "sessionId": session_id,
+        });
+        self.send_request("session/resume", params).await?;
+        tracing::info!(target: "acp::session", "session resumed: {session_id}");
+        Ok(())
+    }
+
+    /// Returns the parsed `sessionCapabilities` advertised by the agent, if
+    /// any. `None` until `initialize()` completes or when the agent doesn't
+    /// advertise the object at all.
+    #[allow(dead_code)] // consumed by S2 (hermes-acp restart integration)
+    pub fn session_capabilities(&self) -> Option<&SessionCapabilities> {
+        self.session_capabilities.as_ref()
+    }
+
+    /// Returns true if the agent advertised `sessionCapabilities.resume == true`.
+    pub fn resume_supported(&self) -> bool {
+        self.session_capabilities
+            .as_ref()
+            .map(|c| c.resume)
+            .unwrap_or(false)
     }
 
     /// Replace Goose's native system prompt after `session/new`.
@@ -4384,6 +4473,101 @@ mod tests {
             !supported,
             "loadSession: false must leave load_session_supported false"
         );
+    }
+
+    // --- sessionCapabilities parsing tests (BUZZ-W-009 S1) ---
+
+    async fn resume_supported_after_initialize(init_result: &str) -> bool {
+        let script = format!(
+            r#"
+                read -t 2 _init
+                echo '{{"jsonrpc":"2.0","id":0,"result":{init_result}}}'
+                sleep 1
+            "#
+        );
+        let mut client = spawn_script(&script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        client.resume_supported()
+    }
+
+    #[tokio::test]
+    async fn initialize_records_resume_supported_when_advertised() {
+        let supported = resume_supported_after_initialize(
+            r#"{"protocolVersion":2,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":true}}}"#,
+        )
+        .await;
+        assert!(
+            supported,
+            "sessionCapabilities.resume: true must set resume_supported"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_leaves_resume_unsupported_when_session_capabilities_absent() {
+        let supported = resume_supported_after_initialize(
+            r#"{"protocolVersion":2,"agentCapabilities":{"loadSession":true}}"#,
+        )
+        .await;
+        assert!(
+            !supported,
+            "absent sessionCapabilities must leave resume_supported false"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_leaves_resume_unsupported_when_resume_explicitly_false() {
+        let supported = resume_supported_after_initialize(
+            r#"{"protocolVersion":2,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":false}}}"#,
+        )
+        .await;
+        assert!(
+            !supported,
+            "sessionCapabilities.resume: false must leave resume_supported false"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_resume_rejected_when_capability_not_advertised() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"loadSession":true}}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(!client.resume_supported());
+        let result = client.session_resume("ses_test").await;
+        assert!(
+            result.is_err(),
+            "session_resume must fail when capability not advertised"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_resume_sends_correct_wire_shape() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"loadSession":true,"sessionCapabilities":{"resume":true}}}}'
+            read -t 2 REQ
+            printf '{"jsonrpc":"2.0","id":1,"result":{"_receivedRequest":%s}}\n' "$REQ"
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(client.resume_supported());
+        client
+            .session_resume("ses_resume_test")
+            .await
+            .expect("session_resume should succeed when capability advertised");
     }
 
     #[tokio::test]

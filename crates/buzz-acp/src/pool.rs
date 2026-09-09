@@ -2213,9 +2213,76 @@ async fn try_restore_stored_session(
             return None;
         }
     };
-    if !agent.acp.load_session_supported() {
+    if !agent.acp.load_session_supported() && !agent.acp.resume_supported() {
         tracing::warn!(
             "discarding stale session binding for {}; starting a fresh session",
+            context_key_label(key)
+        );
+        let _ = store.remove_binding(key).await;
+        return None;
+    }
+    // Rung 1: session/resume — reattach to a live session without replay.
+    // Resume failure is non-fatal: the binding may still be valid for load.
+    if agent.acp.resume_supported() {
+        match agent.acp.session_resume(&binding.session_id).await {
+            Ok(()) => {
+                if let Err(error) = store.touch_binding(key).await {
+                    tracing::warn!(%error, "session store touch_binding failed");
+                }
+                if let Some(cid) = channel_id {
+                    let delivered = store
+                        .processed_event_ids_for_channel(cid)
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::warn!(%error, %cid, "session store processed_event_ids_for_channel failed");
+                            Vec::new()
+                        });
+                    agent.state.sessions.insert(
+                        SessionScope::Conversation { channel_id: cid },
+                        binding.session_id.clone(),
+                    );
+                    agent.state.deliveries.insert(
+                        SessionScope::Conversation { channel_id: cid },
+                        ChannelDeliveryState {
+                            standing_context_sent: true,
+                            delivered_event_ids: delivered.into_iter().collect(),
+                        },
+                    );
+                } else {
+                    agent.state.heartbeat_session = Some(binding.session_id.clone());
+                }
+                tracing::info!(
+                    "session/resume succeeded for {}; skipping session/load",
+                    context_key_label(key)
+                );
+                return Some(binding.session_id);
+            }
+            Err(error) => {
+                if matches!(
+                    error,
+                    crate::acp::AcpError::AgentExited | crate::acp::AcpError::Io(_)
+                ) {
+                    tracing::warn!(
+                        %error,
+                        "session/resume failed because the agent exited; keeping binding for {}",
+                        context_key_label(key)
+                    );
+                    return None;
+                }
+                tracing::warn!(
+                    %error,
+                    "session/resume failed for {}; falling through to session/load",
+                    context_key_label(key)
+                );
+                // Do NOT remove binding — fall through to load
+            }
+        }
+    }
+    // Rung 2: session/load — replay the transcript from storage.
+    // Load failure DOES invalidate the binding (the stored session is stale).
+    if !agent.acp.load_session_supported() {
+        tracing::warn!(
+            "session/resume failed and session/load not supported for {}; starting fresh",
             context_key_label(key)
         );
         let _ = store.remove_binding(key).await;
