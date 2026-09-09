@@ -18,6 +18,7 @@ use std::{
 use tokio::{task::JoinHandle, time::Instant};
 
 const TEST_BUDGET: Duration = Duration::from_millis(350);
+const REDIRECT_TEST_BUDGET: Duration = Duration::from_secs(1);
 tokio::task_local! {
     static TEST_OPERATION_TIMEOUT: Duration;
 }
@@ -113,10 +114,19 @@ async fn fetch(
     href: String,
     id: Option<String>,
 ) -> Result<Option<LinkPreviewMetadata>, String> {
+    fetch_with_budget(address, href, id, TEST_BUDGET).await
+}
+
+async fn fetch_with_budget(
+    address: SocketAddr,
+    href: String,
+    id: Option<String>,
+    budget: Duration,
+) -> Result<Option<LinkPreviewMetadata>, String> {
     METADATA_TEST_SERVER
         .scope(
             address,
-            TEST_OPERATION_TIMEOUT.scope(TEST_BUDGET, fetch_link_preview_metadata(href, id)),
+            TEST_OPERATION_TIMEOUT.scope(budget, fetch_link_preview_metadata(href, id)),
         )
         .await
 }
@@ -147,7 +157,16 @@ async fn operation_deadline_covers_metadata_oembed_images_redirects_and_cooldown
                     let path = uri.path();
                     traffic.paths.lock().unwrap().push(path.to_string());
                     if stage == "redirect" {
-                        tokio::time::sleep(Duration::from_millis(140)).await;
+                        // Spend 400 ms across two redirects, then hold the third
+                        // response beyond the whole operation budget. The old
+                        // 350 ms budget left only 70 ms for all transport and
+                        // scheduling overhead before the third request.
+                        let delay = if path == "/third" {
+                            REDIRECT_TEST_BUDGET * 2
+                        } else {
+                            Duration::from_millis(200)
+                        };
+                        tokio::time::sleep(delay).await;
                         let next = match path {
                             "/preview" => "/second",
                             "/second" => "/third",
@@ -204,9 +223,14 @@ async fn operation_deadline_covers_metadata_oembed_images_redirects_and_cooldown
         let request_id = (stage != "oembed").then_some(id.clone());
         let prior_token = cancellation::begin(request_id.as_deref());
         let started = Instant::now();
+        let budget = if stage == "redirect" {
+            REDIRECT_TEST_BUDGET
+        } else {
+            TEST_BUDGET
+        };
         let result = tokio::time::timeout(
-            TEST_BUDGET + Duration::from_millis(150),
-            fetch(endpoint.address, href, request_id),
+            budget + Duration::from_millis(150),
+            fetch_with_budget(endpoint.address, href, request_id, budget),
         )
         .await
         .expect("the operation exceeded its single deadline");
