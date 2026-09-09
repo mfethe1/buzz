@@ -1740,11 +1740,11 @@ mod postgres_tests {
     /// desired-state bootstrap schema (`schema/schema.sql`).
     ///
     /// Compares parsed statements, not substrings: every deletion control-
-    /// plane table, function, trigger, and index 0028 creates must exist in
+    /// plane table, function, trigger, and index 0029 creates must exist in
     /// schema.sql with an identical normalized definition; every operator-
-    /// global registry row 0028 inserts must be inserted by schema.sql; the
+    /// global registry row 0029 inserts must be inserted by schema.sql; the
     /// write-fence attachment target sets must be equal; and every column
-    /// 0028 adds to `communities` must exist in the desired-state
+    /// 0029 adds to `communities` must exist in the desired-state
     /// `communities` table. A desired-state bootstrap that passes this test
     /// cannot silently omit part of the deletion surface the way the
     /// pre-parity schema.sql omitted `community_deletion_manifest_keys` (and
@@ -1932,18 +1932,25 @@ mod postgres_tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
-        // Tenant tables introduced after 0029 declare their own fence
-        // attachment in their own migration and in schema.sql. Enumerate them
-        // here so the comparison below stays an exact equality: a new scoped
-        // table that forgets its fence line still fails this test, and a fence
-        // line for a table nobody registered here fails it too.
-        for post_0029_scoped_table in [
-            "tasks",
-            "task_events",
-            "agent_capability_grants",
-            "agent_capability_events",
+        // Keep later tenant tables explicit, and bind each attachment to the
+        // migration introducing it. Both upgrade and bootstrap must fence it;
+        // neither a missing attachment nor an unregistered extra is accepted.
+        for (version, table) in [
+            (46, "tasks"),
+            (46, "task_events"),
+            (49, "agent_capability_grants"),
+            (49, "agent_capability_events"),
+            (52, "fleet_attempts"),
         ] {
-            expected_fences.insert(post_0029_scoped_table.to_owned());
+            let introduced = MIGRATOR
+                .iter()
+                .find(|migration| migration.version == version)
+                .expect("embedded tenant-table migration");
+            assert!(
+                surface(introduced.sql.as_ref()).fence_attachments.contains(table),
+                "migration {version} is missing the write-fence attachment for {table}"
+            );
+            expected_fences.insert(table.to_owned());
         }
         assert_eq!(
             expected_fences, schema.fence_attachments,
@@ -1969,7 +1976,7 @@ mod postgres_tests {
         for column in &migration.communities_added_columns {
             assert!(
                 column_names.contains(column),
-                "schema.sql communities table is missing 0028 column {column}"
+                "schema.sql communities table is missing 0029 column {column}"
             );
         }
         assert!(!migration.communities_added_columns.is_empty());
