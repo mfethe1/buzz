@@ -3,6 +3,7 @@ part of '../channels_page.dart';
 class _ChannelsBody extends StatelessWidget {
   final List<Channel>? channels;
   final VoidCallback? onOpenWork;
+  final VoidCallback? onOpenComputers;
   final AsyncValue<List<Channel>> channelsAsync;
   final bool showError;
   final SessionStatus sessionStatus;
@@ -16,6 +17,7 @@ class _ChannelsBody extends StatelessWidget {
 
   const _ChannelsBody({
     this.onOpenWork,
+    this.onOpenComputers,
     required this.channels,
     required this.channelsAsync,
     required this.showError,
@@ -35,6 +37,11 @@ class _ChannelsBody extends StatelessWidget {
     final loadedChannels = channels;
     final loading =
         showConnectionSkeleton || (loadedChannels == null && !showError);
+    final hasShortcuts = onOpenWork != null || onOpenComputers != null;
+    final shortcuts = _HomeShortcuts(
+      onOpenWork: onOpenWork,
+      onOpenComputers: onOpenComputers,
+    );
     final content = showError && channelsAsync.hasError
         ? Padding(
             padding: EdgeInsets.only(top: barHeight),
@@ -53,36 +60,7 @@ class _ChannelsBody extends StatelessWidget {
               hitTestBehavior: HitTestBehavior.translucent,
               slivers: [
                 SliverToBoxAdapter(child: SizedBox(height: barHeight)),
-                if (onOpenWork != null)
-                  SliverToBoxAdapter(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(
-                        Grid.gutter,
-                        Grid.xxs,
-                        Grid.gutter,
-                        Grid.xs,
-                      ),
-                      child: Card(
-                        margin: EdgeInsets.zero,
-                        elevation: 0,
-                        color: context.colors.surfaceContainerHigh,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(Radii.dialog),
-                        ),
-                        child: ListTile(
-                          key: const ValueKey('home-work-entry'),
-                          leading: Icon(
-                            LucideIcons.clipboardList,
-                            color: context.colors.primary,
-                          ),
-                          title: const Text('Work'),
-                          subtitle: const Text('View and assign tasks'),
-                          trailing: const Icon(LucideIcons.chevronRight),
-                          onTap: onOpenWork,
-                        ),
-                      ),
-                    ),
-                  ),
+                if (hasShortcuts) SliverToBoxAdapter(child: shortcuts),
                 if (usesPinnedGradient)
                   _SliverChannelsList(
                     channels: loadedChannels,
@@ -108,14 +86,40 @@ class _ChannelsBody extends StatelessWidget {
           );
 
     return SkeletonReveal(
-      loading: loading,
+      loading: loading && !hasShortcuts,
       shimmerEnabled: sessionStatus != SessionStatus.disconnected,
       skeleton: _ChannelsSkeleton(
         channels: loadedChannels,
         topInset: barHeight,
         status: sessionStatus,
       ),
-      content: content,
+      content: hasShortcuts && (loading || showError)
+          ? BeeRefreshIndicator(
+              edgeOffset: barHeight,
+              onRefresh: onRefresh,
+              child: CustomScrollView(
+                controller: scrollController,
+                physics: const AlwaysScrollableScrollPhysics(),
+                slivers: [
+                  SliverToBoxAdapter(child: SizedBox(height: barHeight)),
+                  SliverToBoxAdapter(child: shortcuts),
+                  SliverFillRemaining(
+                    hasScrollBody: false,
+                    child: showError && channelsAsync.hasError
+                        ? _ErrorView(
+                            error: channelsAsync.error!,
+                            onRetry: onRefresh,
+                          )
+                        : const Center(
+                            child: BuzzLoadingIndicator(
+                              semanticLabel: 'Loading conversations',
+                            ),
+                          ),
+                  ),
+                ],
+              ),
+            )
+          : content,
     );
   }
 }
@@ -415,6 +419,111 @@ class _SliverChannelsList extends HookConsumerWidget {
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+class _HomeShortcut extends StatelessWidget {
+  const _HomeShortcut({
+    super.key,
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    required this.onTap,
+  });
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final VoidCallback onTap;
+  @override
+  Widget build(BuildContext context) => Card(
+    margin: EdgeInsets.zero,
+    elevation: 0,
+    color: context.colors.surfaceContainerHigh,
+    shape: RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(Radii.dialog),
+    ),
+    child: InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(Radii.dialog),
+      child: Padding(
+        padding: const EdgeInsets.all(Grid.xs),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, color: context.colors.primary),
+            const SizedBox(height: Grid.sm),
+            Text(title, style: context.textTheme.titleMedium),
+            const SizedBox(height: Grid.xxs),
+            Text(subtitle, style: context.textTheme.bodySmall),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
+/// Keep navigation usable while conversations are loading or unavailable.
+class _HomeShortcuts extends StatelessWidget {
+  const _HomeShortcuts({this.onOpenWork, this.onOpenComputers});
+  final VoidCallback? onOpenWork;
+  final VoidCallback? onOpenComputers;
+  @override
+  Widget build(BuildContext context) {
+    final cards = [
+      if (onOpenWork != null)
+        _HomeShortcut(
+          key: const ValueKey('home-work-entry'),
+          title: 'Work',
+          subtitle: 'View and assign tasks',
+          icon: LucideIcons.clipboardList,
+          onTap: onOpenWork!,
+        ),
+      if (onOpenComputers != null)
+        _HomeShortcut(
+          key: const ValueKey('home-computers-entry'),
+          title: 'Computers',
+          subtitle: 'View your computers',
+          icon: LucideIcons.monitor,
+          onTap: onOpenComputers!,
+        ),
+    ];
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        Grid.gutter,
+        Grid.xxs,
+        Grid.gutter,
+        Grid.xs,
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final stack =
+              constraints.maxWidth < 300 ||
+              MediaQuery.textScalerOf(context).scale(1) > 1.3;
+          if (stack) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (var i = 0; i < cards.length; i++) ...[
+                  if (i > 0) const SizedBox(height: Grid.twelve),
+                  cards[i],
+                ],
+              ],
+            );
+          }
+          return IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (var i = 0; i < cards.length; i++) ...[
+                  if (i > 0) const SizedBox(width: Grid.twelve),
+                  Expanded(child: cards[i]),
+                ],
+              ],
+            ),
+          );
+        },
       ),
     );
   }

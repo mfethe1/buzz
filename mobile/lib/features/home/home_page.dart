@@ -19,12 +19,14 @@ class HomePage extends HookConsumerWidget {
     required this.settingsPageBuilder,
     required this.hasUnreadInbox,
     this.workPageBuilder,
+    this.computersPageBuilder,
     super.key,
   });
 
   final WidgetBuilder settingsPageBuilder;
   final bool hasUnreadInbox;
   final Widget Function(BuildContext, VoidCallback, bool)? workPageBuilder;
+  final Widget Function(BuildContext, VoidCallback, bool)? computersPageBuilder;
 
   static const double _tabBarHeight = mobileTabBarHeight;
   static const double _tabBarRadius = _tabBarHeight / 2;
@@ -66,7 +68,7 @@ class HomePage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final tabIndex = useState(0);
-    final showWork = useState(false);
+    final homeView = useState(0);
     final visitedTabs = useRef(<int>{0});
     final tabContentTransitionDirection = useRef(1.0);
     final tabContentTransitionController = useAnimationController(
@@ -92,18 +94,21 @@ class HomePage extends HookConsumerWidget {
 
     final pages = [
       PopScope(
-        canPop: !showWork.value || tabIndex.value != 0,
+        canPop: homeView.value == 0 || tabIndex.value != 0,
         onPopInvokedWithResult: (didPop, _) {
-          if (!didPop) showWork.value = false;
+          if (!didPop) homeView.value = 0;
         },
         child: IndexedStack(
-          index: showWork.value ? 1 : 0,
+          index: homeView.value,
           children: [
             ChannelsPage(
               settingsPageBuilder: settingsPageBuilder,
               onOpenWork: workPageBuilder == null
                   ? null
-                  : () => showWork.value = true,
+                  : () => homeView.value = 1,
+              onOpenComputers: computersPageBuilder == null
+                  ? null
+                  : () => homeView.value = 2,
               tabReselection: homeReselection,
               onSettingsTransitionProgress: (progress) {
                 if (settingsTransitionProgress.value != progress) {
@@ -111,10 +116,18 @@ class HomePage extends HookConsumerWidget {
                 }
               },
             ),
-            if (showWork.value && workPageBuilder != null)
+            if (homeView.value == 1 && workPageBuilder != null)
               workPageBuilder!(
                 context,
-                () => showWork.value = false,
+                () => homeView.value = 0,
+                tabIndex.value == 0,
+              )
+            else
+              const SizedBox.shrink(),
+            if (homeView.value == 2 && computersPageBuilder != null)
+              computersPageBuilder!(
+                context,
+                () => homeView.value = 0,
                 tabIndex.value == 0,
               )
             else
@@ -201,7 +214,7 @@ class HomePage extends HookConsumerWidget {
                   ),
                   Positioned.fill(
                     child: ChannelQuickActionsLauncher(
-                      visible: tabIndex.value == 0 && !showWork.value,
+                      visible: tabIndex.value == 0 && homeView.value == 0,
                       navigationBarHeight: HomePage._tabBarHeight,
                       navigationBarBottomGap: HomePage._tabBarBottomGap,
                       navigationBarWidth: navigationBarWidth,
@@ -216,7 +229,7 @@ class HomePage extends HookConsumerWidget {
               selectedIndex: tabIndex.value,
               hasUnreadInbox: hasUnreadInbox,
               onDestinationSelected: (i) {
-                if (i == 0) showWork.value = false;
+                if (i == 0) homeView.value = 0;
                 if (i == tabIndex.value) {
                   switch (i) {
                     case 0:
