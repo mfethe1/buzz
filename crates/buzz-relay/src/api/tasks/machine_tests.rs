@@ -30,7 +30,7 @@ mod postgres_tests {
         let proof =
             buzz_sdk::nip_oa::compute_auth_tag(&f.owner, &coordinator.public_key(), conditions)
                 .unwrap();
-        let mut payload = json!({"version":1,"community_id":f.community.as_uuid(),"machine_id":machine,"coordinator_pubkey":coordinator.public_key().to_hex(),"label":"Private computer marker","runtime":"hermes","owner_auth":serde_json::from_str::<Value>(&proof).unwrap()});
+        let mut payload = json!({"version":1,"community_id":f.community.as_uuid(),"machine_id":machine,"coordinator_pubkey":coordinator.public_key().to_hex(),"label":format!("Private computer marker {machine}"),"runtime":"hermes","owner_auth":serde_json::from_str::<Value>(&proof).unwrap()});
         let mut consent = payload.clone();
         consent["owner_pubkey"] = json!(f.owner.public_key().to_hex());
         consent["expires_at"] = json!(Timestamp::now().as_secs() + 300);
@@ -68,6 +68,23 @@ mod postgres_tests {
             .await
             .unwrap();
         redis.psubscribe("*").await.unwrap();
+        let unrelated = buzz_core::TenantContext::resolved(
+            buzz_core::CommunityId::from_uuid(Uuid::new_v4()),
+            "unrelated-privacy-fixture.invalid",
+        );
+        let observers = f
+            .state
+            .pubsub
+            .publish_conn_control(
+                &unrelated,
+                &buzz_pubsub::conn_control::ConnControl::DisconnectCommunity,
+            )
+            .await
+            .unwrap();
+        assert!(
+            observers >= 1,
+            "wildcard observer must receive unrelated traffic"
+        );
         assert_eq!(post(&f, &enrolled, &f.owner).await.1["accepted"], true);
         assert!(post(&f, &enrolled, &f.owner).await.1["message"]
             .as_str()
@@ -180,14 +197,35 @@ mod postgres_tests {
                 .is_err(),
             "local fanout leak"
         );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), redis.on_message().next())
-                .await
-                .is_err(),
-            "Redis fanout leak"
-        );
+        // Other PostgreSQL fixtures share Redis and may publish concurrently.
+        // Keep the wildcard subscription: private data on a wrong tenant's
+        // channel must still fail, while unrelated control traffic must not.
+        let private_markers = [
+            f.community.as_uuid().to_string(),
+            machine.to_string(),
+            enrolled.id.to_hex(),
+            obs.id.to_hex(),
+        ];
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        let mut messages = redis.on_message();
+        loop {
+            match tokio::time::timeout_at(deadline, messages.next()).await {
+                Err(_) => break,
+                Ok(None) => panic!("Redis privacy observer closed before its deadline"),
+                Ok(Some(message)) => {
+                    let channel = message.get_channel_name();
+                    let payload = String::from_utf8_lossy(message.get_payload_bytes());
+                    assert!(
+                        !private_markers
+                            .iter()
+                            .any(|marker| channel.contains(marker) || payload.contains(marker)),
+                        "Redis fanout leak for private machine fixture"
+                    );
+                }
+            }
+        }
         f.state.db.validate_deletion_catalog().await.unwrap();
-        eprintln!("PASS real signed HTTP enrollment→observation→private owner GET; X-Pubkey401, foreign owner404, duplicate expiry stable, ordinary query/COUNT/search/feed and local/Redis fanout empty; no grants/push/workflow rows");
+        eprintln!("PASS real signed HTTP enrollment→observation→private owner GET; X-Pubkey401, foreign owner404, duplicate expiry stable, ordinary query/COUNT/search/feed and no fixture data in local/Redis fanout; no grants/push/workflow rows");
     }
 
     #[tokio::test]
