@@ -1511,10 +1511,25 @@ fn openai_tool_call_with_usage(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steer_rejected_on_empty_prompt() {
-    let (url, _captures) = spawn_capturing_fake_llm(vec![
-        openai_tool_call("call_x", "fake__noop", json!({})),
-        openai_text("done"),
-    ])
+    // Hold the first provider response until the steer rejection has been
+    // observed. Otherwise a fast fake provider can finish the run before the
+    // request is handled, making this validation race with normal teardown.
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+    let gate_rx = Arc::new(Mutex::new(Some(gate_rx)));
+    let (url, _captures) = spawn_gated_capturing_fake_llm(
+        vec![
+            CannedResponse {
+                status: 200,
+                body: openai_tool_call("call_x", "fake__noop", json!({})),
+            },
+            CannedResponse {
+                status: 200,
+                body: openai_text("done"),
+            },
+        ],
+        Arc::new(Mutex::new(Vec::new())),
+        gate_rx,
+    )
     .await;
     let mut h = Harness::spawn(&url).await;
     let sid = init_session(&mut h).await;
@@ -1537,6 +1552,7 @@ async fn steer_rejected_on_empty_prompt() {
         if v["id"] == json!(s_id) {
             assert_eq!(v["error"]["code"], -32602, "empty prompt must be rejected");
             saw_reject = true;
+            gate_tx.send(()).unwrap();
         } else if v["id"] == json!(p_id) {
             break;
         }
