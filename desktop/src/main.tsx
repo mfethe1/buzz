@@ -10,7 +10,10 @@ import "@fontsource/jetbrains-mono/700.css";
 import "@/shared/styles/globals.css";
 import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
 import { migrateLegacyCommunityStorageBeforeRender } from "@/features/communities/legacyCommunityStorage";
-import { CommunitiesProvider } from "@/features/communities/useCommunities";
+import {
+  CommunitiesProvider,
+  useCommunities,
+} from "@/features/communities/useCommunities";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import { CommunityOnboardingProvider } from "@/features/onboarding/communityOnboarding";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
@@ -78,6 +81,22 @@ function configureDevE2eBridgeFromUrl() {
   );
 }
 
+function ActiveCommunityThemeProvider({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const { activeCommunity } = useCommunities();
+  return (
+    <ThemeProvider
+      defaultTheme="buzz"
+      relayUrl={activeCommunity?.relayUrl ?? null}
+    >
+      {children}
+    </ThemeProvider>
+  );
+}
+
 function renderApp() {
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
@@ -88,7 +107,7 @@ function renderApp() {
           <CommunityOnboardingProvider
             enabled={huddleWindowChannelId() === null}
           >
-            <ThemeProvider defaultTheme="buzz">
+            <ActiveCommunityThemeProvider>
               <TooltipProvider>
                 <EmojiBurstProvider>
                   <PoofBurstProvider>
@@ -100,7 +119,7 @@ function renderApp() {
                   </PoofBurstProvider>
                 </EmojiBurstProvider>
               </TooltipProvider>
-            </ThemeProvider>
+            </ActiveCommunityThemeProvider>
           </CommunityOnboardingProvider>
         </CommunitiesProvider>
       </RootErrorBoundary>

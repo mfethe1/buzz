@@ -13,6 +13,7 @@ import { invokeTauri } from "@/shared/api/tauri";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { getStorageItem } from "@/shared/lib/safeStorage";
 import { createThemeVars, hexToHsl } from "./adaptive-theme";
+import { applyRelayBrandColorFromInfo } from "./relayBrandColor";
 import {
   SYNTAX_THEMES,
   type SyntaxThemeName,
@@ -85,6 +86,7 @@ type ThemeContextValue = {
 type ThemeProviderProps = {
   children: ReactNode;
   defaultTheme?: SyntaxThemeName;
+  relayUrl?: string | null;
 };
 
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
@@ -480,6 +482,7 @@ async function applyTheme(name: SyntaxThemeName): Promise<{
 export function ThemeProvider({
   children,
   defaultTheme = "buzz",
+  relayUrl = null,
 }: ThemeProviderProps) {
   const glassBackgroundSupported = isTauri() && isMacPlatform();
 
@@ -632,6 +635,17 @@ export function ThemeProvider({
   useEffect(() => {
     applyAccentColor(resolveEffectiveAccent(effectiveTheme, accentColor));
   }, [accentColor, effectiveTheme]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const controller = new AbortController();
+
+    void applyRelayBrandColorFromInfo(root, relayUrl, {
+      signal: controller.signal,
+    });
+
+    return () => controller.abort();
+  }, [relayUrl]);
 
   const setTheme = useCallback((name: string) => {
     if (!isValidThemeName(name)) return;

@@ -497,12 +497,14 @@ mod nip11_relay_info {
             "host B NIP-11 must be a relay-info document (has supported_nips)"
         );
 
-        // `icon` is the one deliberately host-scoped field (the NIP-WP
-        // workspace icon; each host sees only its own community's icon).
-        // Strip it before the equality proof — every OTHER field must still
-        // be community-agnostic.
+        // `icon` and `buzz_brand_color` are the deliberately host-scoped
+        // fields (public presentation for the community the caller already
+        // reached). Strip them before the equality proof — every OTHER field
+        // must still be community-agnostic.
         json_a.as_object_mut().map(|o| o.remove("icon"));
         json_b.as_object_mut().map(|o| o.remove("icon"));
+        json_a.as_object_mut().map(|o| o.remove("buzz_brand_color"));
+        json_b.as_object_mut().map(|o| o.remove("buzz_brand_color"));
 
         // The enumeration-oracle obligation: no other field of the served
         // document varies by community. Identical icon-stripped bodies are the
@@ -511,9 +513,9 @@ mod nip11_relay_info {
         assert_eq!(
             json_a, json_b,
             "NIP-11 from host A and host B must be identical apart from each \
-             community's own `icon`: any other community-distinguishing field \
-             would make the unauthenticated relay-info document an enumeration \
-             oracle for other tenants"
+             community's own `icon` and `buzz_brand_color`: any other \
+             community-distinguishing field would make the unauthenticated \
+             relay-info document an enumeration oracle for other tenants"
         );
 
         // An *unmapped* host must get the SAME document too — not a 404. NIP-11
@@ -541,12 +543,18 @@ mod nip11_relay_info {
              carry no `icon` — leaking any community's icon to an unmapped host \
              would cross the tenant boundary"
         );
+        assert!(
+            json_unknown.get("buzz_brand_color").is_none(),
+            "an unmapped host binds to no community, so its NIP-11 document must \
+             carry no `buzz_brand_color` — leaking any community's brand color \
+             to an unmapped host would cross the tenant boundary"
+        );
         assert_eq!(
             json_a, json_unknown,
             "NIP-11 served to an unmapped host must match a mapped host's \
-             icon-stripped document: apart from the host's own `icon`, the \
-             relay-info doc carries no host-derived field, so it cannot reveal \
-             whether a given host is configured"
+             presentation-stripped document: apart from the host's own `icon` \
+             and `buzz_brand_color`, the relay-info doc carries no host-derived \
+             field, so it cannot reveal whether a given host is configured"
         );
     }
 }

@@ -320,6 +320,57 @@ impl Db {
         Ok(())
     }
 
+    /// Returns the community's brand color (`#rrggbb`), if set.
+    ///
+    /// Set by relay admins/owners via the kind:9033 workspace-profile command
+    /// alongside the icon; the value is validated and length-capped at that
+    /// write path. Mirrors [`Self::get_community_icon`] exactly, including the
+    /// empty-string-is-unset filter, so the two presentation scalars cannot
+    /// drift apart.
+    #[datastore_span(name = "get_community_brand_color", system = "postgresql")]
+    pub async fn get_community_brand_color(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<Option<String>> {
+        let row = sqlx::query(
+            r#"
+            SELECT brand_color
+            FROM communities
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row
+            .map(|row| row.try_get::<Option<String>, _>("brand_color"))
+            .transpose()?
+            .flatten()
+            .filter(|color| !color.is_empty()))
+    }
+
+    /// Sets or clears (`None`) the community's brand color.
+    #[datastore_span(name = "set_community_brand_color", system = "postgresql")]
+    pub async fn set_community_brand_color(
+        &self,
+        community_id: CommunityId,
+        brand_color: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE communities
+            SET brand_color = $2
+            WHERE id = $1
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(brand_color)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Ensure a configured community host exists and return its row.
     ///
     /// This is the startup/config seeding path for N=1 deployments. Migrations
@@ -713,6 +764,8 @@ mod postgres_tests {
             "lookup_community_host",
             "get_community_icon",
             "set_community_icon",
+            "get_community_brand_color",
+            "set_community_brand_color",
             "ensure_configured_community",
             "create_community_with_owner",
             "archive_community_owned_by",
@@ -768,6 +821,7 @@ mod postgres_tests {
             "create_community_with_owner_enforces_per_owner_limit",
             "concurrent_same_owner_create_returns_the_winning_row_to_both_callers",
             "ensure_configured_community_reports_insert_winner",
+            "community_brand_color_round_trips_and_clears_independently_from_icon",
             "list_communities_owned_by_returns_only_owner_rows",
             "communities_of_channels_present_for_existing_absent_for_missing",
         ];
@@ -1014,6 +1068,73 @@ mod postgres_tests {
         assert!(!second.created, "second ensure should report existed");
         assert_eq!(second.id, first.id);
         assert_eq!(second.host, host);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn community_brand_color_round_trips_and_clears_independently_from_icon() {
+        let db = setup_db().await;
+        crate::migration::run_migrations(&db.pool)
+            .await
+            .expect("run migrations");
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+
+        assert_eq!(
+            db.get_community_brand_color(community)
+                .await
+                .expect("initial brand color"),
+            None
+        );
+
+        db.set_community_icon(community, Some("https://example.com/icon.png"))
+            .await
+            .expect("set icon");
+        db.set_community_brand_color(community, Some("#ff8800"))
+            .await
+            .expect("set brand color");
+        assert_eq!(
+            db.get_community_brand_color(community)
+                .await
+                .expect("stored brand color")
+                .as_deref(),
+            Some("#ff8800")
+        );
+        assert_eq!(
+            db.get_community_icon(community)
+                .await
+                .expect("stored icon")
+                .as_deref(),
+            Some("https://example.com/icon.png"),
+            "brand color writes must not disturb the icon scalar"
+        );
+
+        db.set_community_brand_color(community, Some(""))
+            .await
+            .expect("store empty brand color");
+        assert_eq!(
+            db.get_community_brand_color(community)
+                .await
+                .expect("empty brand color"),
+            None,
+            "empty string is treated as cleared, matching get_community_icon"
+        );
+
+        db.set_community_brand_color(community, None)
+            .await
+            .expect("clear brand color");
+        assert_eq!(
+            db.get_community_brand_color(community)
+                .await
+                .expect("cleared brand color"),
+            None
+        );
+        assert_eq!(
+            db.get_community_icon(community)
+                .await
+                .expect("icon after brand clears")
+                .as_deref(),
+            Some("https://example.com/icon.png")
+        );
     }
 
     #[tokio::test]
