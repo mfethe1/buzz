@@ -29,7 +29,7 @@ void main() {
         },
       );
 
-      expect(digest.map((entry) => entry.author), ['Ada', 'def456']);
+      expect(digest.map((entry) => entry.author), ['Ada', 'Unknown identity']);
       expect(digest.map((entry) => entry.text), ['first', 'second']);
     });
 
@@ -37,11 +37,11 @@ void main() {
       final digest = threadSummaryDigest([
         _message(
           id: '1',
-          pubkey: 'aaaaaaaabbbbbbbbccccccccdddddddd',
+          pubkey: 'b' * 64,
           content: 'hello',
         ),
       ], profiles: const {});
-      expect(digest.single.author, 'aaaaaaaa…');
+      expect(digest.single.author, 'npub1hwa…04hu');
     });
 
     test('drops system rows, which are chrome rather than conversation', () {
