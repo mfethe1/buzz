@@ -155,7 +155,6 @@ fn isolated_deadline_href(stage: &str) -> String {
         "example.com".to_owned(),
         "assets.example".to_owned(),
     ];
-    reserved.extend((0..128).map(|index| format!("renewed-rate-limit-{index}.example")));
     (0..128)
         .map(|index| format!("https://deadline-isolated-{stage}-{index}.example/preview"))
         .find(|candidate| {
@@ -173,6 +172,10 @@ fn isolated_deadline_href(stage: &str) -> String {
 
 #[tokio::test]
 async fn operation_deadline_covers_metadata_oembed_images_redirects_and_cooldown() {
+    let _fixture_guard = super::LINK_PREVIEW_FIXTURE_MUTEX
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap();
     assert!(PREVIEW_OPERATION_TIMEOUT > TRANSPORT_IDLE_TIMEOUT);
     assert!(PREVIEW_OPERATION_TIMEOUT <= Duration::from_secs(60));
     for stage in [

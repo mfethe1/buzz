@@ -798,3 +798,7 @@ mod tests;
 #[cfg(test)]
 #[path = "link_preview_deadline_tests.rs"]
 mod deadline_tests;
+
+#[cfg(test)]
+pub(super) static LINK_PREVIEW_FIXTURE_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();

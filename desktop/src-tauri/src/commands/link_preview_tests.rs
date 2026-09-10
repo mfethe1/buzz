@@ -257,6 +257,10 @@ async fn first_rate_limit_and_queued_host_request_share_one_cooldown_boundary() 
 
 #[tokio::test]
 async fn renewed_rate_limit_blocks_queued_url_after_inline_wait_is_used() {
+    let _fixture_guard = super::LINK_PREVIEW_FIXTURE_MUTEX
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let server_requests = Arc::clone(&requests);
     let (second_started_tx, second_started_rx) = oneshot::channel();
@@ -310,14 +314,14 @@ async fn renewed_rate_limit_blocks_queued_url_after_inline_wait_is_used() {
     };
     // The desktop suite runs these real transport tests concurrently. Pick a
     // host stripe that cannot block the deadline fixture's known hosts.
-    let reserved_hosts = (0..128)
-        .flat_map(|index| {
-            [
-                "image", "favicon", "cooldown", "redirect", "metadata", "oembed",
-            ]
-            .map(|stage| format!("deadline-isolated-{stage}-{index}.example"))
-        })
-        .collect::<Vec<_>>();
+    let reserved_hosts = [
+        "deadline-image.example",
+        "deadline-favicon.example",
+        "deadline-cooldown.example",
+        "deadline-redirect.example",
+        "deadline-metadata.example",
+        "deadline-oembed.example",
+    ];
     let url = (0..128)
         .map(|index| {
             Url::parse(&format!(
