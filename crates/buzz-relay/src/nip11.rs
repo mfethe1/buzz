@@ -606,6 +606,7 @@ mod tests {
             DEFAULT_MAX_FRAME_BYTES,
             None,
             None,
+            None,
         );
         assert_eq!(info.buzz_brand_color.as_deref(), Some("#ff8800"));
         let json = serde_json::to_value(&info).expect("serialize");
@@ -621,6 +622,7 @@ mod tests {
                 color,
                 false,
                 DEFAULT_MAX_FRAME_BYTES,
+                None,
                 None,
                 None,
             );
@@ -648,6 +650,7 @@ mod tests {
             DEFAULT_MAX_FRAME_BYTES,
             None,
             None,
+            None,
         );
         assert_eq!(
             icon_only.icon.as_deref(),
@@ -663,6 +666,7 @@ mod tests {
             DEFAULT_MAX_FRAME_BYTES,
             None,
             None,
+            None,
         );
         assert!(color_only.icon.is_none());
         assert_eq!(color_only.buzz_brand_color.as_deref(), Some("#123abc"));
@@ -673,6 +677,7 @@ mod tests {
             Some("#123abc"),
             false,
             DEFAULT_MAX_FRAME_BYTES,
+            None,
             None,
             None,
         );

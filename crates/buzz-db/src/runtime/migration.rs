@@ -1459,7 +1459,7 @@ mod postgres_tests {
         let sql = migration.sql.as_str();
         assert!(sql.contains("ALTER TABLE communities ADD COLUMN brand_color TEXT"));
         assert!(!migrations[0].sql.as_str().contains("brand_color"));
-        assert!(include_str!("../../../schema/schema.sql").contains("brand_color     TEXT"));
+        assert!(include_str!("../../../../schema/schema.sql").contains("brand_color     TEXT"));
     }
 
     #[test]
