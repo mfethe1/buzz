@@ -145,7 +145,7 @@ fn isolated_deadline_href(stage: &str) -> String {
     // These real transport tests run concurrently. Avoid every fixed or
     // collision-search host used by the neighboring link-preview fixtures so
     // an unrelated held semaphore stripe cannot prevent the image request.
-    let mut reserved = vec![
+    let reserved = [
         "user-paced.example".to_owned(),
         "cancel.example".to_owned(),
         "rate-limit-regression.example".to_owned(),
@@ -173,9 +173,9 @@ fn isolated_deadline_href(stage: &str) -> String {
 #[tokio::test]
 async fn operation_deadline_covers_metadata_oembed_images_redirects_and_cooldown() {
     let _fixture_guard = super::LINK_PREVIEW_FIXTURE_MUTEX
-        .get_or_init(|| Mutex::new(()))
+        .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
-        .unwrap();
+        .await;
     assert!(PREVIEW_OPERATION_TIMEOUT > TRANSPORT_IDLE_TIMEOUT);
     assert!(PREVIEW_OPERATION_TIMEOUT <= Duration::from_secs(60));
     for stage in [

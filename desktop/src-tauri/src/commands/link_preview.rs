@@ -800,5 +800,5 @@ mod tests;
 mod deadline_tests;
 
 #[cfg(test)]
-pub(super) static LINK_PREVIEW_FIXTURE_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> =
+pub(super) static LINK_PREVIEW_FIXTURE_MUTEX: std::sync::OnceLock<tokio::sync::Mutex<()>> =
     std::sync::OnceLock::new();

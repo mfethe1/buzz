@@ -258,9 +258,9 @@ async fn first_rate_limit_and_queued_host_request_share_one_cooldown_boundary() 
 #[tokio::test]
 async fn renewed_rate_limit_blocks_queued_url_after_inline_wait_is_used() {
     let _fixture_guard = super::LINK_PREVIEW_FIXTURE_MUTEX
-        .get_or_init(|| Mutex::new(()))
+        .get_or_init(|| tokio::sync::Mutex::new(()))
         .lock()
-        .unwrap();
+        .await;
     let requests = Arc::new(Mutex::new(Vec::new()));
     let server_requests = Arc::clone(&requests);
     let (second_started_tx, second_started_rx) = oneshot::channel();
