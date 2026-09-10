@@ -974,7 +974,6 @@ async fn steer_rejected_on_run_id_mismatch() {
     // Hold the provider until rejection is observed, otherwise a fast turn can
     // finish before the steer and exercise the no-active-run path instead.
     let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
-    let mut gate_tx = Some(gate_tx);
     let (url, _captures) = spawn_gated_capturing_fake_llm(
         vec![CannedResponse {
             status: 200,
@@ -1516,6 +1515,7 @@ async fn steer_rejected_on_empty_prompt() {
     // observed. Otherwise a fast fake provider can finish the run before the
     // request is handled, making this validation race with normal teardown.
     let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut gate_tx = Some(gate_tx);
     let gate_rx = Arc::new(Mutex::new(Some(gate_rx)));
     let (url, _captures) = spawn_gated_capturing_fake_llm(
         vec![
