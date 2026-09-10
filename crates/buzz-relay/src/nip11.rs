@@ -185,6 +185,10 @@ impl RelayInfo {
     /// `build` advertises the provider-agnostic `buzz-gif` extension and the
     /// relay-relative metadata search endpoint. It must never contain a
     /// provider credential.
+    // Each parameter is an independent, config-derived scalar advertised in the
+    // NIP-11 document; they share no cohesive domain grouping, so bundling them
+    // into a struct would add indirection without improving call-site clarity.
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         relay_self: Option<&str>,
         icon: Option<&str>,
@@ -494,7 +498,16 @@ mod tests {
 
     #[test]
     fn build_advertises_buzz_repository_url() {
-        let info = RelayInfo::build(None, None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+        let info = RelayInfo::build(
+            None,
+            None,
+            None,
+            false,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
         assert_eq!(info.software, "https://github.com/block/buzz");
     }
 
@@ -517,7 +530,16 @@ mod tests {
             Some("wss://pairing.buzz.xyz")
         );
 
-        let info = RelayInfo::build(None, None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+        let info = RelayInfo::build(
+            None,
+            None,
+            None,
+            false,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
         let json = serde_json::to_value(&info).expect("serialize");
         assert!(json.get("pairing_relay_url").is_none());
     }
@@ -545,8 +567,16 @@ mod tests {
             .contains(&serde_json::json!("buzz-gif")));
         assert!(!json.to_string().contains("api_key"));
 
-        let unconfigured =
-            RelayInfo::build(None, None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+        let unconfigured = RelayInfo::build(
+            None,
+            None,
+            None,
+            false,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
         assert!(unconfigured.gif.is_none());
         assert!(!unconfigured
             .supported_extensions
@@ -580,8 +610,16 @@ mod tests {
         );
 
         for icon in [None, Some("")] {
-            let info =
-                RelayInfo::build(None, icon, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+            let info = RelayInfo::build(
+                None,
+                icon,
+                None,
+                false,
+                DEFAULT_MAX_FRAME_BYTES,
+                None,
+                None,
+                None,
+            );
             assert!(info.icon.is_none());
             let json = serde_json::to_value(&info).expect("serialize");
             assert!(
@@ -726,7 +764,16 @@ mod tests {
     /// Open relay, ephemeral key — both `self` and NIP-43 are absent.
     #[test]
     fn build_open_relay_ephemeral_key_omits_self_and_nip43() {
-        let info = RelayInfo::build(None, None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+        let info = RelayInfo::build(
+            None,
+            None,
+            None,
+            false,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
         assert!(info.relay_self.is_none());
         assert!(!info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
@@ -778,7 +825,16 @@ mod tests {
     #[cfg(debug_assertions)]
     #[should_panic(expected = "advertise_nip43=true requires relay_self=Some")]
     fn build_nip43_without_self_panics_in_debug() {
-        let _ = RelayInfo::build(None, None, None, true, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+        let _ = RelayInfo::build(
+            None,
+            None,
+            None,
+            true,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
     }
 
     fn admin_config(host: &str) -> crate::config::AdminConfig {
@@ -795,7 +851,16 @@ mod tests {
     fn admin_api_absent_when_admin_surface_not_configured() {
         assert_eq!(admin_api_advertisement(None), None);
 
-        let info = RelayInfo::build(None, None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+        let info = RelayInfo::build(
+            None,
+            None,
+            None,
+            false,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
         assert!(info.admin_api.is_none());
         let json = serde_json::to_value(&info).expect("serialize");
         assert!(

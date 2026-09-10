@@ -1074,9 +1074,6 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn community_brand_color_round_trips_and_clears_independently_from_icon() {
         let db = setup_db().await;
-        crate::migration::run_migrations(&db.pool)
-            .await
-            .expect("run migrations");
         let community = CommunityId::from_uuid(make_community(&db.pool).await);
 
         assert_eq!(
