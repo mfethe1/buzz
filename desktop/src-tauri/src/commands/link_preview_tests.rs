@@ -310,14 +310,14 @@ async fn renewed_rate_limit_blocks_queued_url_after_inline_wait_is_used() {
     };
     // The desktop suite runs these real transport tests concurrently. Pick a
     // host stripe that cannot block the deadline fixture's known hosts.
-    let reserved_hosts = [
-        "deadline-image.example",
-        "deadline-favicon.example",
-        "deadline-cooldown.example",
-        "deadline-redirect.example",
-        "deadline-metadata.example",
-        "deadline-oembed.example",
-    ];
+    let reserved_hosts = (0..128)
+        .flat_map(|index| {
+            [
+                "image", "favicon", "cooldown", "redirect", "metadata", "oembed",
+            ]
+            .map(|stage| format!("deadline-isolated-{stage}-{index}.example"))
+        })
+        .collect::<Vec<_>>();
     let url = (0..128)
         .map(|index| {
             Url::parse(&format!(

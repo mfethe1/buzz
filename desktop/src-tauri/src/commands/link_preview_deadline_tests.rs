@@ -141,6 +141,36 @@ async fn wait_until_bodies_drop(traffic: &Traffic) {
     .expect("deadline must drop the actual response stream");
 }
 
+fn isolated_deadline_href(stage: &str) -> String {
+    // These real transport tests run concurrently. Avoid every fixed or
+    // collision-search host used by the neighboring link-preview fixtures so
+    // an unrelated held semaphore stripe cannot prevent the image request.
+    let mut reserved = vec![
+        "user-paced.example".to_owned(),
+        "cancel.example".to_owned(),
+        "rate-limit-regression.example".to_owned(),
+        "transport-after-cooldown.example".to_owned(),
+        "bounded-cooldown.example".to_owned(),
+        "excessive-cooldown.example".to_owned(),
+        "example.com".to_owned(),
+        "assets.example".to_owned(),
+    ];
+    reserved.extend((0..10_000).map(|index| format!("collision-{index}.example")));
+    (0..128)
+        .map(|index| format!("https://deadline-isolated-{stage}-{index}.example/preview"))
+        .find(|candidate| {
+            let candidate = Url::parse(candidate).unwrap();
+            reserved.iter().all(|host| {
+                let reserved = Url::parse(&format!("https://{host}/image.png")).unwrap();
+                !std::ptr::eq(
+                    super::image_host_gate(&candidate),
+                    super::image_host_gate(&reserved),
+                )
+            })
+        })
+        .expect("a free deadline image host stripe")
+}
+
 #[tokio::test]
 async fn operation_deadline_covers_metadata_oembed_images_redirects_and_cooldown() {
     assert!(PREVIEW_OPERATION_TIMEOUT > TRANSPORT_IDLE_TIMEOUT);
@@ -217,7 +247,7 @@ async fn operation_deadline_covers_metadata_oembed_images_redirects_and_cooldown
         let href = if stage == "oembed" {
             "https://www.youtube.com/watch?v=fixture".to_string()
         } else {
-            format!("https://deadline-{stage}.example/preview")
+            isolated_deadline_href(stage)
         };
         let id = format!("deadline-{stage}");
         let request_id = (stage != "oembed").then_some(id.clone());
