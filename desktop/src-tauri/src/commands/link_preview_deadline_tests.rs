@@ -155,7 +155,7 @@ fn isolated_deadline_href(stage: &str) -> String {
         "example.com".to_owned(),
         "assets.example".to_owned(),
     ];
-    reserved.extend((0..10_000).map(|index| format!("collision-{index}.example")));
+    reserved.extend((0..128).map(|index| format!("renewed-rate-limit-{index}.example")));
     (0..128)
         .map(|index| format!("https://deadline-isolated-{stage}-{index}.example/preview"))
         .find(|candidate| {
