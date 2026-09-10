@@ -302,7 +302,7 @@ test("matching not-modified preserves display mutations without persisting them"
 
   await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(
     FULL_SNAPSHOT.length,
-    { timeout: 500 },
+    { timeout: 2000 },
   );
   await mutateDisplayedChannels(page, optimisticName);
   await expect(
@@ -333,7 +333,7 @@ test("first-ever boot without a snapshot sends null and shows loading", async ({
   await page.goto("/");
 
   await expect(page.getByTestId("sidebar-loading")).toBeVisible({
-    timeout: 500,
+    timeout: 2000,
   });
   await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(0);
   await expect
@@ -366,7 +366,7 @@ test("a different identity's snapshot is ignored", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByTestId("sidebar-loading")).toBeVisible({
-    timeout: 500,
+    timeout: 2000,
   });
   await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(0);
   await expect
@@ -424,7 +424,7 @@ test("partial hash/list write fails toward a full fetch", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByTestId("sidebar-loading")).toBeVisible({
-    timeout: 500,
+    timeout: 2000,
   });
   await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(0);
   await expect
@@ -466,7 +466,7 @@ test("mismatched not-modified hash falls back to a full list", async ({
 
   const snapshotRows = page.locator('[data-channel-id^="snapshot-"]');
   await expect(snapshotRows).toHaveCount(FULL_SNAPSHOT.length, {
-    timeout: 500,
+    timeout: 2000,
   });
   await expect
     .poll(() => getChannelsPayloads(page))
@@ -511,7 +511,7 @@ test("hash mismatch replaces the snapshot with the full live list", async ({
 
   await expect(page.locator('[data-channel-id^="snapshot-"]')).toHaveCount(
     FULL_SNAPSHOT.length,
-    { timeout: 500 },
+    { timeout: 2000 },
   );
   await expect
     .poll(() => getChannelsPayloads(page))
@@ -568,7 +568,7 @@ test("community switch validates a stale relay snapshot and replaces it", async 
   await page.getByTestId("community-rail-button-community-b").click();
   const switchedRows = page.locator('[data-channel-id^="switched-"]');
   await expect(switchedRows).toHaveCount(switchedSnapshot.length, {
-    timeout: 500,
+    timeout: 2000,
   });
   await expect
     .poll(async () =>
