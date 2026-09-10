@@ -308,7 +308,33 @@ async fn renewed_rate_limit_blocks_queued_url_after_inline_wait_is_used() {
                 .map_err(|error| error.to_string())
         }
     };
-    let url = Url::parse("https://renewed-rate-limit.example/first.png").unwrap();
+    // The desktop suite runs these real transport tests concurrently. Pick a
+    // host stripe that cannot block the deadline fixture's known hosts.
+    let reserved_hosts = [
+        "deadline-image.example",
+        "deadline-favicon.example",
+        "deadline-cooldown.example",
+        "deadline-redirect.example",
+        "deadline-metadata.example",
+        "deadline-oembed.example",
+    ];
+    let url = (0..128)
+        .map(|index| {
+            Url::parse(&format!(
+                "https://renewed-rate-limit-{index}.example/first.png"
+            ))
+            .unwrap()
+        })
+        .find(|candidate| {
+            reserved_hosts.iter().all(|host| {
+                let reserved = Url::parse(&format!("https://{host}/image.png")).unwrap();
+                !std::ptr::eq(
+                    super::image_host_gate(candidate),
+                    super::image_host_gate(&reserved),
+                )
+            })
+        })
+        .expect("a free image host stripe");
     let first = tokio::spawn(fetch_sanitized_image_using(
         url.clone(),
         false,
