@@ -974,6 +974,7 @@ async fn steer_rejected_on_run_id_mismatch() {
     // Hold the provider until rejection is observed, otherwise a fast turn can
     // finish before the steer and exercise the no-active-run path instead.
     let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut gate_tx = Some(gate_tx);
     let (url, _captures) = spawn_gated_capturing_fake_llm(
         vec![CannedResponse {
             status: 200,
@@ -1552,7 +1553,7 @@ async fn steer_rejected_on_empty_prompt() {
         if v["id"] == json!(s_id) {
             assert_eq!(v["error"]["code"], -32602, "empty prompt must be rejected");
             saw_reject = true;
-            gate_tx.send(()).unwrap();
+            gate_tx.take().unwrap().send(()).unwrap();
         } else if v["id"] == json!(p_id) {
             break;
         }
