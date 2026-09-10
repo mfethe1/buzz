@@ -401,10 +401,12 @@ fn retryable_image_cooldown(
     waited_for_cooldown: &mut bool,
 ) -> Option<Duration> {
     let retry_after = retry_after?;
+    // Preserve a server's renewed backoff even after this request has used
+    // its one inline wait. Queued requests must observe the newer cooldown.
+    set_image_host_cooldown(url, retry_after);
     if *waited_for_cooldown {
         return None;
     }
-    set_image_host_cooldown(url, retry_after);
     if retry_after > MAX_INLINE_IMAGE_COOLDOWN {
         return None;
     }

@@ -255,6 +255,103 @@ async fn first_rate_limit_and_queued_host_request_share_one_cooldown_boundary() 
     assert_eq!(*attempts.lock().unwrap(), 3);
 }
 
+#[tokio::test]
+async fn renewed_rate_limit_blocks_queued_url_after_inline_wait_is_used() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let server_requests = Arc::clone(&requests);
+    let (second_started_tx, second_started_rx) = oneshot::channel();
+    let second_started_tx = Arc::new(Mutex::new(Some(second_started_tx)));
+    let (release_second_tx, release_second_rx) = oneshot::channel();
+    let release_second_rx = Arc::new(Mutex::new(Some(release_second_rx)));
+    let address = start_test_server(Router::new().route(
+        "/{image}",
+        get(
+            move |axum::extract::Path(path): axum::extract::Path<String>| {
+                let requests = Arc::clone(&server_requests);
+                let second_started_tx = Arc::clone(&second_started_tx);
+                let release_second_rx = Arc::clone(&release_second_rx);
+                async move {
+                    let attempt = {
+                        let mut requests = requests.lock().unwrap();
+                        requests.push(path);
+                        requests.len()
+                    };
+                    if attempt == 2 {
+                        second_started_tx
+                            .lock()
+                            .unwrap()
+                            .take()
+                            .unwrap()
+                            .send(())
+                            .unwrap();
+                        let release = release_second_rx.lock().unwrap().take().unwrap();
+                        release.await.unwrap();
+                    }
+                    Response::builder()
+                        .status(429)
+                        .header("retry-after", if attempt == 1 { "1" } else { "300" })
+                        .body(Body::empty())
+                        .unwrap()
+                }
+            },
+        ),
+    ))
+    .await;
+    let client = reqwest::Client::new();
+    let send = move |url: Url, _accept: &'static str| {
+        let client = client.clone();
+        async move {
+            client
+                .get(format!("http://{address}{}", url.path()))
+                .send()
+                .await
+                .map_err(|error| error.to_string())
+        }
+    };
+    let url = Url::parse("https://renewed-rate-limit.example/first.png").unwrap();
+    let first = tokio::spawn(fetch_sanitized_image_using(
+        url.clone(),
+        false,
+        |_url| async { Ok(()) },
+        send.clone(),
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), second_started_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    // The first fetch has spent its one inline wait and holds the host gate
+    // while the server prepares its renewed rate limit. Queue a different URL.
+    let queued = fetch_sanitized_image_using(
+        url.join("second.png").unwrap(),
+        false,
+        |_url| async { Ok(()) },
+        send,
+    );
+    tokio::pin!(queued);
+    assert!(futures_util::poll!(&mut queued).is_pending());
+    release_second_tx.send(()).unwrap();
+    let (first, queued) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(first, queued)
+    })
+    .await
+    .expect("renewed cooldown must not add another inline wait");
+    assert_eq!(
+        first.unwrap(),
+        Err(ImageFetchError::Transient {
+            retry_after: Some(std::time::Duration::from_secs(300)),
+            retry_inline: false,
+        })
+    );
+    assert!(matches!(queued, Err(ImageFetchError::Transient {
+        retry_after: Some(remaining), retry_inline: false,
+    }) if remaining > std::time::Duration::from_secs(295)));
+    assert_eq!(
+        *requests.lock().unwrap(),
+        ["first.png", "first.png"],
+        "queued URL must not reach a host that renewed its cooldown"
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn transport_failure_after_cooldown_does_not_renew_wait_on_outer_retry() {
     let cooldown = std::time::Duration::from_secs(20);
