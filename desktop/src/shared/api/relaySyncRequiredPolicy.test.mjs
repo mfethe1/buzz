@@ -58,10 +58,7 @@ test("shouldStartSyncReplay: returns false when a replay is already in-flight", 
 
 test("shouldStartSyncReplay: returns false when a pending replay is in-flight", () => {
   // A never-resolving promise simulates a long-running replay.
-  let _resolve;
-  const inFlight = new Promise((resolve) => {
-    _resolve = resolve;
-  });
+  const inFlight = new Promise(() => {});
   assert.equal(shouldStartSyncReplay(inFlight), false);
 });
 
