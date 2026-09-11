@@ -3,6 +3,12 @@ import * as React from "react";
 import type { TimelineMessage } from "@/features/messages/types";
 
 const ANNOUNCEMENT_COALESCE_MS = 500;
+/**
+ * How long an announcement stays in the DOM after it is emitted. Long enough
+ * for assistive tech to pick the change up, short enough that the sr-only node
+ * is not a permanent duplicate of the timeline.
+ */
+const ANNOUNCEMENT_RETENTION_MS = 500;
 
 type TimelineAnnouncementPolicyState = {
   channelId: string;
@@ -42,9 +48,27 @@ function messageKey(message: TimelineMessage): string {
   return message.renderKey ?? message.id;
 }
 
+/**
+ * Replace every `||spoiler||` span with a neutral placeholder.
+ *
+ * A live region announces the message body verbatim, so an un-redacted
+ * announcement hands the spoiler's contents — including the destination of a
+ * masked `[label](url)` link — to assistive tech (and to the accessibility
+ * tree, where it is trivially readable) before the reader chooses to reveal
+ * it. Screen-reader users must get the same "hidden until revealed" guarantee
+ * sighted users get, so redact at the announcement source rather than relying
+ * on the visual spoiler overlay.
+ *
+ * Matches the delimiter pair non-greedily and only within a single
+ * announcement, mirroring the inline spoiler mark's own parsing.
+ */
+export function redactSpoilers(body: string): string {
+  return body.replace(/\|\|([\s\S]*?)\|\|/g, "spoiler hidden");
+}
+
 function announcementForMessage(message: TimelineMessage): string | null {
   const author = message.author.trim();
-  const body = message.body.replace(/\s+/g, " ").trim();
+  const body = redactSpoilers(message.body).replace(/\s+/g, " ").trim();
   if (!author || !body) return null;
   return `${message.isAgent ? "Agent " : ""}${author}: ${body}`;
 }
@@ -165,6 +189,19 @@ export function TimelineAnnouncementRegion({
   const [announcement, setAnnouncement] = React.useState("");
   const policyRef = React.useRef<TimelineAnnouncementPolicyState | null>(null);
   const batcherRef = React.useRef<TimelineAnnouncementBatcher | null>(null);
+  const retentionRef = React.useRef<ReturnType<
+    typeof scheduler.schedule
+  > | null>(null);
+  // The scheduler is swapped only by tests; mirroring it in a ref keeps the
+  // effects below free of a dependency that would re-run them on every render.
+  const schedulerRef = React.useRef(scheduler);
+  schedulerRef.current = scheduler;
+
+  const clearRetention = React.useCallback(() => {
+    if (retentionRef.current === null) return;
+    schedulerRef.current.clear(retentionRef.current);
+    retentionRef.current = null;
+  }, []);
 
   if (!batcherRef.current) {
     batcherRef.current = createTimelineAnnouncementBatcher({
@@ -173,6 +210,16 @@ export function TimelineAnnouncementRegion({
           previousAnnouncement === nextAnnouncement
             ? `${nextAnnouncement}\u2060`
             : nextAnnouncement,
+        );
+        // Assistive tech announces on *change*, so the text has done its job
+        // once it has been read. Retaining it forever leaves a second copy of
+        // every message body in the accessibility tree, where it shadows the
+        // real timeline node — `getByText(body)` then resolves to two elements.
+        // Drop it again after the retention window.
+        clearRetention();
+        retentionRef.current = scheduler.schedule(
+          () => setAnnouncement(""),
+          ANNOUNCEMENT_RETENTION_MS,
         );
       },
       scheduler,
@@ -189,16 +236,18 @@ export function TimelineAnnouncementRegion({
 
     if (result.didReset) {
       batcherRef.current?.reset();
+      clearRetention();
       setAnnouncement("");
     }
     batcherRef.current?.push(result.announcements);
-  }, [channelId, isHydrated, messages]);
+  }, [channelId, clearRetention, isHydrated, messages]);
 
   React.useEffect(
     () => () => {
       batcherRef.current?.dispose();
+      clearRetention();
     },
-    [],
+    [clearRetention],
   );
 
   return (
