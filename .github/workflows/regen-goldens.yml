@@ -1,5 +1,7 @@
 name: Regenerate Goldens
-on: workflow_dispatch
+on:
+  push:
+    branches: [fix/mobile-goldens-linux]
 jobs:
   regen:
     runs-on: ubuntu-latest
