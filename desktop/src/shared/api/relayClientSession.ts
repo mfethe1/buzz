@@ -73,6 +73,11 @@ import {
   type RelayAuthRequest,
 } from "@/shared/api/relayAuthPolicy";
 import { createRelayInboundBuffer } from "@/shared/api/relayInboundBuffer";
+import {
+  isKnownSyncRequiredReason,
+  normaliseSyncRequiredReason,
+  shouldStartSyncReplay,
+} from "@/shared/api/relaySyncRequiredPolicy";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 type UserStatusInput = { text: string; emoji: string; expiresAt?: number };
 export class RelayClient {
@@ -93,6 +98,7 @@ export class RelayClient {
   private notifyReconnectListeners = false;
   private onMessageChannel: Channel<unknown> | null = null;
   private connectionGeneration = 0;
+  private syncReplayScheduled: Promise<void> | null = null;
   private sessionEpoch = 0;
   private stabilityTimer: number | null = null;
   private visibleChannelId: string | null = null;
@@ -818,6 +824,10 @@ export class RelayClient {
       // Connection-scoped back-pressure — arm the gate until it expires.
       activateRateLimitIfSignalled(rest[0]);
     }
+
+    if (type === "BUZZ_SYNC_REQUIRED") {
+      this.handleSyncRequired(rest[0]);
+    }
   }
 
   private async handleAuthChallenge(challenge: string, generation: number) {
@@ -915,6 +925,43 @@ export class RelayClient {
 
   private hasLiveSubscriptions() {
     return [...this.subscriptions.values()].some((s) => s.mode === "live");
+  }
+
+  private async handleSyncRequired(rawReason: unknown) {
+    // Disconnected guard — an in-flight reconnect replay already covers the gap.
+    if (this.wsId === null) {
+      return;
+    }
+
+    // Burst coalescing — one replay per burst, mirroring mobile's
+    // `_syncReplayScheduled`. The slot is cleared in `finally` on both settle
+    // paths so the next burst in a new idle window always proceeds.
+    if (!shouldStartSyncReplay(this.syncReplayScheduled)) {
+      return;
+    }
+
+    const reason = normaliseSyncRequiredReason(rawReason);
+    if (isKnownSyncRequiredReason(reason)) {
+      console.debug(
+        "[relay] BUZZ_SYNC_REQUIRED received, triggering replay (reason: %s)",
+        reason,
+      );
+    } else {
+      console.debug(
+        "[relay] BUZZ_SYNC_REQUIRED received, triggering replay (reason: <unknown>)",
+      );
+    }
+
+    // Reuse the existing recovery substrate. Swallow errors — mobile's
+    // `.catchError` parity. The reconnect call site (`:582`) keeps its rethrow
+    // semantics because we go through the wrapper, not the module-level function.
+    this.syncReplayScheduled = this.replayLiveSubscriptions().catch(() => {});
+    const slot = this.syncReplayScheduled;
+    slot.finally(() => {
+      if (this.syncReplayScheduled === slot) {
+        this.syncReplayScheduled = null;
+      }
+    });
   }
 
   private async replayLiveSubscriptions() {
