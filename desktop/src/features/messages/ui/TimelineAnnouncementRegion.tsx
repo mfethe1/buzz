@@ -42,9 +42,27 @@ function messageKey(message: TimelineMessage): string {
   return message.renderKey ?? message.id;
 }
 
+/**
+ * Replace every `||spoiler||` span with a neutral placeholder.
+ *
+ * A live region announces the message body verbatim, so an un-redacted
+ * announcement hands the spoiler's contents — including the destination of a
+ * masked `[label](url)` link — to assistive tech (and to the accessibility
+ * tree, where it is trivially readable) before the reader chooses to reveal
+ * it. Screen-reader users must get the same "hidden until revealed" guarantee
+ * sighted users get, so redact at the announcement source rather than relying
+ * on the visual spoiler overlay.
+ *
+ * Matches the delimiter pair non-greedily and only within a single
+ * announcement, mirroring the inline spoiler mark's own parsing.
+ */
+export function redactSpoilers(body: string): string {
+  return body.replace(/\|\|([\s\S]*?)\|\|/g, "spoiler hidden");
+}
+
 function announcementForMessage(message: TimelineMessage): string | null {
   const author = message.author.trim();
-  const body = message.body.replace(/\s+/g, " ").trim();
+  const body = redactSpoilers(message.body).replace(/\s+/g, " ").trim();
   if (!author || !body) return null;
   return `${message.isAgent ? "Agent " : ""}${author}: ${body}`;
 }
