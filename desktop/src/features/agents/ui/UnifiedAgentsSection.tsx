@@ -6,6 +6,7 @@ import {
   resolveAgentCardAvatarUrl,
 } from "@/features/agents/lib/agentCardAvatar";
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
+import { effectiveAgentDescription } from "@/features/agents/lib/agentDescription";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import type { AgentAvailabilityReader } from "@/features/agents/lib/useAgentAvailability";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
@@ -314,8 +315,14 @@ function AgentPersonaCard({
     ? friendlyAgentLastError(agent.lastError, agent.lastErrorCode)?.copy
     : null;
   const hermesProfile = agent ? hermesProfileNameFromAgent(agent) : null;
+  // Second line contract (AgentIdentityCard): prefer the owner-authored
+  // description when one resolves, otherwise fall back to the persona label a
+  // split card carries. The Hermes profile is appended either way, so a
+  // machine-homed agent still shows which runtime it lives on.
+  const descriptionOrPersonaLabel =
+    effectiveAgentDescription(persona) ?? subtitle;
   const runtimeSubtitle = [
-    subtitle,
+    descriptionOrPersonaLabel,
     hermesProfile ? `Hermes · ${hermesProfile}` : null,
   ]
     .filter((part): part is string => Boolean(part))
