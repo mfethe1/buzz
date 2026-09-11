@@ -3,6 +3,12 @@ import * as React from "react";
 import type { TimelineMessage } from "@/features/messages/types";
 
 const ANNOUNCEMENT_COALESCE_MS = 500;
+/**
+ * How long an announcement stays in the DOM after it is emitted. Long enough
+ * for assistive tech to pick the change up, short enough that the sr-only node
+ * is not a permanent duplicate of the timeline.
+ */
+const ANNOUNCEMENT_RETENTION_MS = 500;
 
 type TimelineAnnouncementPolicyState = {
   channelId: string;
@@ -183,6 +189,19 @@ export function TimelineAnnouncementRegion({
   const [announcement, setAnnouncement] = React.useState("");
   const policyRef = React.useRef<TimelineAnnouncementPolicyState | null>(null);
   const batcherRef = React.useRef<TimelineAnnouncementBatcher | null>(null);
+  const retentionRef = React.useRef<ReturnType<
+    typeof scheduler.schedule
+  > | null>(null);
+  // The scheduler is swapped only by tests; mirroring it in a ref keeps the
+  // effects below free of a dependency that would re-run them on every render.
+  const schedulerRef = React.useRef(scheduler);
+  schedulerRef.current = scheduler;
+
+  const clearRetention = React.useCallback(() => {
+    if (retentionRef.current === null) return;
+    schedulerRef.current.clear(retentionRef.current);
+    retentionRef.current = null;
+  }, []);
 
   if (!batcherRef.current) {
     batcherRef.current = createTimelineAnnouncementBatcher({
@@ -191,6 +210,16 @@ export function TimelineAnnouncementRegion({
           previousAnnouncement === nextAnnouncement
             ? `${nextAnnouncement}\u2060`
             : nextAnnouncement,
+        );
+        // Assistive tech announces on *change*, so the text has done its job
+        // once it has been read. Retaining it forever leaves a second copy of
+        // every message body in the accessibility tree, where it shadows the
+        // real timeline node — `getByText(body)` then resolves to two elements.
+        // Drop it again after the retention window.
+        clearRetention();
+        retentionRef.current = scheduler.schedule(
+          () => setAnnouncement(""),
+          ANNOUNCEMENT_RETENTION_MS,
         );
       },
       scheduler,
@@ -207,16 +236,18 @@ export function TimelineAnnouncementRegion({
 
     if (result.didReset) {
       batcherRef.current?.reset();
+      clearRetention();
       setAnnouncement("");
     }
     batcherRef.current?.push(result.announcements);
-  }, [channelId, isHydrated, messages]);
+  }, [channelId, clearRetention, isHydrated, messages]);
 
   React.useEffect(
     () => () => {
       batcherRef.current?.dispose();
+      clearRetention();
     },
-    [],
+    [clearRetention],
   );
 
   return (
