@@ -4853,24 +4853,40 @@ mod tests {
     /// tens of MB and swallows a 16MB frame outright, so a write that must
     /// backpressure returns immediately there. Pinning SO_SNDBUF/SO_RCVBUF
     /// makes the stall a property of the test, not of the host's TCP stack.
+    ///
+    /// Both are set *before* bind/connect: Windows fixes the receive window at
+    /// handshake, so a resize on an established socket comes too late.
     pub(super) async fn stalled_test_ws_pair() -> (WsStream, WebSocketStream<tokio::net::TcpStream>)
     {
+        use socket2::{Domain, Socket, Type};
         const BUF: usize = 4 * 1024;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test websocket");
+        let addr: std::net::SocketAddr = "127.0.0.1:0".parse().expect("parse test address");
+
+        let raw = Socket::new(Domain::IPV4, Type::STREAM, None).expect("listen socket");
+        raw.set_recv_buffer_size(BUF).expect("pin listener rcvbuf");
+        raw.set_reuse_address(true).expect("reuse test address");
+        raw.bind(&addr.into()).expect("bind test websocket");
+        raw.listen(1).expect("listen test websocket");
+        raw.set_nonblocking(true).expect("nonblocking listener");
+        let listener = tokio::net::TcpListener::from_std(raw.into()).expect("adopt test listener");
         let address = listener.local_addr().expect("read test address");
+
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept test websocket");
-            let _ = socket2::SockRef::from(&stream).set_recv_buffer_size(BUF);
             tokio_tungstenite::accept_async(stream)
                 .await
                 .expect("complete server websocket handshake")
         });
-        let stream = tokio::net::TcpStream::connect(address)
-            .await
+
+        // Blocking connect: it completes via the listen backlog without the
+        // accept task running, so this cannot deadlock the current-thread runtime.
+        let raw = Socket::new(Domain::IPV4, Type::STREAM, None).expect("client socket");
+        raw.set_send_buffer_size(BUF).expect("pin client sndbuf");
+        raw.connect(&address.into())
             .expect("connect test websocket");
-        let _ = socket2::SockRef::from(&stream).set_send_buffer_size(BUF);
+        raw.set_nonblocking(true).expect("nonblocking client");
+        let stream = tokio::net::TcpStream::from_std(raw.into()).expect("adopt test client");
+
         let (client, _) = tokio_tungstenite::client_async(
             format!("ws://{address}"),
             MaybeTlsStream::Plain(stream),
