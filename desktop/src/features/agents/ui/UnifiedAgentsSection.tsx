@@ -6,6 +6,7 @@ import {
   resolveAgentCardAvatarUrl,
 } from "@/features/agents/lib/agentCardAvatar";
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
+import { effectiveAgentDescription } from "@/features/agents/lib/agentDescription";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import type { AgentAvailabilityReader } from "@/features/agents/lib/useAgentAvailability";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
@@ -314,8 +315,12 @@ function AgentPersonaCard({
     ? friendlyAgentLastError(agent.lastError, agent.lastErrorCode)?.copy
     : null;
   const hermesProfile = agent ? hermesProfileNameFromAgent(agent) : null;
+  // A split card passes its rival name as `subtitle`; a canonical card passes
+  // nothing, and then the card face should show the persona's authored
+  // description — the same second line upstream renders. Without this fallback
+  // an edited description is saved but never displayed.
   const runtimeSubtitle = [
-    subtitle,
+    subtitle ?? effectiveAgentDescription(persona),
     hermesProfile ? `Hermes · ${hermesProfile}` : null,
   ]
     .filter((part): part is string => Boolean(part))
