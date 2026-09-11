@@ -2838,6 +2838,15 @@ mod postgres_tests {
             "all NIP-FI tables must be absent after migration 0044: {present:?}"
         );
 
+        // `EXPECTED_SCOPED_TABLES` describes the whole schema, so the catalog
+        // invariant only holds once every migration has run — pinning it at 44
+        // reports every later community-scoped table (0046's `tasks`,
+        // `task_events`) as drift. Finish the chain, then assert.
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("remaining migrations must apply after ledger removal");
+
         // The deletion catalog must validate with ledger relations gone.
         crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()
