@@ -952,10 +952,14 @@ export class RelayClient {
       );
     }
 
-    // Reuse the existing recovery substrate. Swallow errors — mobile's
-    // `.catchError` parity. The reconnect call site (`:582`) keeps its rethrow
-    // semantics because we go through the wrapper, not the module-level function.
-    this.syncReplayScheduled = this.replayLiveSubscriptions().catch(() => {});
+    // Reuse the existing recovery substrate, but in non-fatal mode: this is an
+    // opportunistic accelerator for a best-effort frame, so a failure must NOT
+    // reset a healthy authenticated socket (`resetOnFailure: false`) and must
+    // not propagate (mobile's `.catchError` parity). The reconnect call site
+    // (`:582`) keeps the default reset+rethrow semantics.
+    this.syncReplayScheduled = this.replayLiveSubscriptions(false).catch(
+      () => {},
+    );
     const slot = this.syncReplayScheduled;
     slot.finally(() => {
       if (this.syncReplayScheduled === slot) {
@@ -964,7 +968,24 @@ export class RelayClient {
     });
   }
 
-  private async replayLiveSubscriptions() {
+  /**
+   * Replay live subscriptions through the shared reconnect-replay substrate.
+   *
+   * `resetOnFailure` controls what a failure *means*:
+   *   - `true` (reconnect path): the replay is load-bearing — a session that
+   *     cannot restore its subscriptions is not usable, so tear the connection
+   *     down and let the reconnect ladder rebuild it.
+   *   - `false` (BUZZ_SYNC_REQUIRED path): the replay is an opportunistic
+   *     accelerator for a best-effort gap frame. Tearing down a healthy,
+   *     authenticated socket because an optional catch-up failed would turn a
+   *     dropped fan-out event into a full reconnect — strictly worse than the
+   *     gap it was trying to heal, and a flap loop if the relay is already
+   *     under back-pressure. The caller swallows instead.
+   *
+   * Both callers share this one wiring point so the five-argument call cannot
+   * drift between the two paths.
+   */
+  private async replayLiveSubscriptions(resetOnFailure = true) {
     const generation = this.connectionGeneration;
     try {
       await replayLiveSubscriptions({
@@ -980,7 +1001,9 @@ export class RelayClient {
         error instanceof Error
           ? error
           : new Error("Failed to restore relay subscriptions.");
-      this.resetConnection(reconnectError);
+      if (resetOnFailure) {
+        this.resetConnection(reconnectError);
+      }
       throw reconnectError;
     }
   }
