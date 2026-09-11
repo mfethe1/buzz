@@ -362,7 +362,15 @@ async fn blocked_recovery_write_is_bounded_and_retains_loss() {
     )
     .await
     .unwrap();
+    // Windows loopback absorbs large writes through a fast path regardless of
+    // SO_SNDBUF/SO_RCVBUF, so "the write actually blocked" is not observable
+    // there. The invariant that matters -- recovery stays bounded and keeps the
+    // loss marker -- is asserted on every OS below; only the timing claim is
+    // gated to platforms where backpressure is real.
+    #[cfg(not(windows))]
     assert!(started.elapsed() >= Duration::from_secs(WS_SEND_TIMEOUT_SECS));
+    #[cfg(windows)]
+    let _ = started;
     assert_eq!(state.channel_dropped_since[&ch], 700);
     let attempted = state.recovery.last_attempt.clone();
     recovery::recover_one(&mut client, &mut state, &tx, "agent").await;
