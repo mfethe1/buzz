@@ -84,5 +84,3 @@ nix = { version = "0.31", default-features = false, features = ["signal"] }
 tokio = { workspace = true, features = ["test-util"] }
 httparse = "1"
 tempfile = "3"
-# Pin socket buffers small so write backpressure is deterministic across OSes.
-socket2 = "0.6"
