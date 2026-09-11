@@ -122,12 +122,12 @@ Future<void> loadAppFonts() async {
 
   final sdkFonts = '${flutterSdkRoot()}/bin/cache/artifacts/material_fonts';
   await _registerFont('MaterialIcons', <String>[
-    '$sdkFonts/materialicons-regular.otf',
+    '$sdkFonts/MaterialIcons-Regular.otf',
   ]);
   await _registerFont('Roboto', <String>[
-    '$sdkFonts/roboto-regular.ttf',
-    '$sdkFonts/roboto-medium.ttf',
-    '$sdkFonts/roboto-bold.ttf',
+    '$sdkFonts/Roboto-Regular.ttf',
+    '$sdkFonts/Roboto-Medium.ttf',
+    '$sdkFonts/Roboto-Bold.ttf',
   ]);
 
   _fontsLoaded = true;

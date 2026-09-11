@@ -246,9 +246,7 @@ impl ActionSink for RelayActionSink {
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
         let channel_id = channel_id.to_owned();
         let text = text.to_owned();
-        // AGENT-HOMES-001: authored_text is reserved for future mention-
-        // resolution in relay-signed posts; keep the parameter, silence lint.
-        let _authored_text = authored_text;
+        let authored_text = authored_text.to_owned();
         let author_pubkey = author_pubkey.to_owned();
         let reply_to = reply_to.map(str::to_owned);
 
@@ -423,15 +421,13 @@ impl ActionSink for RelayActionSink {
             // The owner is attributed via `actor`, never p-tagged, so they are
             // not woken by their own workflow's output even if the text names
             // them. Skipping them here keeps that true.
-            for mentioned in resolve_mention_pubkeys(&text, &named_members) {
-                if mentioned == author_pubkey_hex {
-                    continue;
-                }
-                tags.push(
-                    Tag::parse(["p", &mentioned])
-                        .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
-                );
-            }
+            append_workflow_mention_tags(
+                &mut tags,
+                &text,
+                &authored_text,
+                &named_members,
+                &author_pubkey_hex,
+            )?;
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
             let event = EventBuilder::new(kind, &text)
@@ -688,7 +684,6 @@ impl ActionSink for RelayActionSink {
 }
 
 /// only for targets also named in the workflow owner's stored step template.
-#[allow(dead_code)]
 fn append_workflow_mention_tags(
     tags: &mut Vec<Tag>,
     rendered_text: &str,
