@@ -1368,9 +1368,23 @@ mod postgres_tests {
         );
 
         let injected_p_tags = tag_values(&injected, "p");
+        // Same rule as the explicit path above: the owner is attributed via
+        // `actor`/`buzz:workflow-owner` and never p-tagged, so their own
+        // workflow's output cannot wake them as a second agent. Upstream still
+        // p-tags the owner here, which is why the imported assertion inverted.
         assert!(
-            injected_p_tags.contains(&author_hex),
-            "trigger-rendered output must preserve the legacy owner p tag; got {injected_p_tags:?}"
+            !injected_p_tags.iter().any(|t| t == &author_hex),
+            "owner must NOT be p-tagged on trigger-rendered output either; got {injected_p_tags:?}"
+        );
+        assert_eq!(
+            tag_values(&injected, "actor"),
+            vec![author_hex.clone()],
+            "trigger-rendered output must still attribute the owner via actor"
+        );
+        assert_eq!(
+            tag_values(&injected, "buzz:workflow-owner"),
+            vec![author_hex.clone()],
+            "trigger-rendered output must still name the workflow owner explicitly"
         );
         assert!(
             injected_p_tags.contains(&agent_hex),
