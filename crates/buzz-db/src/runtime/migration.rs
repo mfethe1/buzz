@@ -2821,7 +2821,13 @@ mod postgres_tests {
             "all NIP-FI tables must be absent after migration 0044: {present:?}"
         );
 
-        // The deletion catalog must validate with ledger relations gone.
+        // The catalog describes the fully-migrated schema, so bring the DB up to
+        // head before validating: ledger relations stay gone, and tables added
+        // after 0044 are present.
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("remaining migrations apply after ledger removal");
         crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()
             .await
