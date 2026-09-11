@@ -1,0 +1,19 @@
+name: Regenerate Goldens
+on: workflow_dispatch
+jobs:
+  regen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - run: flutter --version
+      - run: cd mobile && flutter pub get
+      - name: Regenerate goldens on the CI platform
+        run: cd mobile && flutter test --update-goldens test/features/channels/agent_activity/agent_activity_sheet_golden_test.dart
+      - name: Verify goldens now pass unmodified
+        run: cd mobile && flutter test test/features/channels/agent_activity/agent_activity_sheet_golden_test.dart
+      - run: cd mobile && git status --porcelain test/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-goldens
+          path: mobile/test/features/channels/agent_activity/goldens/*.png
