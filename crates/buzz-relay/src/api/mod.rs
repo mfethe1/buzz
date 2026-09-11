@@ -6,6 +6,7 @@ pub mod events;
 pub mod gifs;
 pub mod git;
 pub mod invites;
+pub mod machines;
 pub mod media;
 pub mod mesh_demo;
 pub mod nip05;
@@ -179,6 +180,41 @@ pub mod relay_members {
                 tracing::error!("relay membership check errored: {e}");
                 Err(super::internal_error(&e))
             }
+        }
+    }
+
+    /// Enforce a per-machine capability grant for an agent. **Default deny.**
+    ///
+    /// Unlike [`enforce_relay_membership`], this is NOT relaxed by
+    /// `require_relay_membership`: an open relay still denies ungranted
+    /// cross-machine actions. Absence of a grant is a denial.
+    pub async fn require_capability(
+        state: &AppState,
+        community: CommunityId,
+        agent_pubkey: &[u8],
+        capability: &str,
+        target: &str,
+    ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+        match state
+            .db
+            .capability_is_granted(community, agent_pubkey, capability, target)
+            .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "error": "capability_not_granted",
+                    "capability": capability,
+                    "target": target,
+                    "message": format!(
+                        "agent has no active {capability} grant for target {target}"
+                    ),
+                })),
+            )),
+            Err(e) => Err(super::internal_error(&format!(
+                "capability check failed: {e}"
+            ))),
         }
     }
 
@@ -384,3 +420,6 @@ pub mod relay_members {
         }
     }
 }
+
+#[cfg(test)]
+mod workflow_approval_postgres_tests;

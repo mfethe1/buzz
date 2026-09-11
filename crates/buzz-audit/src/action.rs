@@ -28,6 +28,10 @@ pub enum AuditAction {
     RateLimitExceeded,
     /// A media file was uploaded via the Blossom endpoint.
     MediaUploaded,
+    /// An agent was granted a capability on a target machine.
+    CapabilityGranted,
+    /// An agent's capability on a target machine was revoked.
+    CapabilityRevoked,
 }
 
 impl AuditAction {
@@ -45,6 +49,8 @@ impl AuditAction {
             Self::AuthFailure => "auth_failure",
             Self::RateLimitExceeded => "rate_limit_exceeded",
             Self::MediaUploaded => "media_uploaded",
+            Self::CapabilityGranted => "capability_granted",
+            Self::CapabilityRevoked => "capability_revoked",
         }
     }
 
@@ -60,6 +66,8 @@ impl AuditAction {
         Self::AuthFailure,
         Self::RateLimitExceeded,
         Self::MediaUploaded,
+        Self::CapabilityGranted,
+        Self::CapabilityRevoked,
     ];
 }
 

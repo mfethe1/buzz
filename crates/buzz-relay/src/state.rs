@@ -1,5 +1,8 @@
 //! Shared application state — Arc-wrapped, shared across all connections.
 
+mod connection_control;
+mod task_invalidation;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -90,6 +93,14 @@ const RESTART_CLOSE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from
 type SlidingWindowCounter = (u32, Instant);
 type ScopedRateLimiter = DashMap<ScopedPubkeyKey, SlidingWindowCounter>;
 
+/// Authentication facts published atomically after successful NIP-42 verification.
+#[derive(Clone)]
+struct AuthenticatedSession {
+    pubkey: Vec<u8>,
+    delegation_owner: Option<Vec<u8>>,
+    generation: Uuid,
+}
+
 /// Per-connection entry in the connection manager.
 struct ConnEntry {
     tx: mpsc::Sender<WsMessage>,
@@ -106,7 +117,7 @@ struct ConnEntry {
     /// broadcasts track the same consecutive-full counter.
     backpressure_count: Arc<AtomicU8>,
     subscriptions: ConnectionSubscriptions,
-    authenticated_pubkey: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
+    authenticated_session: Arc<std::sync::RwLock<Option<AuthenticatedSession>>>,
     grace_limit: u8,
     /// Flipped exactly once, by the first backpressure-driven disconnect of
     /// this connection (see `ConnectionManager::count_backpressure_disconnect_and_cancel`),
@@ -285,7 +296,7 @@ impl ConnectionManager {
                 community_id,
                 backpressure_count,
                 subscriptions,
-                authenticated_pubkey: Arc::new(std::sync::RwLock::new(None)),
+                authenticated_session: Arc::new(std::sync::RwLock::new(None)),
                 grace_limit,
                 backpressure_disconnect_counted: AtomicBool::new(false),
             },
@@ -311,9 +322,23 @@ impl ConnectionManager {
 
     /// Record the authenticated pubkey for a connection after NIP-42 succeeds.
     pub fn set_authenticated_pubkey(&self, conn_id: Uuid, pubkey_bytes: Vec<u8>) {
+        self.set_authenticated_session(conn_id, pubkey_bytes, None);
+    }
+
+    /// Retain only the delegation owner verified by this connection's AUTH flow.
+    pub(crate) fn set_authenticated_session(
+        &self,
+        conn_id: Uuid,
+        pubkey_bytes: Vec<u8>,
+        delegation_owner: Option<Vec<u8>>,
+    ) {
         if let Some(entry) = self.connections.get(&conn_id) {
-            if let Ok(mut slot) = entry.authenticated_pubkey.write() {
-                *slot = Some(pubkey_bytes);
+            if let Ok(mut slot) = entry.authenticated_session.write() {
+                *slot = Some(AuthenticatedSession {
+                    pubkey: pubkey_bytes,
+                    delegation_owner,
+                    generation: Uuid::new_v4(),
+                });
             }
         }
     }
@@ -334,13 +359,13 @@ impl ConnectionManager {
             .filter_map(|entry| {
                 let matches = entry.community_id == community_id
                     && entry
-                        .authenticated_pubkey
+                        .authenticated_session
                         .read()
                         .ok()
                         .and_then(|value| {
                             value
                                 .as_ref()
-                                .map(|stored| stored.as_slice() == pubkey_bytes)
+                                .map(|stored| stored.pubkey.as_slice() == pubkey_bytes)
                         })
                         .unwrap_or(false);
                 matches.then_some(*entry.key())
@@ -352,7 +377,8 @@ impl ConnectionManager {
     pub fn pubkey_for_conn(&self, conn_id: Uuid) -> Option<Vec<u8>> {
         self.connections
             .get(&conn_id)
-            .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
+            .and_then(|entry| entry.authenticated_session.read().ok()?.clone())
+            .map(|session| session.pubkey)
     }
 
     /// Disconnect every live connection authenticated as `pubkey` **in
@@ -555,11 +581,11 @@ impl ConnectionManager {
         // community_id → set of pubkey bytes
         let mut seen: HashMap<CommunityId, HashSet<Vec<u8>>> = HashMap::new();
         for entry in self.connections.iter() {
-            if let Ok(lock) = entry.authenticated_pubkey.read() {
+            if let Ok(lock) = entry.authenticated_session.read() {
                 if let Some(pk) = lock.as_ref() {
                     seen.entry(entry.community_id)
                         .or_default()
-                        .insert(pk.clone());
+                        .insert(pk.pubkey.clone());
                 }
             }
         }
@@ -572,7 +598,8 @@ impl ConnectionManager {
     pub fn pubkey_for(&self, conn_id: Uuid) -> Option<Vec<u8>> {
         self.connections
             .get(&conn_id)
-            .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
+            .and_then(|entry| entry.authenticated_session.read().ok()?.clone())
+            .map(|session| session.pubkey)
     }
 
     /// Sends a text message to the given connection.
@@ -804,6 +831,9 @@ pub struct AppState {
     /// admissions when an in-memory audio room is recreated at the same roster
     /// revision after a restart. Mesh rooms use their Redis-fenced generation.
     pub huddle_liveness_generation: Uuid,
+    /// Per-process generation used to suppress Redis task-invalidation echoes
+    /// after this relay has already delivered the advisory locally.
+    pub task_invalidation_generation: Uuid,
 
     /// Recently-published event IDs for local-echo deduplication, keyed by
     /// `(community_id, event_id)`. Events fanned out in-process are added here;
@@ -1016,6 +1046,7 @@ impl AppState {
             workflow_engine,
             relay_keypair,
             huddle_liveness_generation: Uuid::new_v4(),
+            task_invalidation_generation: Uuid::new_v4(),
 
             local_event_ids: Arc::new(
                 moka::sync::Cache::builder()
@@ -1299,6 +1330,39 @@ impl AppState {
             }
             CacheInvalidation::ChannelDeleted => {
                 self.invalidate_channel_deleted_local(community_id);
+            }
+        }
+    }
+
+    /// Apply one community-scoped cross-pod connection command locally.
+    /// Received task invalidations are generation-fenced so a publisher does
+    /// not redeliver its own already-applied advisory.
+    pub async fn apply_conn_control(&self, scoped: buzz_pubsub::conn_control::ScopedConnControl) {
+        match scoped.command {
+            ConnControl::InvalidateTasks {
+                channel_id,
+                origin_generation,
+            } => {
+                if origin_generation != self.task_invalidation_generation {
+                    self.deliver_task_invalidation(scoped.community_id, channel_id)
+                        .await;
+                }
+            }
+            ConnControl::DisconnectCommunity => {
+                self.community_connections
+                    .disconnect_community(scoped.community_id);
+            }
+            ConnControl::DisconnectPubkey {
+                pubkey,
+                event_id,
+                reason,
+            } => {
+                self.conn_manager.disconnect_pubkey(
+                    scoped.community_id,
+                    &pubkey,
+                    &event_id,
+                    &reason,
+                );
             }
         }
     }

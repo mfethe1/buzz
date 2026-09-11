@@ -183,6 +183,24 @@ pub async fn dispatch(
             print_value(&parse_response(&response)?, format);
             Ok(())
         }
+        TasksCmd::Admission {
+            task,
+            attempt,
+            start_event,
+        } => {
+            let task = uuid("task", &task)?;
+            if !buzz_core::fleet::valid_attempt_id(&attempt) {
+                return Err(CliError::Usage("invalid fleet attempt id".into()));
+            }
+            crate::validate::validate_hex64(&start_event)?;
+            let response = client
+                .get_authed(&format!(
+                    "/api/tasks/{task}/attempts/{attempt}/admission?start_event_id={start_event}",
+                ))
+                .await?;
+            print_value(&parse_response(&response)?, format);
+            Ok(())
+        }
         TasksCmd::Create {
             title,
             body,
@@ -222,6 +240,7 @@ pub async fn dispatch(
             clear_assignee,
             due_at,
             clear_due,
+            expected_revision,
         } => {
             let task = uuid("task", &task)?;
             let mut payload = Map::new();
@@ -248,6 +267,9 @@ pub async fn dispatch(
                 return Err(CliError::Usage(
                     "update requires at least one mutable field".into(),
                 ));
+            }
+            if let Some(value) = expected_revision {
+                payload.insert("expected_revision".into(), json!(value));
             }
             let response = client
                 .patch_authed_json(&format!("/api/tasks/{task}"), &Value::Object(payload))

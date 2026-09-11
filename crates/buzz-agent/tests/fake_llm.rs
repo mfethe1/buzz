@@ -971,10 +971,17 @@ async fn steer_rejected_when_no_active_run() {
 async fn steer_rejected_on_run_id_mismatch() {
     // A live run, but the caller targets a stale/wrong run id → invalid_params,
     // so the client falls back to cancel+merge instead of injecting blind.
-    let (url, _captures) = spawn_capturing_fake_llm(vec![
-        openai_tool_call("call_x", "fake__noop", json!({})),
-        openai_text("done"),
-    ])
+    // Hold the provider until rejection is observed, otherwise a fast turn can
+    // finish before the steer and exercise the no-active-run path instead.
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+    let (url, _captures) = spawn_gated_capturing_fake_llm(
+        vec![CannedResponse {
+            status: 200,
+            body: openai_text("done"),
+        }],
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Some(gate_rx))),
+    )
     .await;
     let mut h = Harness::spawn(&url).await;
     let sid = init_session(&mut h).await;
@@ -985,7 +992,7 @@ async fn steer_rejected_on_run_id_mismatch() {
             json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
         )
         .await;
-    let _live_run = recv_active_run_id(&mut h).await;
+    let live_run = recv_active_run_id(&mut h).await;
 
     let s_id = h
         .send(
@@ -998,21 +1005,16 @@ async fn steer_rejected_on_run_id_mismatch() {
         )
         .await;
 
-    let mut saw_reject = false;
-    for _ in 0..40 {
-        let v = h.recv().await;
-        if v["id"] == json!(s_id) {
-            assert_eq!(
-                v["error"]["code"], -32602,
-                "mismatched runId must be rejected"
-            );
-            saw_reject = true;
-        } else if v["id"] == json!(p_id) {
-            // Turn finishes normally regardless of the rejected steer.
-            break;
-        }
-    }
-    assert!(saw_reject, "run-id mismatch was not rejected");
+    let rejection = h.recv_until(|v| v["id"] == json!(s_id)).await;
+    assert_eq!(rejection["error"]["code"], -32602);
+    assert_eq!(
+        rejection["error"]["message"],
+        format!("steer: expected active run id `run_stale_mismatch` but found `{live_run}`"),
+        "must exercise the live run-id mismatch guard"
+    );
+    let _ = gate_tx.send(());
+    let finished = h.recv_until(|v| v["id"] == json!(p_id)).await;
+    assert_eq!(finished["result"]["stopReason"], "end_turn");
     h.shutdown().await;
 }
 
@@ -1335,7 +1337,7 @@ async fn mid_turn_usage_includes_earlier_turns() {
 /// Setup: round 1 is a tool call WITH usage (tokens are captured). After the
 /// tool_call_update notification (proving round 1 is fully processed), we gate
 /// the round-2 LLM response behind a `oneshot` barrier that only releases after
-/// cancel is sent. This guarantees the turn exits with `stopReason: "cancelled"`
+/// cancel is acknowledged. This guarantees the turn exits with `stopReason: "cancelled"`
 /// deterministically, even on a slow CI worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_turn_with_usage_emits_notification_before_response() {
@@ -1350,7 +1352,7 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     // in-flight TCP request can resolve. The queue is empty for round 2, so the
     // agent receives the fallback "no canned response" body which it treats as
     // an LLM error; the cancel check at the round boundary fires first because
-    // the gate is only released after cancel is enqueued.
+    // the gate is only released after the agent acknowledges cancellation.
     let responses = vec![openai_tool_call_with_usage(
         "call_cancel_test",
         "fake__noop",
@@ -1386,7 +1388,7 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
                     }
                 }
                 // For request 2+ (round 2), wait for the gate to open before
-                // responding. This ensures cancel is sent before round 2 resolves,
+                // responding. This ensures cancel is handled before round 2 resolves,
                 // making stopReason: cancelled deterministic.
                 if req_num >= 2 {
                     let rx = gate.lock().await.take();
@@ -1430,10 +1432,10 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     })
     .await;
 
-    // Now send cancel and release the round-2 gate. Cancel is enqueued before
-    // round 2 can respond, so the turn exits with stopReason: cancelled.
+    // Sending only flushes stdin; it does not prove the child handled cancel.
+    // Keep round 2 blocked until its acknowledgement arrives on the ACP wire.
     let c_id = h.send("session/cancel", json!({"sessionId": sid})).await;
-    let _ = gate_tx.send(()); // unblock round 2
+    let mut gate_tx = Some(gate_tx);
 
     let mut saw_usage_before_prompt_response = false;
     let mut saw_usage = false;
@@ -1442,7 +1444,11 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     for _ in 0..40 {
         let v = h.recv().await;
         if v["id"] == json!(c_id) {
+            assert_eq!(v.get("result"), Some(&Value::Null), "cancel must succeed");
             saw_cancel_ok = true;
+            if let Some(gate) = gate_tx.take() {
+                let _ = gate.send(());
+            }
         } else if is_usage_update(&v) {
             saw_usage = true;
             if !saw_prompt_response {
@@ -1505,10 +1511,26 @@ fn openai_tool_call_with_usage(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steer_rejected_on_empty_prompt() {
-    let (url, _captures) = spawn_capturing_fake_llm(vec![
-        openai_tool_call("call_x", "fake__noop", json!({})),
-        openai_text("done"),
-    ])
+    // Hold the first provider response until the steer rejection has been
+    // observed. Otherwise a fast fake provider can finish the run before the
+    // request is handled, making this validation race with normal teardown.
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+    let mut gate_tx = Some(gate_tx);
+    let gate_rx = Arc::new(Mutex::new(Some(gate_rx)));
+    let (url, _captures) = spawn_gated_capturing_fake_llm(
+        vec![
+            CannedResponse {
+                status: 200,
+                body: openai_tool_call("call_x", "fake__noop", json!({})),
+            },
+            CannedResponse {
+                status: 200,
+                body: openai_text("done"),
+            },
+        ],
+        Arc::new(Mutex::new(Vec::new())),
+        gate_rx,
+    )
     .await;
     let mut h = Harness::spawn(&url).await;
     let sid = init_session(&mut h).await;
@@ -1531,6 +1553,7 @@ async fn steer_rejected_on_empty_prompt() {
         if v["id"] == json!(s_id) {
             assert_eq!(v["error"]["code"], -32602, "empty prompt must be rejected");
             saw_reject = true;
+            gate_tx.take().unwrap().send(()).unwrap();
         } else if v["id"] == json!(p_id) {
             break;
         }

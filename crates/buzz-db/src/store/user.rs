@@ -360,6 +360,129 @@ async fn set_agent_owner_with_operation(
     Ok(true)
 }
 
+/// The machine an agent calls home: stable host id, human label, and runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineHome {
+    /// Stable host identity (the desktop's device id).
+    pub machine_id: String,
+    /// Human-facing, renameable label.
+    pub machine_label: Option<String>,
+    /// Runtime serving this home (`"hermes"`, `"openclaw"`, `"claude-code"`, ...).
+    pub machine_runtime: Option<String>,
+}
+
+/// Register (or re-register) `agent_pubkey` as the home agent for a machine.
+///
+/// One home per machine per community is a database invariant
+/// (`idx_users_one_home_per_machine`), not a check performed here: a
+/// read-then-write would race two concurrent registrations onto the same host.
+/// A conflicting claim therefore surfaces as a unique violation, which is
+/// translated to [`DbError::AccessDenied`] so callers get an actionable
+/// message instead of a raw SQLSTATE.
+///
+/// Returns `Err(DbError::NotFound)` if the agent pubkey has no `users` row.
+pub async fn set_machine_home(
+    pool: &PgPool,
+    community_id: CommunityId,
+    agent_pubkey: &[u8],
+    home: &MachineHome,
+) -> Result<()> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let result = sqlx::query(
+        r#"UPDATE users SET machine_id = $1, machine_label = $2, machine_runtime = $3, updated_at = NOW() WHERE community_id = $4 AND pubkey = $5"#,
+    )
+    .bind(&home.machine_id)
+    .bind(home.machine_label.as_deref())
+    .bind(home.machine_runtime.as_deref())
+    .bind(community_id.as_uuid())
+    .bind(agent_pubkey)
+    .execute(&mut *connection)
+    .await;
+
+    match result {
+        Ok(done) if done.rows_affected() == 0 => Err(crate::error::DbError::NotFound(
+            "agent pubkey not found in users table".into(),
+        )),
+        Ok(_) => Ok(()),
+        // 23505 = unique_violation: another agent already homes this machine.
+        Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("23505") => {
+            Err(crate::error::DbError::AccessDenied(format!(
+                "machine {} already has a home agent in this community",
+                home.machine_id
+            )))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Clear an agent's machine home, freeing the machine for another agent.
+///
+/// Returns `true` if a home was cleared, `false` if the row exists but had no
+/// home. All three columns drop together: the migration's
+/// `chk_users_machine_fields_require_machine_id` makes a label or runtime
+/// without a `machine_id` unrepresentable.
+pub async fn clear_machine_home(
+    pool: &PgPool,
+    community_id: CommunityId,
+    agent_pubkey: &[u8],
+) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let result = sqlx::query(
+        r#"UPDATE users SET machine_id = NULL, machine_label = NULL, machine_runtime = NULL, updated_at = NOW() WHERE community_id = $1 AND pubkey = $2 AND machine_id IS NOT NULL"#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(agent_pubkey)
+    .execute(&mut *connection)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Look up an agent's machine home. `None` when the user is absent or unhomed.
+pub async fn get_machine_home(
+    pool: &PgPool,
+    community_id: CommunityId,
+    agent_pubkey: &[u8],
+) -> Result<Option<MachineHome>> {
+    let row = sqlx::query(
+        r#"SELECT machine_id, machine_label, machine_runtime FROM users WHERE community_id = $1 AND pubkey = $2 AND machine_id IS NOT NULL"#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(agent_pubkey)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| MachineHome {
+        machine_id: r.get("machine_id"),
+        machine_label: r.get("machine_label"),
+        machine_runtime: r.get("machine_runtime"),
+    }))
+}
+
+/// Resolve the agent that homes `machine_id`, if any.
+///
+/// This is the lookup that makes a machine home addressable: given a host, find
+/// the pubkey that answers for it.
+pub async fn get_agent_for_machine(
+    pool: &PgPool,
+    community_id: CommunityId,
+    machine_id: &str,
+) -> Result<Option<Vec<u8>>> {
+    let row =
+        sqlx::query(r#"SELECT pubkey FROM users WHERE community_id = $1 AND machine_id = $2"#)
+            .bind(community_id.as_uuid())
+            .bind(machine_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|r| r.get::<Vec<u8>, _>("pubkey")))
+}
+
 /// Get the channel_add_policy and agent_owner_pubkey for a user.
 /// Returns None if the pubkey is not in the users table.
 /// Returns Some((policy_str, owner_bytes_or_none)) if found.
@@ -592,273 +715,4 @@ impl Db {
 }
 
 #[cfg(test)]
-mod postgres_tests {
-    use super::*;
-    use crate::Db;
-    use nostr::Keys;
-
-    async fn setup_db() -> Db {
-        let pool = PgPool::connect(&crate::test_support::database_url())
-            .await
-            .expect("connect to test DB");
-        Db::from_pool(pool)
-    }
-
-    fn random_pubkey() -> Vec<u8> {
-        Keys::generate().public_key().to_bytes().to_vec()
-    }
-
-    async fn make_community(pool: &PgPool) -> CommunityId {
-        let id = uuid::Uuid::new_v4();
-        let host = format!("user-test-{}.example", id.simple());
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-            .bind(id)
-            .bind(host)
-            .execute(pool)
-            .await
-            .expect("insert test community");
-        CommunityId::from_uuid(id)
-    }
-
-    /// Setting an agent owner then reading back the policy should return
-    /// the default "anyone" policy and the owner pubkey.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn test_set_agent_owner_and_get_policy() {
-        let db = setup_db().await;
-        let community = make_community(&db.pool).await;
-        let agent_pk = random_pubkey();
-        let owner_pk = random_pubkey();
-
-        ensure_user(&db.pool, community, &agent_pk)
-            .await
-            .expect("ensure agent");
-        ensure_user(&db.pool, community, &owner_pk)
-            .await
-            .expect("ensure owner");
-
-        let was_set = set_agent_owner(&db.pool, community, &agent_pk, &owner_pk)
-            .await
-            .expect("set_agent_owner");
-        assert!(was_set, "first set_agent_owner should return true");
-
-        let result = get_agent_channel_policy(&db.pool, community, &agent_pk)
-            .await
-            .expect("get_agent_channel_policy");
-
-        let (policy, owner) = result.expect("should return Some for known pubkey");
-        assert_eq!(policy, "anyone", "default policy should be 'anyone'");
-        assert_eq!(
-            owner,
-            Some(owner_pk),
-            "owner pubkey should match what was set"
-        );
-    }
-
-    /// set_channel_add_policy should persist each of the three valid policies.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn test_set_channel_add_policy() {
-        let db = setup_db().await;
-        let community = make_community(&db.pool).await;
-        let pk = random_pubkey();
-        ensure_user(&db.pool, community, &pk)
-            .await
-            .expect("ensure user");
-
-        // owner_only
-        set_channel_add_policy(&db.pool, community, &pk, "owner_only")
-            .await
-            .expect("set owner_only");
-        let (policy, owner) = get_agent_channel_policy(&db.pool, community, &pk)
-            .await
-            .expect("get policy")
-            .expect("should be Some");
-        assert_eq!(policy, "owner_only");
-        assert!(owner.is_none(), "no owner was set");
-
-        // nobody
-        set_channel_add_policy(&db.pool, community, &pk, "nobody")
-            .await
-            .expect("set nobody");
-        let (policy, owner) = get_agent_channel_policy(&db.pool, community, &pk)
-            .await
-            .expect("get policy")
-            .expect("should be Some");
-        assert_eq!(policy, "nobody");
-        assert!(owner.is_none());
-
-        // anyone (reset to default)
-        set_channel_add_policy(&db.pool, community, &pk, "anyone")
-            .await
-            .expect("set anyone");
-        let (policy, owner) = get_agent_channel_policy(&db.pool, community, &pk)
-            .await
-            .expect("get policy")
-            .expect("should be Some");
-        assert_eq!(policy, "anyone");
-        assert!(owner.is_none());
-    }
-
-    /// get_agent_channel_policy should return None for a pubkey that has
-    /// never been inserted into the users table.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn test_get_policy_unknown_pubkey() {
-        let db = setup_db().await;
-        let community = make_community(&db.pool).await;
-        let pk = random_pubkey();
-
-        let result = get_agent_channel_policy(&db.pool, community, &pk)
-            .await
-            .expect("query should not error");
-
-        assert!(result.is_none(), "unknown pubkey should return None");
-    }
-
-    /// set_agent_owner should return Err when the agent pubkey does not exist
-    /// in the users table.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn test_set_agent_owner_nonexistent_agent() {
-        let db = setup_db().await;
-        let community = make_community(&db.pool).await;
-        let agent_pk = random_pubkey();
-        let owner_pk = random_pubkey();
-
-        // Only ensure the owner exists -- agent is intentionally absent.
-        ensure_user(&db.pool, community, &owner_pk)
-            .await
-            .expect("ensure owner");
-
-        let result = set_agent_owner(&db.pool, community, &agent_pk, &owner_pk).await;
-        assert!(
-            result.is_err(),
-            "should error when agent pubkey is not in users table"
-        );
-    }
-
-    /// set_agent_owner should return Ok(false) when the agent already has an owner.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn test_set_agent_owner_already_owned() {
-        let db = setup_db().await;
-        let community = make_community(&db.pool).await;
-        let agent_pk = random_pubkey();
-        let owner1 = random_pubkey();
-        let owner2 = random_pubkey();
-
-        ensure_user(&db.pool, community, &agent_pk)
-            .await
-            .expect("ensure agent");
-        ensure_user(&db.pool, community, &owner1)
-            .await
-            .expect("ensure owner1");
-        ensure_user(&db.pool, community, &owner2)
-            .await
-            .expect("ensure owner2");
-
-        let first = set_agent_owner(&db.pool, community, &agent_pk, &owner1)
-            .await
-            .expect("first set");
-        assert!(first, "first set should succeed");
-
-        let second = set_agent_owner(&db.pool, community, &agent_pk, &owner2)
-            .await
-            .expect("second set should not error");
-        assert!(!second, "second set should return false (already owned)");
-
-        // Verify original owner is preserved.
-        let (_, owner) = get_agent_channel_policy(&db.pool, community, &agent_pk)
-            .await
-            .expect("get policy")
-            .expect("should be Some");
-        assert_eq!(owner, Some(owner1), "original owner should be preserved");
-    }
-
-    /// set_channel_add_policy should return Err when the pubkey does not exist
-    /// in the users table (0 rows affected -> NotFound).
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn test_set_channel_add_policy_nonexistent_user() {
-        let db = setup_db().await;
-        let community = make_community(&db.pool).await;
-        let pk = random_pubkey();
-
-        let result = set_channel_add_policy(&db.pool, community, &pk, "nobody").await;
-        assert!(
-            result.is_err(),
-            "should error when pubkey is not in users table"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn test_set_channel_add_policy_rejects_invalid() {
-        let db = setup_db().await;
-        let community = make_community(&db.pool).await;
-        let pubkey = nostr::Keys::generate().public_key().to_bytes().to_vec();
-        ensure_user(&db.pool, community, &pubkey).await.unwrap();
-        let result = set_channel_add_policy(&db.pool, community, &pubkey, "invalid_policy").await;
-        assert!(result.is_err(), "should reject invalid policy value");
-    }
-
-    // Use the production `escape_like` function directly — no local mirror.
-    use super::escape_like;
-
-    #[test]
-    fn like_escape_percent() {
-        assert_eq!(escape_like("%"), "\\%");
-        assert_eq!(escape_like("100%match"), "100\\%match");
-    }
-
-    #[test]
-    fn like_escape_underscore() {
-        assert_eq!(escape_like("_"), "\\_");
-        assert_eq!(escape_like("a_b"), "a\\_b");
-    }
-
-    #[test]
-    fn like_escape_backslash() {
-        assert_eq!(escape_like("\\"), "\\\\");
-        assert_eq!(escape_like("a\\b"), "a\\\\b");
-    }
-
-    #[test]
-    fn like_escape_combined() {
-        // All three metacharacters in one string
-        assert_eq!(escape_like("%_\\"), "\\%\\_\\\\");
-    }
-
-    #[test]
-    fn like_escape_normal_input_unchanged() {
-        assert_eq!(escape_like("alice"), "alice");
-        assert_eq!(escape_like("bob@example.com"), "bob@example.com");
-        assert_eq!(escape_like(""), "");
-    }
-
-    /// A user with "owner_only" policy but no agent_owner_pubkey set should
-    /// return Some(("owner_only", None)).
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn test_owner_only_with_no_owner() {
-        let db = setup_db().await;
-        let community = make_community(&db.pool).await;
-        let pk = random_pubkey();
-        ensure_user(&db.pool, community, &pk)
-            .await
-            .expect("ensure user");
-
-        set_channel_add_policy(&db.pool, community, &pk, "owner_only")
-            .await
-            .expect("set owner_only");
-
-        let result = get_agent_channel_policy(&db.pool, community, &pk)
-            .await
-            .expect("get policy")
-            .expect("should be Some");
-
-        assert_eq!(result.0, "owner_only");
-        assert!(result.1.is_none(), "owner should be None when never set");
-    }
-}
+mod postgres_tests;

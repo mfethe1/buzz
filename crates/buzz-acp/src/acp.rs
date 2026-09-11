@@ -3095,6 +3095,19 @@ mod tests {
         .expect("failed to spawn test script")
     }
 
+    /// Reap a response fixture after its last wire interaction.
+    async fn shutdown_fixture(client: &mut AcpClient) {
+        client.shutdown().await;
+        assert!(
+            client
+                .child
+                .try_wait()
+                .expect("fixture wait must succeed")
+                .is_some(),
+            "response fixture must be reaped before returning"
+        );
+    }
+
     /// [`spawn_script`], but blocks until the fixture has actually started.
     ///
     /// Deadline-sensitive tests must start their clock only once the shell is
@@ -3418,7 +3431,7 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":0,"method":"test/method","params":{}}'
             read -t 2 _reply
             echo '{"jsonrpc":"2.0","id":0,"result":{"ok":true}}'
-            sleep 1
+            read -r _done
         "#;
         let mut client = spawn_script(script).await;
         let max_dur = std::time::Duration::from_secs(5);
@@ -3434,6 +3447,7 @@ mod tests {
             .await;
         assert!(result.is_ok(), "expected Ok response, got {result:?}");
         assert_eq!(result.unwrap()["ok"], serde_json::json!(true));
+        shutdown_fixture(&mut client).await;
     }
 
     #[tokio::test]
@@ -3520,7 +3534,7 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":1,"method":"test/unknown","params":{}}'
             read -t 2 _err_reply
             echo '{"jsonrpc":"2.0","id":1,"result":{"worked":true}}'
-            sleep 1
+            read -r _done
         "#;
         let mut client = spawn_script(script).await;
         // initialize consumes id=0
@@ -3535,6 +3549,7 @@ mod tests {
             .await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert_eq!(result.unwrap()["worked"], serde_json::json!(true));
+        shutdown_fixture(&mut client).await;
     }
 
     /// Keepalive `session/update` lines must keep resetting the idle timer, so
@@ -3599,7 +3614,7 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
             read -t 2 REQ
             echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
-            sleep 1
+            read -r _done
         "#;
         let mut client = spawn_script(script).await;
         client
@@ -3624,6 +3639,7 @@ mod tests {
             Some("Custom system prompt"),
             "systemPrompt should be included in params when Some"
         );
+        shutdown_fixture(&mut client).await;
     }
 
     #[tokio::test]
@@ -3631,7 +3647,7 @@ mod tests {
         let script = r#"
             read -t 2 REQ
             echo '{"jsonrpc":"2.0","id":0,"result":{"_receivedRequest":'"$REQ"'}}'
-            sleep 1
+            read -r _done
         "#;
         let mut client = spawn_script(script).await;
         let result = client
@@ -3647,6 +3663,7 @@ mod tests {
         assert_eq!(received["params"]["mode"], "set");
         assert_eq!(received["params"]["key"], "buzz");
         assert_eq!(received["params"]["text"], "Be terse");
+        shutdown_fixture(&mut client).await;
     }
 
     #[tokio::test]
@@ -3654,7 +3671,7 @@ mod tests {
         let script = r#"
             read -t 2 _REQ
             echo '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"Method not found"}}'
-            sleep 1
+            read -r _done
         "#;
         let mut client = spawn_script(script).await;
         assert!(matches!(
@@ -3663,6 +3680,7 @@ mod tests {
                 .await,
             Err(AcpError::AgentError { code: -32601, .. })
         ));
+        shutdown_fixture(&mut client).await;
     }
 
     #[tokio::test]
@@ -3670,7 +3688,7 @@ mod tests {
         let script = r#"
             read -t 2 _REQ
             echo '{"jsonrpc":"2.0","id":0,"error":{"code":-32602,"message":"Invalid params"}}'
-            sleep 1
+            read -r _done
         "#;
         let mut client = spawn_script(script).await;
         assert!(matches!(
@@ -3679,6 +3697,7 @@ mod tests {
                 .await,
             Err(AcpError::AgentError { code: -32602, .. })
         ));
+        shutdown_fixture(&mut client).await;
     }
 
     #[tokio::test]
@@ -3689,7 +3708,7 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
             read -t 2 REQ
             echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
-            sleep 1
+            read -r _done
         "#;
         let mut client = spawn_script(script).await;
         client
@@ -3708,6 +3727,7 @@ mod tests {
             received["params"]["systemPrompt"].is_null(),
             "systemPrompt should NOT be in params when value is None"
         );
+        shutdown_fixture(&mut client).await;
     }
 
     #[tokio::test]
@@ -3717,7 +3737,7 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
             read -t 2 REQ
             echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
-            sleep 1
+            read -r _done
         "#;
         let mut client = spawn_script(script).await;
         client
@@ -3736,6 +3756,7 @@ mod tests {
             Some("Fizz · #buzz-dev"),
             "title should ride in _meta.sessionTitle, out of band from the prompt"
         );
+        shutdown_fixture(&mut client).await;
     }
 
     #[tokio::test]
@@ -3745,7 +3766,7 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
             read -t 2 REQ
             echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
-            sleep 1
+            read -r _done
         "#;
         let mut client = spawn_script(script).await;
         client
@@ -3763,6 +3784,7 @@ mod tests {
             received["params"].get("_meta").is_none(),
             "_meta should be absent entirely, not an empty object or null"
         );
+        shutdown_fixture(&mut client).await;
     }
 
     // ── claude-agent-acp _meta.systemPrompt transport ─────────────────────
@@ -3776,7 +3798,7 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
             read -t 2 REQ
             echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_claude","_receivedRequest":'"$REQ"'}}'
-            sleep 1
+            read -r _done
         "#;
         let mut client = spawn_script(script).await;
         client
@@ -3804,6 +3826,7 @@ mod tests {
             Some("Be concise"),
             "_meta.systemPrompt.append must carry the prompt text"
         );
+        shutdown_fixture(&mut client).await;
     }
 
     #[tokio::test]
@@ -3815,7 +3838,7 @@ mod tests {
             echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
             read -t 2 REQ
             echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_merged","_receivedRequest":'"$REQ"'}}'
-            sleep 1
+            read -r _done
         "#;
         let mut client = spawn_script(script).await;
         client
@@ -3844,6 +3867,7 @@ mod tests {
             Some("Fizz · #buzz-dev"),
             "_meta.sessionTitle must be present alongside systemPrompt"
         );
+        shutdown_fixture(&mut client).await;
     }
 
     // ── Goose-native steer scaffold (PR follow-up to #1160) ──────────────
@@ -4034,14 +4058,15 @@ mod tests {
     async fn native_steer_with_active_run_id_routes_response_to_ack() {
         // Script: pause briefly so the test task can install the steer
         // and we can be sure the response doesn't race ahead of the
-        // write — then emit the steer response (id=0 because next_id
-        // starts at 0 and the steer is the first request the read loop
+        // write. Consume that request, then emit the steer response (id=0
+        // because next_id starts at 0 and the steer is the first request the read loop
         // writes), then idle. This is a JSON-RPC success response with
         // a `stopReason` payload (matching the shape goose uses for
         // steer responses in fake_llm.rs).
         let script = "sleep 0.5; \
+                      read -r _steer; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"stopReason\":\"end_turn\"}}'; \
-                      sleep 10";
+                      read -r _done";
         let mut client = spawn_script(script).await;
 
         // Set active_run_id via a synthesized session_info_update so the
@@ -4096,6 +4121,7 @@ mod tests {
             crate::pool::SteerAck::Success { .. } => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
+        shutdown_fixture(&mut client).await;
     }
 
     /// Steer-success renewal keeps the turn alive past the original hard
@@ -4196,11 +4222,11 @@ mod tests {
         // the backslashes intact, which MSYS accepts as a Win32 path.
         let script = format!(
             "read -r line; printf '%s' \"$line\" > '{capture}'; \
-             printf '%s\\n' '{response}'; sleep 10",
+             printf '%s\\n' '{response}'; read -r _done",
             capture = crate::testshell::quote_for_shell(capture_path),
             response = response,
         );
-        // READY-gated, because `run_one_steer` gives the fixture an 800ms idle
+        // READY-gated, because `run_one_steer` gives the fixture a three-second idle
         // budget and `spawn_script` would leave MSYS shell startup inside it.
         // Starting a real bash costs a large and load-dependent fraction of
         // that budget, so under a loaded suite the read loop idled out before
@@ -4253,6 +4279,7 @@ mod tests {
         let ack = ack_rx
             .await
             .expect("ack oneshot must have received a SteerAck");
+        shutdown_fixture(client).await;
         (std::fs::read_to_string(capture_path).ok(), ack)
     }
 
@@ -4280,9 +4307,11 @@ mod tests {
     /// Run `initialize` against a script that replies with `init_result` as
     /// the JSON-RPC result, and return the resulting `steering_supported`.
     async fn steering_supported_after_initialize(init_result: &str) -> bool {
+        // Keep the shell itself waiting for teardown without an idle descendant
+        // that can retain the test process's inherited output handles.
         let script = format!(
             "read -r _init; printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{result}}}'; \
-             sleep 5",
+             read -r _done",
             result = init_result,
         );
         let mut client = spawn_script(&script).await;
@@ -4290,7 +4319,17 @@ mod tests {
             .initialize()
             .await
             .expect("initialize should succeed");
-        client.steering_supported()
+        let supported = client.steering_supported();
+        client.shutdown().await;
+        assert!(
+            client
+                .child
+                .try_wait()
+                .expect("fixture wait must succeed")
+                .is_some(),
+            "initialize fixture must be reaped before returning"
+        );
+        supported
     }
 
     /// Test 1a: an adapter advertising `_meta.steering.supported: true`
@@ -4339,7 +4378,7 @@ mod tests {
     async fn load_session_supported_after_initialize(init_result: &str) -> bool {
         let script = format!(
             "read -r _init; printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{result}}}'; \\
-             sleep 5",
+             read -r _done",
             result = init_result,
         );
         let mut client = spawn_script(&script).await;
@@ -4347,7 +4386,17 @@ mod tests {
             .initialize()
             .await
             .expect("initialize should succeed");
-        client.load_session_supported()
+        let supported = client.load_session_supported();
+        client.shutdown().await;
+        assert!(
+            client
+                .child
+                .try_wait()
+                .expect("fixture wait must succeed")
+                .is_some(),
+            "initialize fixture must be reaped before returning"
+        );
+        supported
     }
 
     #[tokio::test]
@@ -4394,7 +4443,7 @@ mod tests {
             read -t 2 REQ
             echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_restored","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"replay"}}}}'
             echo '{"jsonrpc":"2.0","id":1,"result":{"_receivedRequest":'"$REQ"'}}'
-            sleep 1
+            read -r _done
         "#;
         let mut client = spawn_script(script).await;
         client
@@ -4406,6 +4455,7 @@ mod tests {
             .session_load("ses_restored", "/tmp", vec![])
             .await
             .expect("session_load should succeed after replayed update");
+        shutdown_fixture(&mut client).await;
     }
 
     /// Test 2: no `active_run_id` + capability advertised → the bytes on the
@@ -4806,7 +4856,7 @@ mod tests {
             ID=$(printf '%s' "$REQ" | sed -E 's/.*"id":([0-9]+).*/\1/')
             echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"wire-session","update":{"sessionUpdate":"usage_update","cost":{"amount":0.5,"currency":"USD"}}}}'
             echo '{"jsonrpc":"2.0","id":'"$ID"',"result":{"stopReason":"end_turn","usage":{"inputTokens":7,"outputTokens":3,"totalTokens":10,"cachedReadTokens":2}}}'
-            sleep 1
+            read -r _done
         "#;
         let (mut client, dir) = spawn_named_script("claude-code", script).await;
         assert_eq!(client.standard_adapter, Some(StandardAdapterKind::Claude));
@@ -4829,6 +4879,15 @@ mod tests {
         assert_eq!(usage.turn_output_tokens, Some(3));
         assert_eq!(usage.turn_cost_usd, Some(0.5));
         assert_eq!(usage.cumulative_cost_usd, Some(0.5));
+        client.shutdown().await;
+        assert!(
+            client
+                .child
+                .try_wait()
+                .expect("fixture wait must succeed")
+                .is_some(),
+            "named wire fixture must be reaped before returning"
+        );
         drop(client);
         let _ = std::fs::remove_dir_all(dir);
     }

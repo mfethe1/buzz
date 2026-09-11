@@ -184,7 +184,7 @@ test("hidden spoiler links reveal without opening on the first click", async ({
   // computed from a pre-shift bounding box lands on the wrong element
   // (force skips Playwright's stability check). Wait until the link's
   // position is identical across two animation frames before clicking.
-  const secretLink = spoiler.getByRole("link", { name: "secret" });
+  const secretLink = spoiler.locator("a");
   await secretLink.evaluate(
     (el) =>
       new Promise<void>((resolve) => {
@@ -271,7 +271,7 @@ test("masked link inside a hidden spoiler does not leak its URL until revealed",
   const spoiler = lastMessage.locator(".buzz-spoiler").first();
   await expect(spoiler).toHaveAttribute("data-revealed", "false");
 
-  const secretLink = spoiler.getByRole("link", { name: "secret" });
+  const secretLink = spoiler.locator("a");
 
   // Neither hovering nor focusing the still-hidden link may open the URL
   // tooltip — that would leak the destination before the spoiler is revealed.
@@ -281,6 +281,8 @@ test("masked link inside a hidden spoiler does not leak its URL until revealed",
 
   await page.mouse.move(0, 0);
   await secretLink.focus();
+  await expect(secretLink).not.toBeFocused();
+  await expect(spoiler.getByRole("link")).toHaveCount(0);
   await page.waitForTimeout(500);
   await expect(page.getByRole("tooltip")).toHaveCount(0);
   await expect(page.getByText(SECRET_URL)).toHaveCount(0);
@@ -310,6 +312,60 @@ test("masked link inside a hidden spoiler does not leak its URL until revealed",
   // Now revealed, hovering the link reveals the URL tooltip as normal.
   await secretLink.hover();
   await expect(page.getByRole("tooltip")).toContainText(SECRET_URL);
+});
+
+test("spoiler accessibility conceals nested content until keyboard reveal", async ({
+  page,
+}, testInfo) => {
+  const secretUrl = "https://private.example/nested-note";
+  await installSpoilerBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.getByTestId("message-input").click();
+  await page.keyboard.type(
+    `Before ||**hidden note** and [hidden link](${secretUrl})|| after`,
+  );
+  await page.getByTestId("send-message").click();
+  const row = page.getByTestId("message-row").last();
+  const spoiler = row.getByRole("button", {
+    name: "Reveal spoiler",
+    exact: true,
+  });
+  const content = spoiler.locator(".buzz-spoiler__content");
+  const link = content.locator("a");
+  await expect(
+    page.getByTestId("message-timeline-announcements"),
+  ).toContainText("Before Hidden spoiler after");
+  const hidden = await row.ariaSnapshot();
+  await testInfo.attach("hidden-spoiler-accessibility", {
+    body: hidden,
+    contentType: "text/plain",
+  });
+  expect(hidden).not.toContain("hidden note");
+  expect(hidden).not.toContain("hidden link");
+  expect(hidden).not.toContain(secretUrl);
+  await link.focus();
+  await expect(link).not.toBeFocused();
+  await spoiler.focus();
+  await page.keyboard.press("Enter");
+  await expect(row.getByRole("link", { name: "hidden link" })).toHaveAttribute(
+    "href",
+    secretUrl,
+  );
+  const revealed = await row.ariaSnapshot();
+  await testInfo.attach("revealed-spoiler-accessibility", {
+    body: revealed,
+    contentType: "text/plain",
+  });
+  expect(revealed).toContain("hidden note");
+  expect(revealed).toContain(secretUrl);
+  await page.keyboard.press("Space");
+  await expect(
+    row.getByRole("button", { name: "Reveal spoiler", exact: true }),
+  ).toBeFocused();
+  await expect(row.getByRole("link")).toHaveCount(0);
+  expect(await row.ariaSnapshot()).not.toContain(secretUrl);
 });
 
 test("non-interactive inbox preview spoilers let row clicks pass through", async ({
@@ -363,6 +419,7 @@ test("non-interactive inbox preview spoilers let row clicks pass through", async
   await expect(spoiler).not.toHaveAttribute("role", "button");
   await expect(spoiler).not.toHaveAttribute("tabindex", "0");
   await expect(spoiler).toHaveCSS("pointer-events", "none");
+  expect(await item.ariaSnapshot()).not.toContain("hidden launch note");
 
   const box = await spoiler.boundingBox();
   expect(box).not.toBeNull();

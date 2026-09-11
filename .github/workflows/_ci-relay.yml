@@ -35,7 +35,9 @@ jobs:
   desktop-e2e-relay:
     name: Desktop E2E Relay
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Budget the relay and both test archives on a cache miss. Different feature
+    # sets can trigger additional compilation for each archive.
+    timeout-minutes: 60
     if: inputs.lane == 'artifacts' && (github.event_name == 'push' || inputs.desktop || inputs.desktop_rust || inputs.rust)
     permissions:
       contents: read
@@ -167,6 +169,7 @@ jobs:
       PGUSER: buzz
       PG_BIN_DIR: /usr/bin
       REDIS_URL: redis://localhost:6379
+      BUZZ_TEST_REDIS_URL: redis://localhost:6379
       PGSCHEMA_PLAN_HOST: localhost
       PGSCHEMA_PLAN_PORT: "5432"
       PGSCHEMA_PLAN_USER: buzz

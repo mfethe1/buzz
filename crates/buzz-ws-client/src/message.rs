@@ -44,6 +44,14 @@ pub enum RelayMessage {
         /// The number of matching events.
         count: u64,
     },
+    /// Buzz extension: advisory task invalidation. The relay is
+    /// advising the client that tasks in `channel_id` changed and it should
+    /// refetch through the authorized HTTP API. No task content is carried.
+    TasksSyncRequired {
+        /// UUID of the channel whose task list changed, or `None` for
+        /// community-wide tasks.
+        channel_id: Option<String>,
+    },
 }
 
 /// The relay's response to a published event (NIP-01 `OK` message).
@@ -160,6 +168,19 @@ pub fn parse_relay_message(text: &str) -> Result<RelayMessage, WsClientError> {
                 count,
             })
         }
+        "BUZZ_TASKS_SYNC_REQUIRED" => {
+            if arr.len() != 2 {
+                return Err(WsClientError::UnexpectedMessage(text.to_string()));
+            }
+            let channel_id = match arr.get(1) {
+                Some(Value::Null) => None,
+                Some(Value::String(value)) if uuid::Uuid::parse_str(value).is_ok() => {
+                    Some(value.clone())
+                }
+                _ => return Err(WsClientError::UnexpectedMessage(text.to_string())),
+            };
+            Ok(RelayMessage::TasksSyncRequired { channel_id })
+        }
         other => Err(WsClientError::UnexpectedMessage(format!(
             "unknown message type: {other}"
         ))),
@@ -187,4 +208,30 @@ pub fn build_auth_event(
     builder
         .sign_with_keys(keys)
         .map_err(|e| WsClientError::EventBuilder(e.to_string()))
+}
+
+#[cfg(test)]
+mod task_sync_tests {
+    use super::*;
+
+    #[test]
+    fn task_signal_is_recognized_without_changing_unknown_frame_errors() {
+        let channel = "00000000-0000-0000-0000-000000000001";
+        assert!(
+            matches!(parse_relay_message(&format!(r#"["BUZZ_TASKS_SYNC_REQUIRED","{channel}"]"#)),
+            Ok(RelayMessage::TasksSyncRequired { channel_id }) if channel_id.as_deref() == Some(channel))
+        );
+        assert!(matches!(
+            parse_relay_message(r#"["BUZZ_TASKS_SYNC_REQUIRED",null]"#),
+            Ok(RelayMessage::TasksSyncRequired { channel_id: None })
+        ));
+        assert!(matches!(
+            parse_relay_message(r#"["BUZZ_TASKS_SYNC_REQUIRED"]"#),
+            Err(WsClientError::UnexpectedMessage(_))
+        ));
+        assert!(matches!(
+            parse_relay_message(r#"["UNKNOWN_FUTURE_EXTENSION"]"#),
+            Err(WsClientError::UnexpectedMessage(_))
+        ));
+    }
 }

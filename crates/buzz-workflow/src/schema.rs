@@ -139,7 +139,7 @@ pub enum ActionDef {
     },
     /// Suspend execution and request approval.
     RequestApproval {
-        /// User mention or role (e.g. `"@release-manager"`).
+        /// Exact hex pubkey or `"any"` current channel member; never a display name.
         from: String,
         /// Message shown to the approver.
         message: String,
@@ -319,6 +319,21 @@ impl WorkflowDef {
 /// as a runtime failure — for `assign_agent` this is the identity-safety line:
 /// a workflow that mistypes an agent pubkey should never save.
 pub(crate) fn validate_action(step_id: &str, action: &ActionDef) -> Result<(), WorkflowError> {
+    if let ActionDef::RequestApproval {
+        from,
+        message,
+        timeout,
+    } = action
+    {
+        let spec = from.trim().to_lowercase();
+        let duration = crate::executor::parse_duration_secs(timeout.as_deref().unwrap_or("24h"))?;
+        if (spec != "any" && !is_lowercase_hex_pubkey(&spec))
+            || message.trim().is_empty()
+            || !(1..=604800).contains(&duration)
+        {
+            return Err(WorkflowError::InvalidDefinition(format!("request_approval step '{step_id}' requires an exact pubkey or any, a message, and a timeout between 1 second and 7 days")));
+        }
+    }
     if let ActionDef::AssignAgent {
         agent_pubkey,
         text,
@@ -509,6 +524,38 @@ mod tests {
     }
 
     #[test]
+    fn approval_definition_requires_stable_identity_and_bounded_wait() {
+        for (from, message, timeout) in [
+            ("@manager", "approve", "1h"),
+            ("{{trigger.author}}", "approve", "1h"),
+            ("any", "", "1h"),
+            ("any", "approve", "0s"),
+            ("any", "approve", "169h"),
+        ] {
+            let action = ActionDef::RequestApproval {
+                from: from.into(),
+                message: message.into(),
+                timeout: Some(timeout.into()),
+            };
+            assert!(
+                validate_action("review", &action).is_err(),
+                "must reject {from}/{message}/{timeout}"
+            );
+        }
+        for from in ["any".to_string(), "a".repeat(64)] {
+            assert!(validate_action(
+                "review",
+                &ActionDef::RequestApproval {
+                    from,
+                    message: "Approve {{trigger.text}}".into(),
+                    timeout: Some("168h".into())
+                }
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
     fn parse_all_action_types() {
         // Avoid "# in YAML values (would close r# raw strings).
         // Use unquoted or single-quoted YAML values throughout.
@@ -521,7 +568,7 @@ mod tests {
             "  - id: topic\n    action: set_channel_topic\n    topic: Status active\n",
             "  - id: react\n    action: add_reaction\n    emoji: white_check_mark\n",
             "  - id: hook\n    action: call_webhook\n    url: https://hooks.example.com/notify\n    method: POST\n",
-            "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 4h\n",
+            "  - id: approve\n    action: request_approval\n    from: any\n    message: Approve?\n    timeout: 4h\n",
             "  - id: wait\n    action: delay\n    duration: 5m\n",
             "  - id: assign\n    action: assign_agent\n    agent_pubkey: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n    text: Please take this\n",
         );
@@ -562,7 +609,7 @@ mod tests {
             "name: Deploy Approval\n",
             "trigger:\n  on: webhook\n",
             "steps:\n",
-            "  - id: request\n    action: request_approval\n    from: '@engineering-lead'\n",
+            "  - id: request\n    action: request_approval\n    from: any\n",
             "    message: Approve deploy?\n    timeout: 4h\n",
             "  - id: notify_approved\n    if: 'steps_request_output_approved == true'\n",
             "    action: send_message\n    text: Deploy approved\n",

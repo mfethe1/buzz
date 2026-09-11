@@ -180,6 +180,19 @@ CREATE TABLE users (
     metadata_event_id   BYTEA,
     agent_owner_pubkey  BYTEA,
     channel_add_policy  channel_add_policy NOT NULL DEFAULT 'anyone',
+    machine_id         VARCHAR(255),
+    machine_label      VARCHAR(255),
+    machine_runtime    TEXT,
+    CONSTRAINT chk_users_machine_fields_require_machine_id
+        -- pgschema1.7.4 drops CHECKs containing IS NOT NULL as presumed column
+        -- nullability. num_nonnulls preserves this cross-column invariant.
+        CHECK (num_nonnulls(machine_id) = 1 OR num_nonnulls(machine_label, machine_runtime) = 0),
+    CONSTRAINT chk_users_machine_id_not_blank
+        CHECK (machine_id IS NULL OR length(btrim(machine_id)) > 0),
+    CONSTRAINT chk_users_machine_label_not_blank
+        CHECK (machine_label IS NULL OR length(btrim(machine_label)) > 0),
+    CONSTRAINT chk_users_machine_runtime_not_blank
+        CHECK (machine_runtime IS NULL OR length(btrim(machine_runtime)) > 0),
     PRIMARY KEY (community_id, pubkey),
     CONSTRAINT chk_users_pubkey_len CHECK (LENGTH(pubkey) = 32),
     -- agent owner is a user in the SAME community.
@@ -192,6 +205,9 @@ CREATE UNIQUE INDEX idx_users_nip05 ON users (community_id, lower(nip05_handle))
     WHERE nip05_handle IS NOT NULL;
 CREATE UNIQUE INDEX idx_users_okta ON users (community_id, okta_user_id)
     WHERE okta_user_id IS NOT NULL;
+-- A home belongs to one existing user; other users remain unhomed.
+CREATE UNIQUE INDEX idx_users_one_home_per_machine ON users (community_id, machine_id)
+    WHERE machine_id IS NOT NULL;
 
 -- ── Events (partitioned by month on created_at) ──────────────────────────────
 -- Conformance: "Channel-less global events and DMs". `community_id` leads the
@@ -425,6 +441,15 @@ CREATE TABLE workflow_approvals (
     denied_at       TIMESTAMPTZ,
     expires_at      TIMESTAMPTZ NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    request_event_id BYTEA,
+    decision_event_id BYTEA,
+    request_message TEXT,
+    continuation JSONB,
+    resume_claimed_at TIMESTAMPTZ,
+    resume_deadline_at TIMESTAMPTZ,
+    CONSTRAINT workflow_approvals_native_decision_required
+        CHECK (continuation IS NULL OR status NOT IN ('granted','denied')
+            OR num_nonnulls(decision_event_id) = 1),
     PRIMARY KEY (community_id, token),
     FOREIGN KEY (community_id, workflow_id)
         REFERENCES workflows (community_id, id) ON DELETE CASCADE,
@@ -435,6 +460,13 @@ CREATE TABLE workflow_approvals (
 CREATE INDEX idx_workflow_approvals_workflow ON workflow_approvals (community_id, workflow_id);
 CREATE INDEX idx_workflow_approvals_run ON workflow_approvals (community_id, run_id);
 CREATE INDEX idx_workflow_approvals_status ON workflow_approvals (community_id, status);
+
+CREATE UNIQUE INDEX idx_workflow_approvals_decision_event
+    ON workflow_approvals (community_id, decision_event_id)
+    WHERE decision_event_id IS NOT NULL;
+CREATE INDEX idx_workflow_approvals_recovery
+    ON workflow_approvals (status, resume_deadline_at)
+    WHERE continuation IS NOT NULL;
 
 -- ── Scheduled workflow fires (cron claim) ─────────────────────────────────────
 -- Plan §5: the at-most-once cron fire claim. UNIQUE (community_id, workflow_id,
@@ -692,9 +724,11 @@ CREATE TABLE moderation_reports (
     -- Exactly one target class per row: target_kind is authoritative and the
     -- matching column (only) is populated. Queue/action code never guesses.
     CHECK (
-        (target_kind = 'event'  AND target_event_id IS NOT NULL AND target_pubkey IS NULL     AND target_blob_sha256 IS NULL) OR
-        (target_kind = 'pubkey' AND target_event_id IS NULL     AND target_pubkey IS NOT NULL AND target_blob_sha256 IS NULL) OR
-        (target_kind = 'blob'   AND target_event_id IS NULL     AND target_pubkey IS NULL     AND target_blob_sha256 IS NOT NULL)
+        -- pgschema 1.7.4 omits CHECKs containing IS NOT NULL. Equivalent
+        -- num_nonnulls predicates retain this invariant in fresh bootstraps.
+        (target_kind = 'event'  AND num_nonnulls(target_event_id) = 1 AND target_pubkey IS NULL AND target_blob_sha256 IS NULL) OR
+        (target_kind = 'pubkey' AND target_event_id IS NULL AND num_nonnulls(target_pubkey) = 1 AND target_blob_sha256 IS NULL) OR
+        (target_kind = 'blob'   AND target_event_id IS NULL AND target_pubkey IS NULL AND num_nonnulls(target_blob_sha256) = 1)
     ),
     -- Same-community channel provenance (channels are soft-deleted, never
     -- hard-deleted, so this FK cannot dangle).
@@ -864,7 +898,7 @@ CREATE TABLE push_leases (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (community_id, author, installation_id),
     UNIQUE (community_id, source_event_id),
-    CHECK ((active AND app_profile IS NOT NULL AND endpoint_hash IS NOT NULL AND endpoint_grant IS NOT NULL AND max_class IS NOT NULL AND subscriptions IS NOT NULL)
+    CHECK ((active AND num_nonnulls(app_profile, endpoint_hash, endpoint_grant, max_class, subscriptions) = 5)
         OR (NOT active AND app_profile IS NULL AND endpoint_hash IS NULL AND endpoint_grant IS NULL AND max_class IS NULL AND subscriptions IS NULL))
 );
 CREATE UNIQUE INDEX push_leases_endpoint_unique
@@ -1225,9 +1259,10 @@ CREATE TABLE tasks (
     archived_at        TIMESTAMPTZ,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revision           INT         NOT NULL DEFAULT 0,
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_tasks_done_at_matches_status
-        CHECK ((status = 'done') = (done_at IS NOT NULL)),
+        CHECK ((status = 'done') = (num_nonnulls(done_at) = 1)),
     CONSTRAINT chk_tasks_not_own_parent CHECK (parent_task_id IS DISTINCT FROM id),
     CONSTRAINT chk_tasks_created_by_len
         CHECK (created_by_pubkey IS NULL OR length(created_by_pubkey) = 32),
@@ -1252,6 +1287,32 @@ CREATE INDEX idx_tasks_community_channel ON tasks (community_id, channel_id)
 CREATE INDEX idx_tasks_community_parent ON tasks (community_id, parent_task_id)
     WHERE parent_task_id IS NOT NULL;
 
+-- HW-017: monotonic revision counter for optimistic concurrency on PATCH.
+CREATE OR REPLACE FUNCTION bump_task_revision()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Bump ONLY when the row's payload actually changed. An idempotent
+    -- restate still fires a BEFORE UPDATE trigger; bumping there would
+    -- invalidate every other client's `expected_revision` for a write that
+    -- changed nothing, manufacturing spurious 409s. The derived columns are
+    -- normalised to OLD first so the whole-row comparison sees only
+    -- caller-supplied payload, and comparing the whole row means a future
+    -- column on `tasks` is guarded automatically.
+    NEW.revision := OLD.revision;
+    NEW.updated_at := OLD.updated_at;
+    IF NEW IS DISTINCT FROM OLD THEN
+        NEW.revision := OLD.revision + 1;
+        NEW.updated_at := clock_timestamp();
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_tasks_revision
+    BEFORE UPDATE ON tasks
+    FOR EACH ROW
+    EXECUTE FUNCTION bump_task_revision();
+
 -- Append-only lifecycle and comment log; also the read model behind the
 -- human-visible task feed, hence the (community, time) feed index.
 CREATE TABLE task_events (
@@ -1263,7 +1324,8 @@ CREATE TABLE task_events (
     from_status   TEXT,
     to_status     TEXT,
     body          TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    changes       JSONB CHECK (changes IS NULL OR jsonb_typeof(changes) = 'object'),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_task_events_actor_len
         CHECK (actor_pubkey IS NULL OR length(actor_pubkey) = 32),
@@ -1344,7 +1406,7 @@ CREATE TABLE community_deletion_requests (
     aborted_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     CHECK ((blocked_at IS NULL) = (blocked_reason IS NULL)),
-    CHECK ((stage = 'aborted') = (aborted_at IS NOT NULL)),
+    CHECK ((stage = 'aborted') = (num_nonnulls(aborted_at) = 1)),
     CHECK ((aborted_at IS NULL) = (aborted_by IS NULL)),
     CHECK ((aborted_at IS NULL) = (abort_reason IS NULL)),
     CHECK ((inventory_frozen_at IS NULL) = (inventory_digest IS NULL)),
@@ -1439,8 +1501,8 @@ CREATE TABLE community_deletion_checkpoints (
     completed_at TIMESTAMPTZ,
     PRIMARY KEY (request_id, sequence),
     UNIQUE (request_id, stage, unit_key),
-    CHECK ((status = 'completed') = (completed_at IS NOT NULL)),
-    CHECK ((status = 'failed') = (error IS NOT NULL))
+    CHECK ((status = 'completed') = (num_nonnulls(completed_at) = 1)),
+    CHECK ((status = 'failed') = (num_nonnulls(error) = 1))
 );
 
 -- Frozen destructive key list, chunked out of the request row so a large
@@ -1981,3 +2043,197 @@ CREATE INDEX idx_relay_operator_audit_target
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('relay_operator_audit', 'deployment-global append-only roster mutation audit trail; no community_id intentionally');
 
+
+-- Per-machine capability grants: default deny.
+--
+-- PR-3 gave agents a machine home. This is the authorization half: which agent
+-- may perform which capability against which target. Nothing is implicit —
+-- absence of a row is denial, and revocation is a tombstone (revoked_at), not a
+-- DELETE. The separate append-only history retains each grant/revoke transition.
+--
+-- Tenant-scoped like every non-operator table: community_id NOT NULL, and it
+-- leads the primary key and the unique index (migration lint enforces both).
+
+
+
+CREATE TABLE agent_capability_grants (
+    community_id  UUID        NOT NULL REFERENCES communities(id),
+    agent_pubkey  BYTEA       NOT NULL,
+    capability    VARCHAR(64) NOT NULL,
+    target        TEXT        NOT NULL,
+    granted_by    BYTEA       NOT NULL,
+    granted_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revoked_at    TIMESTAMPTZ,
+    revoked_by    BYTEA,
+    PRIMARY KEY (community_id, agent_pubkey, capability, target)
+);
+
+-- A revoked grant keeps its row; re-granting reuses it (see store::grant).
+CREATE INDEX idx_agent_capability_grants_active
+    ON agent_capability_grants (community_id, agent_pubkey, capability)
+    WHERE revoked_at IS NULL;
+
+COMMENT ON TABLE agent_capability_grants IS
+    'Per-machine capability grants. Default deny: no row (or revoked_at set) means denied.';
+COMMENT ON COLUMN agent_capability_grants.target IS
+    'Target machine_id (users.machine_id from PR-3), or "*" for any machine in the community.';
+COMMENT ON COLUMN agent_capability_grants.revoked_at IS
+    'Current tombstone. Immutable grant/revoke history is in agent_capability_events.';
+
+SELECT attach_community_write_fence('agent_capability_grants');
+
+-- The projection can be re-granted, but its overwritten actors/timestamps must
+-- survive. An AFTER trigger appends the OLD/NEW images in the same statement
+-- transaction. Row locking serializes concurrent upserts, including first grant.
+CREATE TABLE agent_capability_events (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    id BIGINT GENERATED ALWAYS AS IDENTITY,
+    agent_pubkey BYTEA NOT NULL,
+    capability VARCHAR(64) NOT NULL,
+    target TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('grant', 'revoke')),
+    actor_pubkey BYTEA NOT NULL,
+    before_state JSONB,
+    after_state JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (community_id, id)
+);
+CREATE INDEX idx_agent_capability_events_grant
+    ON agent_capability_events (community_id, agent_pubkey, capability, target, id);
+COMMENT ON TABLE agent_capability_events IS
+    'Append-only grant/revoke facts; removed only by the fenced whole-community purge. Not a signed event or execution authorization receipt.';
+SELECT attach_community_write_fence('agent_capability_events');
+
+CREATE FUNCTION record_agent_capability_change() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' AND NEW IS NOT DISTINCT FROM OLD THEN
+        RETURN NULL;
+    END IF;
+    INSERT INTO agent_capability_events
+        (community_id, agent_pubkey, capability, target, action, actor_pubkey,
+         before_state, after_state)
+    VALUES
+        (NEW.community_id, NEW.agent_pubkey, NEW.capability, NEW.target,
+         CASE WHEN NEW.revoked_at IS NULL THEN 'grant' ELSE 'revoke' END,
+         CASE WHEN NEW.revoked_at IS NULL THEN NEW.granted_by ELSE NEW.revoked_by END,
+         CASE WHEN TG_OP = 'INSERT' THEN NULL ELSE to_jsonb(OLD) END,
+         to_jsonb(NEW));
+    RETURN NULL;
+END
+$$;
+CREATE TRIGGER agent_capability_change_history
+    AFTER INSERT OR UPDATE ON agent_capability_grants
+    FOR EACH ROW EXECUTE FUNCTION record_agent_capability_change();
+
+-- A mutable projection never grants authority to rewrite its history. The one
+-- deletion exception is the existing generation-bound whole-community executor;
+-- the universal write fence independently verifies that same proof.
+CREATE FUNCTION protect_agent_capability_history() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' AND EXISTS (
+        SELECT 1 FROM communities
+        WHERE id = OLD.community_id AND deletion_state IN ('fenced', 'tombstone')
+          AND current_setting('buzz.deletion_executor_community', true) = id::TEXT
+          AND current_setting('buzz.deletion_fence_generation', true) = deletion_fence_generation::TEXT
+    ) THEN
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'capability history is append-only'
+        USING ERRCODE = 'object_not_in_prerequisite_state';
+END
+$$;
+CREATE TRIGGER agent_capability_history_immutable
+    BEFORE UPDATE OR DELETE ON agent_capability_events
+    FOR EACH ROW EXECUTE FUNCTION protect_agent_capability_history();
+
+
+-- One fixed qualification attempt per signed CML task. A started attempt is
+-- never re-leased automatically; unknown outcomes require explicit inspection.
+CREATE TABLE fleet_attempts (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    id TEXT NOT NULL,
+    task_id UUID NOT NULL,
+    channel_id UUID NOT NULL,
+    task_revision INTEGER NOT NULL CHECK (task_revision >= 0),
+    plan_event_id BYTEA NOT NULL CHECK (octet_length(plan_event_id) = 32),
+    plan_event JSONB NOT NULL,
+    cml_head BYTEA NOT NULL CHECK (octet_length(cml_head) = 32),
+    cml_event JSONB NOT NULL,
+    planner_pubkey BYTEA NOT NULL CHECK (octet_length(planner_pubkey) = 32),
+    worker_pubkey BYTEA NOT NULL CHECK (octet_length(worker_pubkey) = 32),
+    machine_id TEXT NOT NULL,
+    scope JSONB NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('planned','claimed','started','unknown','success','error','cancelled','cancelled_before_execution','expired')),
+    claim_event_id BYTEA,
+    start_event_id BYTEA,
+    cancel_event_id BYTEA,
+    receipt_event_id BYTEA,
+    receipt JSONB,
+    permission_grants JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (community_id, id),
+    UNIQUE (community_id, task_id),
+    UNIQUE (community_id, plan_event_id),
+    FOREIGN KEY (community_id, task_id) REFERENCES tasks (community_id, id),
+    FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id),
+    CONSTRAINT fleet_attempt_state_requires_start CHECK (
+        state IN ('planned','claimed','cancelled_before_execution','expired')
+        OR num_nonnulls(start_event_id) = 1),
+    CONSTRAINT fleet_attempt_terminal_requires_receipt CHECK (
+        state NOT IN ('success','error','cancelled','cancelled_before_execution')
+        OR num_nonnulls(receipt_event_id, receipt) = 2),
+    CONSTRAINT fleet_attempt_cancel_ack_requires_intent CHECK (
+        state NOT IN ('cancelled','cancelled_before_execution')
+        OR num_nonnulls(cancel_event_id) = 1)
+);
+COMMENT ON TABLE fleet_attempts IS
+    'Relay-authorized fixed qualification projection. A start is single use, not proof of running or completion. Signed events remain the audit source.';
+SELECT attach_community_write_fence('fleet_attempts');
+
+-- Owner-private control journal and current display projection. Neither table
+-- supplies execution grants; existing fleet admission remains authoritative.
+CREATE TABLE machines (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    machine_id UUID NOT NULL,
+    owner_pubkey BYTEA NOT NULL CHECK (octet_length(owner_pubkey) = 32),
+    coordinator_pubkey BYTEA NOT NULL CHECK (octet_length(coordinator_pubkey) = 32),
+    registration_event_id BYTEA NOT NULL CHECK (octet_length(registration_event_id) = 32),
+    label TEXT NOT NULL CHECK (length(label) BETWEEN 1 AND 80),
+    runtime TEXT NOT NULL CHECK (runtime IN ('hermes','openclaw','codex','claude-code')),
+    observation_event_id BYTEA,
+    observation_sequence BIGINT NOT NULL DEFAULT 0 CHECK (observation_sequence BETWEEN 0 AND 9007199254740991),
+    observed_state TEXT CHECK (observed_state IN ('ready','busy','unavailable')),
+    observed_at TIMESTAMPTZ,
+    received_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    enrolled_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (community_id, machine_id),
+    UNIQUE (community_id, coordinator_pubkey),
+    UNIQUE (community_id, registration_event_id),
+    FOREIGN KEY (community_id, owner_pubkey) REFERENCES users(community_id, pubkey),
+    FOREIGN KEY (community_id, coordinator_pubkey) REFERENCES users(community_id, pubkey),
+    CONSTRAINT machine_distinct_owner CHECK (owner_pubkey <> coordinator_pubkey),
+    CONSTRAINT machine_observation_complete CHECK (
+        (observation_sequence = 0 AND num_nonnulls(observation_event_id, observed_state, observed_at, received_at, expires_at) = 0)
+        OR (observation_sequence > 0 AND num_nonnulls(observation_event_id, observed_state, observed_at, received_at, expires_at) = 5)),
+    CONSTRAINT machine_observation_expiry CHECK (
+        expires_at <= observed_at + interval '120 seconds' AND expires_at <= received_at + interval '120 seconds')
+);
+CREATE INDEX machines_owner_page ON machines(community_id, owner_pubkey, machine_id);
+CREATE TABLE machine_control_events (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    event_id BYTEA NOT NULL CHECK (octet_length(event_id) = 32),
+    machine_id UUID NOT NULL,
+    owner_pubkey BYTEA NOT NULL CHECK (octet_length(owner_pubkey) = 32),
+    kind INTEGER NOT NULL CHECK (kind IN (47210,47211)),
+    signed_event JSONB NOT NULL,
+    received_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (community_id, event_id),
+    FOREIGN KEY (community_id, machine_id) REFERENCES machines(community_id, machine_id)
+);
+COMMENT ON TABLE machine_control_events IS 'Private signed machine journal; excluded from generic event reads, search and fanout.';
+SELECT attach_community_write_fence('machines');
+SELECT attach_community_write_fence('machine_control_events');

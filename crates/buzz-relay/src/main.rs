@@ -574,10 +574,12 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         let cfg = buzz_relay::api::git::store::ProbeConfig {
             race_width,
             race_rounds,
+            ..Default::default()
         };
         tracing::info!(
             race_width,
             race_rounds,
+            timeout_seconds = cfg.total_timeout.as_secs(),
             "running git object-store conformance probe (A3 gate)"
         );
         let report = state
@@ -1049,40 +1051,8 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // banned member's next auth attempt at the auth seam.
     {
         let state_for_conn_ctrl = Arc::clone(&state);
-        let mut rx = state_for_conn_ctrl.pubsub.subscribe_conn_control();
-        tokio::spawn(async move {
-            loop {
-                match rx.recv().await {
-                    Ok(scoped) => match scoped.command {
-                        buzz_pubsub::conn_control::ConnControl::DisconnectCommunity => {
-                            state_for_conn_ctrl
-                                .community_connections
-                                .disconnect_community(scoped.community_id);
-                        }
-                        buzz_pubsub::conn_control::ConnControl::DisconnectPubkey {
-                            pubkey,
-                            event_id,
-                            reason,
-                        } => {
-                            state_for_conn_ctrl.conn_manager.disconnect_pubkey(
-                                scoped.community_id,
-                                &pubkey,
-                                &event_id,
-                                &reason,
-                            );
-                        }
-                    },
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        metrics::counter!("buzz_conn_control_lag_total").increment(n);
-                        tracing::warn!("Connection-control consumer lagged by {n} messages");
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        tracing::error!("Connection-control broadcast channel closed");
-                        break;
-                    }
-                }
-            }
-        });
+        let rx = state_for_conn_ctrl.pubsub.subscribe_conn_control();
+        tokio::spawn(state_for_conn_ctrl.run_connection_control(rx));
     }
 
     let router = build_router(Arc::clone(&state));

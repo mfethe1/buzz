@@ -703,8 +703,48 @@ mod postgres_tests {
         migrations.sort_by_key(|migration| migration.version);
 
         // upstream carries 44 (0032-0034 and 0040 adopted from our PRs);
-        // fork adds 0046_task_system (PR #6425 pending upstream).
-        assert_eq!(migrations.len(), 45);
+        // fork adds 0046_task_system (PR #6425 pending upstream) and 0047
+        // structured task history, 0048 machine homes, 0049 capability grants,
+        // 0050 task revisions, 0051 workflow approvals, 0052 fleet admission, and
+        // 0053 private machine control.
+        // Deployed migration checksums stay unchanged.
+        assert_eq!(migrations.len(), 52);
+        assert_eq!(migrations[51].version, 53);
+        assert!(migrations[51]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE machine_control_events"));
+        assert_eq!(migrations[44].version, 46);
+        assert_eq!(migrations[45].version, 47);
+        assert_eq!(migrations[46].version, 48);
+        assert!(migrations[46]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN machine_id"));
+        assert_eq!(migrations[47].version, 49);
+        assert!(migrations[47]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE agent_capability_events"));
+        assert_eq!(migrations[48].version, 50);
+        assert!(migrations[48]
+            .sql
+            .as_str()
+            .contains("CREATE TRIGGER trg_tasks_revision"));
+        let task_changes = migrations[45].sql.as_str();
+        assert!(task_changes.contains("ALTER TABLE task_events ADD COLUMN changes JSONB"));
+        assert!(task_changes.contains("ALTER COLUMN created_at SET DEFAULT clock_timestamp()"));
+        assert!(!migrations[44].sql.as_str().contains("ADD COLUMN changes"));
+        assert_eq!(migrations[50].version, 52);
+        assert!(migrations[50]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE fleet_attempts"));
+        assert_eq!(migrations[49].version, 51);
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("workflow_approvals_native_decision_required"));
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1706,11 +1746,11 @@ mod postgres_tests {
     /// desired-state bootstrap schema (`schema/schema.sql`).
     ///
     /// Compares parsed statements, not substrings: every deletion control-
-    /// plane table, function, trigger, and index 0028 creates must exist in
+    /// plane table, function, trigger, and index 0029 creates must exist in
     /// schema.sql with an identical normalized definition; every operator-
-    /// global registry row 0028 inserts must be inserted by schema.sql; the
+    /// global registry row 0029 inserts must be inserted by schema.sql; the
     /// write-fence attachment target sets must be equal; and every column
-    /// 0028 adds to `communities` must exist in the desired-state
+    /// 0029 adds to `communities` must exist in the desired-state
     /// `communities` table. A desired-state bootstrap that passes this test
     /// cannot silently omit part of the deletion surface the way the
     /// pre-parity schema.sql omitted `community_deletion_manifest_keys` (and
@@ -1840,8 +1880,23 @@ mod postgres_tests {
                 .get(table)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion table {table}"));
             if table != "community_deletion_requests" {
+                // Keep the historical migration immutable. pgSchema drops
+                // CHECK predicates containing IS NOT NULL, so the desired
+                // schema uses equivalent scalar num_nonnulls expressions.
+                // Permit only these two known rewrites; compare every other
+                // part of the table definition exactly as before.
+                let definition = if table == "community_deletion_checkpoints" {
+                    definition
+                        .replace(
+                            "(completed_at is not null)",
+                            "(num_nonnulls(completed_at) = 1)",
+                        )
+                        .replace("(error is not null)", "(num_nonnulls(error) = 1)")
+                } else {
+                    definition.clone()
+                };
                 assert_eq!(
-                    in_schema, definition,
+                    in_schema, &definition,
                     "schema.sql definition of {table} drifted from migration 0029"
                 );
             }
@@ -1883,13 +1938,29 @@ mod postgres_tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
-        // Tenant tables introduced after 0029 declare their own fence
-        // attachment in their own migration and in schema.sql. Enumerate them
-        // here so the comparison below stays an exact equality: a new scoped
-        // table that forgets its fence line still fails this test, and a fence
-        // line for a table nobody registered here fails it too.
-        for post_0029_scoped_table in ["tasks", "task_events"] {
-            expected_fences.insert(post_0029_scoped_table.to_owned());
+        // Keep later tenant tables explicit, and bind each attachment to the
+        // migration introducing it. Both upgrade and bootstrap must fence it;
+        // neither a missing attachment nor an unregistered extra is accepted.
+        for (version, table) in [
+            (46, "tasks"),
+            (46, "task_events"),
+            (49, "agent_capability_grants"),
+            (49, "agent_capability_events"),
+            (52, "fleet_attempts"),
+            (53, "machines"),
+            (53, "machine_control_events"),
+        ] {
+            let introduced = MIGRATOR
+                .iter()
+                .find(|migration| migration.version == version)
+                .expect("embedded tenant-table migration");
+            assert!(
+                surface(introduced.sql.as_ref())
+                    .fence_attachments
+                    .contains(table),
+                "migration {version} is missing the write-fence attachment for {table}"
+            );
+            expected_fences.insert(table.to_owned());
         }
         assert_eq!(
             expected_fences, schema.fence_attachments,
@@ -1915,7 +1986,7 @@ mod postgres_tests {
         for column in &migration.communities_added_columns {
             assert!(
                 column_names.contains(column),
-                "schema.sql communities table is missing 0028 column {column}"
+                "schema.sql communities table is missing 0029 column {column}"
             );
         }
         assert!(!migration.communities_added_columns.is_empty());
@@ -2821,10 +2892,16 @@ mod postgres_tests {
             "all NIP-FI tables must be absent after migration 0044: {present:?}"
         );
 
-        // The deletion catalog must validate with ledger relations gone.
+        // The current deletion catalog includes tables introduced after 0044.
+        // Keep the historical removal assertion above, then advance the schema
+        // before checking compatibility with the current runtime catalog.
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("apply remaining migrations after ledger removal");
         crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()
             .await
-            .expect("deletion catalog validates after migration 0044");
+            .expect("current deletion catalog validates after ledger removal and upgrade");
     }
 }

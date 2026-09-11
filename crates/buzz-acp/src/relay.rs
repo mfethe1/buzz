@@ -753,6 +753,8 @@ enum RelayMessage {
     Auth {
         challenge: String,
     },
+    /// Task-list cache advisory; the agent harness has no task-list cache.
+    TasksSyncRequired,
 }
 
 /// Subscription ID for the global membership notification subscription.
@@ -1260,10 +1262,8 @@ struct BgState {
     /// On reconnect resubscribe, `since` = min(last_seen, channel_dropped_since).
     /// Cleared per-channel after a successful resubscribe.
     channel_dropped_since: HashMap<Uuid, u64>,
-    /// Set by the backpressure handler when the event channel is full.
-    /// The main loop checks this flag and triggers a proactive resubscribe
-    /// (without waiting for a disconnect) so dropped events are replayed.
-    proactive_resubscribe_needed: bool,
+    /// Rate/fairness bookkeeping only; replay cursors retain baseline semantics.
+    recovery: recovery::RecoverySchedule,
     /// Unix timestamp captured just before the relay connection was established.
     /// Used as the floor `since` for membership notification replay so events
     /// predating this session are never re-delivered.
@@ -1337,7 +1337,7 @@ impl BgState {
             membership_sub_active: false,
             observer_control_sub_active: false,
             channel_dropped_since: HashMap::new(),
-            proactive_resubscribe_needed: false,
+            recovery: recovery::RecoverySchedule::default(),
             startup_watermark: None,
             subscribe_since: HashMap::new(),
             rate_limit_gate: None,
@@ -1398,6 +1398,9 @@ impl BgState {
     /// Prevents stale replay on re-subscribe and avoids unbounded state growth
     /// for channels that are removed and never re-added.
     fn clear_channel_state(&mut self, channel_id: &Uuid) {
+        self.recovery
+            .last_attempt
+            .remove(&channel_sub_id(*channel_id));
         self.last_seen.remove(channel_id);
         self.subscribe_since.remove(channel_id);
         self.channel_dropped_since.remove(channel_id);
@@ -1926,82 +1929,6 @@ async fn run_background_task(
     let mut drain_pacing_next: Option<tokio::time::Instant> = None;
 
     loop {
-        if state.proactive_resubscribe_needed {
-            state.proactive_resubscribe_needed = false;
-            info!("proactive resubscribe triggered by backpressure event loss");
-            // Proactive resubscribe runs on the EXISTING socket — do NOT clear the
-            // rate-limit gate or pending queues.
-            match resubscribe_after_reconnect(
-                &mut ws,
-                &mut cmd_rx,
-                &mut state,
-                &agent_pubkey_hex,
-                false, // existing socket — preserve gate state
-            )
-            .await
-            {
-                ResubscribeResult::Ok => {}
-                ResubscribeResult::Shutdown => return,
-                ResubscribeResult::RetryConnection => {
-                    warn!("proactive resubscribe had failures — triggering reconnect");
-                    let _ = event_tx.try_send(None);
-                    match try_autonomous_reconnect(
-                        &mut ws,
-                        &mut cmd_rx,
-                        &mut state,
-                        &keys,
-                        &relay_url,
-                        &agent_pubkey_hex,
-                        &event_tx,
-                        &observer_control_tx,
-                        auth_tag.as_ref(),
-                    )
-                    .await
-                    {
-                        ReconnectOutcome::Ok => {
-                            if matches!(
-                                drain_post_reconnect(
-                                    &mut ws,
-                                    &mut cmd_rx,
-                                    &mut state,
-                                    &agent_pubkey_hex
-                                )
-                                .await,
-                                ReconnectOutcome::Shutdown
-                            ) {
-                                return;
-                            }
-                        }
-                        ReconnectOutcome::Shutdown => return,
-                        ReconnectOutcome::Failed => {
-                            if matches!(
-                                wait_for_reconnect(
-                                    &mut ws,
-                                    &mut cmd_rx,
-                                    &mut state,
-                                    &keys,
-                                    &relay_url,
-                                    &agent_pubkey_hex,
-                                    &event_tx,
-                                    &observer_control_tx,
-                                    true,
-                                    auth_tag.as_ref(),
-                                )
-                                .await,
-                                ReconnectOutcome::Shutdown
-                            ) {
-                                return;
-                            }
-                        }
-                    }
-                    ping_sent = false;
-                    last_pong = Instant::now();
-                    connected_since = Instant::now();
-                    stable_logged = false;
-                }
-            }
-        }
-
         // Drain pending subs, one REQ per pacing tick within the relay's
         // admission window.
         let drain_window_open = drain_pacing_next.is_none_or(|t| tokio::time::Instant::now() >= t);
@@ -2082,7 +2009,11 @@ async fn run_background_task(
             }
         }
 
+        let recovery_at = recovery::ready_at(&mut state);
         tokio::select! {
+                   _ = recovery::ready(&event_tx, recovery_at) => {
+                       recovery::recover_one(&mut ws, &mut state, &event_tx, &agent_pubkey_hex).await;
+                   }
                    raw = ws.next() => {
                        // Determine if the socket is lost.
                        let socket_lost = match raw {
@@ -2458,12 +2389,10 @@ async fn handle_ws_message(
                                 // replay starts early enough to re-deliver it.
                                 state.membership_dropped_since =
                                     Some(state.membership_dropped_since.map_or(ts, |d| d.min(ts)));
-                                // Proactively trigger resubscribe without waiting for a disconnect.
-                                state.proactive_resubscribe_needed = true;
                                 warn!(
                                     channel_id = %channel_uuid,
                                     ts,
-                                    "membership notification dropped (backpressure) — proactive resubscribe queued"
+                                    "membership notification dropped (backpressure) — targeted recovery pending"
                                 );
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => return false,
@@ -2500,12 +2429,10 @@ async fn handle_ws_message(
                                         .entry(channel_id)
                                         .and_modify(|d| *d = (*d).min(ts))
                                         .or_insert(ts);
-                                    // Proactively trigger resubscribe without waiting for a disconnect.
-                                    state.proactive_resubscribe_needed = true;
                                     warn!(
                                         channel_id = %channel_id,
                                         ts,
-                                        "event channel full — dropping event for channel {channel_id} — proactive resubscribe queued"
+                                        "event channel full — dropping event for channel {channel_id} — targeted recovery pending"
                                     );
                                 }
                                 Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -2677,6 +2604,7 @@ async fn handle_ws_message(
                         warn!("CLOSED for unknown subscription {subscription_id} — ignoring");
                     }
                 }
+                RelayMessage::TasksSyncRequired => {}
                 RelayMessage::Auth { challenge } => {
                     // AUTH send failure must trigger reconnect.
                     debug!("received mid-session AUTH challenge — re-authenticating");
@@ -2740,8 +2668,6 @@ async fn handle_ws_message(
                             );
                         }
                     }
-                    state.acknowledge_observer_frame(&event_id);
-                    debug!("OK for event {event_id}: accepted={accepted} message={message}");
                 }
             }
             true
@@ -2810,6 +2736,8 @@ async fn process_handshake_buffer(
             } => serde_json::to_string(&json!(["OK", event_id, accepted, message])).ok(),
             // AUTH in the buffer is stale — skip it.
             RelayMessage::Auth { .. } => None,
+            // The harness does not consume task-list cache invalidations.
+            RelayMessage::TasksSyncRequired => None,
         };
         if let Some(text) = text {
             let should_continue = handle_ws_message(
@@ -3996,6 +3924,18 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
                 .to_string();
             Ok(RelayMessage::Auth { challenge })
         }
+        "BUZZ_TASKS_SYNC_REQUIRED" => {
+            let valid_scope = matches!(arr.get(1), Some(Value::Null))
+                || arr
+                    .get(1)
+                    .and_then(Value::as_str)
+                    .and_then(|id| Uuid::parse_str(id).ok())
+                    .is_some();
+            if arr.len() != 2 || !valid_scope {
+                return Err(RelayError::UnexpectedMessage(text.to_string()));
+            }
+            Ok(RelayMessage::TasksSyncRequired)
+        }
         other => Err(RelayError::UnexpectedMessage(format!(
             "unknown message type: {other}"
         ))),
@@ -4371,6 +4311,15 @@ async fn wait_for_any_ok(
         }
     }
 }
+
+mod recovery;
+
+#[cfg(test)]
+mod recovery_tests;
+
+#[cfg(test)]
+#[path = "relay/task_sync_tests.rs"]
+mod task_sync_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4899,7 +4848,7 @@ mod tests {
             .expect("signing should succeed")
     }
 
-    async fn test_ws_pair() -> (WsStream, WebSocketStream<tokio::net::TcpStream>) {
+    pub(super) async fn test_ws_pair() -> (WsStream, WebSocketStream<tokio::net::TcpStream>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test websocket");
@@ -4916,7 +4865,7 @@ mod tests {
         (client, server.await.expect("join test websocket server"))
     }
 
-    async fn next_test_frame(
+    pub(super) async fn next_test_frame(
         server: &mut WebSocketStream<tokio::net::TcpStream>,
     ) -> serde_json::Value {
         let message = timeout(Duration::from_secs(1), server.next())
@@ -5159,14 +5108,14 @@ mod tests {
         ));
     }
 
-    fn test_channel_filter() -> ChannelFilter {
+    pub(super) fn test_channel_filter() -> ChannelFilter {
         ChannelFilter {
             kinds: Some(vec![9]),
             require_mention: false,
         }
     }
 
-    fn seed_test_subscription(state: &mut BgState, channel_id: Uuid) {
+    pub(super) fn seed_test_subscription(state: &mut BgState, channel_id: Uuid) {
         apply_command_to_state(
             state,
             RelayCommand::Subscribe {
@@ -6942,33 +6891,100 @@ mod tests {
         }
     }
 
-    /// The bug this replaced: every `OK` retired its in-flight frame, so a
-    /// rejected event was dropped from the resend queue exactly as though it
-    /// had been stored, and the rejection was only visible at `debug!`.
-    #[test]
-    fn transient_rejection_keeps_the_frame_queued_for_resend() {
-        let mut state = BgState::new();
-        let keys = Keys::generate();
-        let refused = make_observer_frame(&keys);
-        state.track_observer_in_flight(Box::new(refused.clone()));
+    /// Exercise real socket frames through the production handler and resend
+    /// writer: a transient refusal retains the signed event until a terminal OK.
+    #[tokio::test]
+    async fn transient_rejection_keeps_the_frame_queued_for_resend() {
+        for (refusal, accepted, terminal) in [
+            ("error: database unavailable", true, "stored"),
+            ("unrecognized refusal", false, "duplicate: already stored"),
+            ("", false, "invalid: bad signature"),
+        ] {
+            let (mut client, mut server) = test_ws_pair().await;
+            let mut state = BgState::new();
+            let keys = Keys::generate();
+            let refused = make_observer_frame(&keys);
+            let (event_tx, _event_rx) = mpsc::channel(1);
+            let (control_tx, _control_rx) = mpsc::channel(1);
+            assert!(
+                execute_connected_command(
+                    &mut client,
+                    &mut state,
+                    &keys.public_key().to_hex(),
+                    RelayCommand::PublishEvent {
+                        event: Box::new(refused.clone()),
+                    },
+                )
+                .await
+            );
+            let original = next_test_frame(&mut server).await;
+            assert_eq!(original, json!(["EVENT", refused]));
 
-        // What the OK handler does for a Retriable disposition: nothing.
-        assert_eq!(
-            classify_ok(false, "rate-limited: slow down"),
-            OkDisposition::Retriable
-        );
-
-        state.requeue_observer_in_flight();
-        let ids: Vec<_> = state
-            .gated_observer_pending
-            .iter()
-            .map(|event| event.id)
-            .collect();
-        assert_eq!(
-            ids,
-            [refused.id],
-            "a transiently refused event must survive to be resent"
-        );
+            for (is_terminal, accepted, message) in
+                [(false, false, refusal), (true, accepted, terminal)]
+            {
+                server
+                    .send(Message::Text(
+                        json!(["OK", refused.id.to_hex(), accepted, message])
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .expect("write actual relay OK frame");
+                let frame = timeout(Duration::from_secs(1), client.next())
+                    .await
+                    .expect("read OK deadline")
+                    .expect("socket stays open")
+                    .expect("valid WebSocket frame");
+                assert!(
+                    handle_ws_message(
+                        frame,
+                        &mut client,
+                        &event_tx,
+                        &control_tx,
+                        &mut state,
+                        &keys,
+                        "ws://localhost",
+                        &keys.public_key().to_hex(),
+                        None,
+                    )
+                    .await
+                );
+                assert!(state.check_rate_gate().is_none());
+                let retained: Vec<_> = state
+                    .observer_in_flight
+                    .iter()
+                    .map(|event| event.id)
+                    .collect();
+                if is_terminal {
+                    assert!(retained.is_empty(), "terminal OK must retire the frame");
+                    state.requeue_observer_in_flight();
+                    assert_eq!(
+                        drain_gated_observer_pending(&mut client, &mut state, 1).await,
+                        0,
+                    );
+                    assert!(timeout(Duration::from_millis(20), server.next())
+                        .await
+                        .is_err());
+                } else {
+                    assert_eq!(
+                        retained,
+                        [refused.id],
+                        "{refusal:?} must not acknowledge an uncommitted observer frame"
+                    );
+                    state.requeue_observer_in_flight();
+                    assert_eq!(
+                        drain_gated_observer_pending(&mut client, &mut state, 1).await,
+                        1,
+                    );
+                    assert_eq!(
+                        next_test_frame(&mut server).await,
+                        original,
+                        "retry must publish the same signed event bytes"
+                    );
+                }
+            }
+        }
     }
 
     /// The parked-frame queue is bounded: overflow evicts the oldest frame and

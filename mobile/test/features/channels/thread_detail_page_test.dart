@@ -29,6 +29,7 @@ import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/tasks/tasks_api.dart';
+import 'package:buzz/shared/tasks/tasks_sync.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -351,6 +352,35 @@ void main() {
     expect(_sheetTitle, findsNothing);
     expect(_chip, findsOneWidget);
   });
+
+  testWidgets(
+    'an open thread refreshes its linked task after relay invalidation',
+    (tester) async {
+      var reads = 0;
+      await tester.pumpWidget(
+        _buildThreadPage(
+          nsec: nsec,
+          taskHandler: (_) async {
+            reads++;
+            return http.Response(
+              jsonEncode({
+                'tasks': [_taskJson(title: 'Task version $reads')],
+              }),
+              200,
+            );
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Task version 1'), findsOneWidget);
+      final container = ProviderScope.containerOf(tester.element(_chip));
+      container.read(tasksSyncSignalProvider.notifier).bump();
+      await tester.pumpAndSettle();
+      expect(reads, 2);
+      expect(find.text('Task version 2'), findsOneWidget);
+      expect(find.text('Task version 1'), findsNothing);
+    },
+  );
 
   testWidgets('a thread with no task renders no chip and no tap target', (
     tester,

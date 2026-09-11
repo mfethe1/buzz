@@ -96,13 +96,23 @@ run_unit_tests() {
     cargo test -p buzz-acp -- --nocapture
 
   # buzz-db migrator/lint unit tests (no infra): guard the embedded-migrator
-  # invariant (exactly the consolidated 0001; cutover/backfill stays an operator
+  # invariant (the complete checked-in additive migration set; cutover/backfill stays an operator
   # script, not startup state) and the tenant-scoping lints. The Postgres-backed
   # buzz-db tests are #[ignore]d; nothing here (or in integration mode below,
   # which runs `cargo test -p buzz-db` without --ignored) runs them — they need a
   # separate isolated-DB gate, so --lib keeps this step infra-free.
+  run_test_step "fixed fleet adapter fault tests" \
+    python3 -W error::ResourceWarning -m unittest discover -s scripts/fleet -p 'test_*.py' -v
+
   run_test_step "buzz-db unit tests" \
     cargo test -p buzz-db --lib -- --nocapture
+
+  # Match the workflow and approval read-unit lanes in just test-unit.
+  # PostgreSQL cases remain ignored here and run in the isolated DB profile.
+  run_test_step "buzz-workflow unit tests" \
+    cargo test -p buzz-workflow --lib -- --nocapture
+  run_test_step "buzz-relay workflow read unit tests" \
+    cargo test -p buzz-relay --lib api::workflows::tests:: -- --nocapture
 
   # Multi-tenant conformance gate: independent replay checker + golden
   # fixtures (buzz-conformance). Pure in-process trace replay, no infra.
@@ -126,12 +136,16 @@ run_unit_tests() {
   run_test_step "buzz-agent unit tests" \
     cargo test -p buzz-agent --lib -- --nocapture
 
-  # buzz-acp harness unit tests: in-process, fixtures spawn a local POSIX shell
-  # as a fake agent (no relay, no database). Mirrors the nextest path in
-  # `just test-unit` — the two lists must stay in step.
-# ACP author-gate and queue tests are pure unit tests. Keep this fallback in
-  # step with `just test-unit`; ignored lifecycle tests run elsewhere.  run_test_step "buzz-acp unit tests" \
-    cargo test -p buzz-acp --lib -- --nocapture
+  # Match the task notification lane in just test-unit. PostgreSQL cases stay
+  # ignored here and run through the isolated PostgreSQL profile instead.
+  run_test_step "buzz-relay task route unit tests" \
+    cargo test -p buzz-relay --lib api::tasks::tests:: -- --nocapture
+  run_test_step "buzz-relay task notification control tests" \
+    cargo test -p buzz-relay --lib state::task_invalidation::tests:: -- --nocapture
+  run_test_step "buzz-relay protocol tests" \
+    cargo test -p buzz-relay --lib protocol::tests:: -- --nocapture
+  run_test_step "buzz-ws-client unit tests" \
+    cargo test -p buzz-ws-client --lib -- --nocapture
 
   # Mirror the three infra-free relay handler modules in `just test-unit`'s
   # nextest expression. Keep the side-effects filter pinned to `::tests::` so
@@ -144,6 +158,11 @@ run_unit_tests() {
 
   run_test_step "buzz-relay side-effects helper tests" \
     cargo test -p buzz-relay --lib handlers::side_effects::tests:: -- --nocapture
+
+  # Mirror the startup deadline regressions in the nextest lane. Their HTTP
+  # backend is bound to an ephemeral loopback port; no external services needed.
+  run_test_step "buzz-relay storage admission deadline tests" \
+    cargo test -p buzz-relay --lib api::git::store::probe_deadline::tests:: -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------

@@ -82,7 +82,10 @@ jobs:
           key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
           restore-keys: ${{ runner.os }}-hermit-cache-
       - name: Prime Flutter SDK
-        run: flutter --version
+        run: |
+          flutter --version
+          flutter --version --machine > "$RUNNER_TEMP/mobile-flutter-version.json"
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/mobile-tested-sha.txt"
       - name: Save Hermit package cache
         if: always() && steps.hermit-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -112,6 +115,17 @@ jobs:
         run: cd mobile && flutter analyze
       - name: Test
         run: cd mobile && flutter test
+      - name: Upload mobile failure evidence
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: mobile-failures-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            mobile/test/**/failures/*.png
+            ${{ runner.temp }}/mobile-flutter-version.json
+            ${{ runner.temp }}/mobile-tested-sha.txt
+          if-no-files-found: error
+          retention-days: 7
       - name: Build Android debug APK
         run: just mobile-build-android
 

@@ -1,4 +1,16 @@
+import 'dart:async';
+import '../../helpers/golden_shot.dart';
+import 'package:flutter/rendering.dart';
 import 'package:buzz/features/home/home_page.dart';
+import 'package:buzz/features/computers/computers_page.dart';
+import 'package:buzz/shared/machines/machines_api.dart';
+import 'package:buzz/features/work/work_page.dart';
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/shared/tasks/tasks_api.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -11,28 +23,194 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   Future<Widget> buildHome({
     int unreadInboxCount = 0,
+    bool includeWork = false,
+    bool includeComputers = false,
+    bool pendingChannels = false,
+    double textScale = 1,
     bool disableAnimations = false,
     Gradient? topSectionGradient,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     return ProviderScope(
-      overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        if (includeWork || includeComputers)
+          channelsProvider.overrideWith(
+            pendingChannels ? _PendingChannels.new : _WorkChannels.new,
+          ),
+        if (includeComputers)
+          machinesApiProvider.overrideWithValue(
+            MachinesApi(
+              httpClient: MockClient(
+                (_) async =>
+                    http.Response('{"machines":[],"next_cursor":null}', 200),
+              ),
+              baseUrl: 'https://computers.example',
+              nsec: nostr.Keys.generate().nsec,
+            ),
+          ),
+        if (includeWork)
+          tasksApiProvider.overrideWithValue(
+            TasksApi(
+              httpClient: MockClient(
+                (_) async =>
+                    http.Response('{"tasks":[],"next_cursor":null}', 200),
+              ),
+              baseUrl: 'https://work.example',
+              nsec: nostr.Keys.generate().nsec,
+            ),
+          ),
+      ],
       child: MaterialApp(
         theme: AppTheme.light(topSectionGradient: topSectionGradient),
         builder: (context, child) => MediaQuery(
-          data: MediaQuery.of(
-            context,
-          ).copyWith(disableAnimations: disableAnimations),
+          data: MediaQuery.of(context).copyWith(
+            disableAnimations: disableAnimations,
+            textScaler: TextScaler.linear(textScale),
+          ),
           child: child!,
         ),
         home: HomePage(
           settingsPageBuilder: _buildSettingsPage,
           hasUnreadInbox: unreadInboxCount > 0,
+          computersPageBuilder: includeComputers
+              ? (context, onBack, visible) =>
+                    ComputersPage(onBack: onBack, visible: visible)
+              : null,
+          workPageBuilder: includeWork
+              ? (context, onBack, visible) => WorkPage(
+                  onBack: onBack,
+                  visible: visible,
+                  channels: const AsyncData([]),
+                  onRefreshChannels: () async {},
+                )
+              : null,
         ),
       ),
     );
   }
+
+  testWidgets(
+    'phone shortcuts remain readable and usable while conversations load',
+    (tester) async {
+      await loadAppFonts();
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        await buildHome(
+          includeWork: true,
+          includeComputers: true,
+          pendingChannels: true,
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+      final title = tester.renderObject<RenderParagraph>(
+        find.text('Computers'),
+      );
+      expect(
+        title.getBoxesForSelection(
+          const TextSelection(baseOffset: 0, extentOffset: 9),
+        ),
+        hasLength(1),
+      );
+      expect(
+        tester
+            .getSize(find.byKey(const ValueKey('home-computers-entry')))
+            .height,
+        greaterThanOrEqualTo(48),
+      );
+      await tester.tap(find.byKey(const ValueKey('home-computers-entry')));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(ComputersPage), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpWidget(
+        await buildHome(
+          includeWork: true,
+          includeComputers: true,
+          textScale: 2,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      final work = tester.getRect(
+        find.byKey(const ValueKey('home-work-entry')),
+      );
+      final computers = tester.getRect(
+        find.byKey(const ValueKey('home-computers-entry')),
+      );
+      expect(computers.top, greaterThan(work.bottom));
+    },
+  );
+
+  testWidgets(
+    'Computers and Work preserve conversations and Home Activity Search navigation',
+    (tester) async {
+      await tester.pumpWidget(
+        await buildHome(includeWork: true, includeComputers: true),
+      );
+      await tester.pumpAndSettle();
+      final conversations = tester.element(find.byType(ChannelsPage));
+      await tester.tap(find.byKey(const ValueKey('home-computers-entry')));
+      await tester.pumpAndSettle();
+      expect(find.byType(ComputersPage), findsOneWidget);
+      expect(
+        find.textContaining('You haven’t added any computers'),
+        findsOneWidget,
+      );
+      for (final label in ['Home', 'Activity', 'Search']) {
+        expect(find.bySemanticsLabel(label), findsOneWidget);
+      }
+      await tester.tap(find.byTooltip('Back to Home'));
+      await tester.pumpAndSettle();
+      expect(tester.element(find.byType(ChannelsPage)), same(conversations));
+      await tester.tap(find.byKey(const ValueKey('home-work-entry')));
+      await tester.pumpAndSettle();
+      expect(find.byType(WorkPage), findsOneWidget);
+      await tester.tap(find.bySemanticsLabel('Home'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('home-computers-entry')),
+        findsOneWidget,
+      );
+      expect(find.text('general'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'Work opens from Home while conversation state and all three tabs remain available',
+    (tester) async {
+      await tester.pumpWidget(await buildHome(includeWork: true));
+      await tester.pumpAndSettle();
+      final conversations = tester.element(find.byType(ChannelsPage));
+      expect(find.text('general'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('home-work-entry')));
+      await tester.pumpAndSettle();
+      expect(find.byType(WorkPage), findsOneWidget);
+      expect(find.text('No tasks yet.'), findsOneWidget);
+      for (final label in ['Home', 'Activity', 'Search']) {
+        expect(find.bySemanticsLabel(label), findsOneWidget);
+      }
+      expect(
+        find.byTooltip('Create or start conversation').hitTestable(),
+        findsNothing,
+      );
+      await tester.tap(find.byTooltip('Back to Home'));
+      await tester.pumpAndSettle();
+      expect(find.text('general'), findsOneWidget);
+      expect(tester.element(find.byType(ChannelsPage)), same(conversations));
+      await tester.tap(find.byKey(const ValueKey('home-work-entry')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.bySemanticsLabel('Home'));
+      await tester.pumpAndSettle();
+      expect(find.text('general'), findsOneWidget);
+      expect(find.byType(WorkPage), findsNothing);
+    },
+  );
 
   testWidgets('shows icon-only navigation and an aligned quick action', (
     tester,
@@ -436,3 +614,25 @@ void main() {
 }
 
 Widget _buildSettingsPage(BuildContext context) => const SizedBox.shrink();
+
+class _WorkChannels extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() async => [
+    Channel(
+      id: 'room',
+      name: 'general',
+      description: '',
+      createdBy: 'owner',
+      createdAt: DateTime.utc(2026),
+      memberCount: 1,
+      channelType: 'stream',
+      visibility: 'private',
+      isMember: true,
+    ),
+  ];
+}
+
+class _PendingChannels extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() => Completer<List<Channel>>().future;
+}

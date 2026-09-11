@@ -2,6 +2,8 @@
 
 /// Explicit deployment-global admin report reads.
 pub mod admin_moderation;
+/// Per-machine capability grants for agents (default deny).
+pub mod agent_capability_grants;
 /// Community-scoped authentication allowlist persistence.
 pub mod allowlist;
 /// API token storage and lookup.
@@ -22,6 +24,8 @@ pub mod dm;
 pub mod event;
 /// Home feed queries.
 pub mod feed;
+/// Atomic fixed fleet attempt admission and signed receipt projection.
+pub mod fleet_attempt;
 /// Git repository name registry (NIP-34 kind:30617).
 pub mod git_repo;
 /// Community moderation: reports, bans/timeouts, audit actions.
@@ -54,3 +58,6 @@ pub mod usage;
 pub mod user;
 /// Workflow, run, and approval persistence.
 pub mod workflow;
+
+/// Private machine enrollment and observations.
+pub mod machine;

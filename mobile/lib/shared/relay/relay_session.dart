@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../auth/auth.dart';
+import '../tasks/tasks_sync.dart';
 import 'nostr_models.dart';
 import 'relay_client.dart';
 import 'relay_closed_policy.dart';
@@ -128,6 +129,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   bool _socketConnected = false;
   bool _closedRetryReplayScheduled = false;
   Future<void>? _syncReplayScheduled;
+  VoidCallback? _invalidateTasks;
 
   @override
   SessionState build() {
@@ -137,6 +139,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     // Reset disposed flag — build() may re-run on the same Notifier instance
     // after a provider dependency changes (e.g. auth completing).
     _disposed = false;
+    _invalidateTasks = () => ref.read(tasksSyncSignalProvider.notifier).bump();
 
     ref.onDispose(_dispose);
 
@@ -505,6 +508,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _hasConnectedOnce = true;
     _reconnectDelayMs = _baseReconnectDelayMs;
     state = const SessionState(status: SessionStatus.connected);
+    _invalidateTasks?.call();
     await _replayLiveSubscriptions(generation);
   }
 
@@ -631,6 +635,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       debugPrint('relay sync gap ($reason): replaying live subscriptions');
     }
     if (_syncReplayScheduled != null) return; // One replay per burst.
+    _invalidateTasks?.call();
     _syncReplayScheduled = _replayLiveSubscriptions(_connectionGeneration)
         .then((_) {
           _syncReplayScheduled = null;
@@ -665,6 +670,14 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         _handleOk(data);
       case 'BUZZ_SYNC_REQUIRED':
         _handleSyncRequired(data);
+      case 'BUZZ_TASKS_SYNC_REQUIRED':
+        if (_socketConnected &&
+            data.length == 2 &&
+            (data[1] == null ||
+                (data[1] is String &&
+                    Uuid.isValidUUID(fromString: data[1] as String)))) {
+          _invalidateTasks?.call();
+        }
     }
   }
 
@@ -990,6 +1003,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _dispose() {
     _disposed = true;
+    _invalidateTasks = null;
     _beforePauseCallbacks.clear();
     _connectionGeneration++;
     _reconnectTimer?.cancel();

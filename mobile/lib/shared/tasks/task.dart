@@ -102,6 +102,7 @@ class Task {
     required this.priority,
     required this.createdAt,
     required this.updatedAt,
+    this.revision = 0,
     this.channelId,
     this.createdBy,
     this.assignee,
@@ -126,6 +127,7 @@ class Task {
       title: title,
       status: TaskStatus.fromWire(_stringOrNull(json['status'])),
       priority: json['priority'] is int ? json['priority'] as int : 0,
+      revision: json['revision'] is int ? json['revision'] as int : 0,
       createdAt: _dateFromSeconds(json['created_at']) ?? DateTime.now().toUtc(),
       updatedAt: _dateFromSeconds(json['updated_at']) ?? DateTime.now().toUtc(),
       channelId: _stringOrNull(json['channel_id']),
@@ -152,6 +154,9 @@ class Task {
 
   /// Higher sorts first in the relay's list order.
   final int priority;
+
+  /// Monotonic version used to reject writes based on stale task details.
+  final int revision;
 
   /// When the task was opened.
   final DateTime createdAt;
@@ -256,6 +261,20 @@ class TaskEvent {
 
   /// Whether this entry is the task's persisted summary.
   bool get isSummary => action == TaskEventAction.summaryPersisted.wireValue;
+}
+
+/// A bounded task list page and the relay's opaque continuation cursor.
+@immutable
+class TaskPage {
+  /// Keeps the returned order and cursor together so filters cannot mix pages.
+  TaskPage({required List<Task> tasks, this.nextCursor})
+    : tasks = List.unmodifiable(tasks);
+
+  /// Tasks in the relay's newest-modified-first order.
+  final List<Task> tasks;
+
+  /// Pass unchanged as `before` to retrieve the next page, or null at the end.
+  final String? nextCursor;
 }
 
 /// A task plus its full event history, as returned by `GET /api/tasks/{id}`.

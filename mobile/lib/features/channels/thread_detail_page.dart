@@ -18,8 +18,9 @@ import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
-import '../../shared/tasks/task.dart';
 import '../../shared/tasks/tasks_api.dart';
+import '../../shared/tasks/task_query.dart';
+import '../../shared/tasks/tasks_sync.dart';
 import '../../shared/tasks/thread_summary.dart';
 import '../../shared/tasks/thread_summary_sheet.dart';
 import 'thread_detail_page/task_detail_sheet.dart';
@@ -717,33 +718,17 @@ class ThreadDetailPage extends HookConsumerWidget {
     // itself a root message its rootId is null, so fall back to its own id.
     final effectiveRootId = threadHead.rootId ?? threadHead.id;
 
-    // HW-004: reverse-lookup the task this thread already produced.
-    //
-    // Bumped after the summary sheet closes so a task created without leaving
-    // the thread shows up in place. It is a tick rather than a timer on
-    // purpose: one fetch on open plus one after a create, no polling and no
-    // live subscription.
+    // Refresh the linked task after local creation, relay changes or reconnect.
     final taskChipRefreshTick = useState(0);
-    final linkedTaskSnapshot = useFuture(
-      useMemoized(() async {
-        try {
-          return await ref
-              .read(tasksApiProvider)
-              .listTasks(channelId: channelId, sourceRef: threadHead.id);
-        } catch (_) {
-          // Degrade to NO chip. A failed lookup must never render a positive
-          // "no task" claim, and this is a passive signal, so it earns no
-          // error toast either.
-          return const <Task>[];
-        }
-        // The same `threadHeadId ?? rootId` expression the composer writes as
-        // `source_ref` and the summarize button already passes below, so the
-        // match is exact by construction rather than heuristic.
-      }, [channelId, threadHead.id, taskChipRefreshTick.value]),
+    final tasksApi = ref.watch(tasksApiProvider);
+    final linkedTaskQuery = useTaskQuery(
+      () => tasksApi.listTasks(channelId: channelId, sourceRef: threadHead.id),
+      scope: [tasksApi, channelId, threadHead.id],
+      signal: (ref.watch(tasksSyncSignalProvider), taskChipRefreshTick.value),
     );
-    // An inaccessible channel returns [] from the relay's accessible-channel
-    // post-filter, which renders identically to "no task" — the chip must not
-    // become an existence oracle.
+    final linkedTaskSnapshot = linkedTaskQuery.value;
+    // Failed or inaccessible lookups yield no chip. Only visible tasks returned
+    // by the relay render here; a failed lookup never asserts that no task exists.
     final linkedTasks = [...?linkedTaskSnapshot.data]
       ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     final linkedTask = linkedTasks.firstOrNull;

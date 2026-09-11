@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:app_badge_plus/app_badge_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
@@ -15,6 +14,10 @@ import 'features/channels/channel_management_provider.dart';
 import 'features/channels/channels_provider.dart';
 import 'features/channels/unread_badge/unread_badge_provider.dart';
 import 'features/home/home_page.dart';
+import 'features/work/work_page.dart';
+import 'features/computers/computers_page.dart';
+import 'shared/tasks/task_channel.dart';
+import 'shared/platform/app_icon_badge.dart';
 import 'features/invites/invite_create_page.dart';
 import 'features/invites/invite_join_provider.dart';
 import 'features/pairing/pairing_page.dart';
@@ -342,11 +345,11 @@ class App extends HookConsumerWidget {
 
     void applyBadge(UnreadBadgeState state) {
       if (state.highPriorityCount > 0) {
-        AppBadgePlus.updateBadge(state.highPriorityCount);
+        updateAppIconBadge(state.highPriorityCount);
       } else if (state.generalUnreadCount > 0) {
-        AppBadgePlus.updateBadge(1);
+        updateAppIconBadge(1);
       } else {
-        AppBadgePlus.updateBadge(0);
+        updateAppIconBadge(0);
       }
     }
 
@@ -374,9 +377,11 @@ class App extends HookConsumerWidget {
       // Above the navigator, so a burst keeps playing over a pushed thread page
       // or a modal sheet — the same reason desktop pins its canvas to the
       // viewport rather than to the message row.
-      builder: (context, child) => MobileHuddleShell(
-        navigatorKey: _mobileRootNavigatorKey,
-        child: EmojiBurstOverlay(child: child ?? const SizedBox.shrink()),
+      builder: (context, child) => AppMarkdownTheme(
+        child: MobileHuddleShell(
+          navigatorKey: _mobileRootNavigatorKey,
+          child: EmojiBurstOverlay(child: child ?? const SizedBox.shrink()),
+        ),
       ),
       home: authState.when(
         loading: () => const _SplashScreen(),
@@ -386,6 +391,10 @@ class App extends HookConsumerWidget {
             child: HomePage(
               settingsPageBuilder: _buildSettingsPage,
               hasUnreadInbox: hasUnreadInbox,
+              computersPageBuilder: (context, onBack, visible) =>
+                  ComputersPage(onBack: onBack, visible: visible),
+              workPageBuilder: (context, onBack, visible) =>
+                  _WorkPageContent(onBack: onBack, visible: visible),
             ),
           ),
           _ => const DeepLinkDispatcher(
@@ -396,6 +405,27 @@ class App extends HookConsumerWidget {
       ),
     );
   }
+}
+
+class _WorkPageContent extends ConsumerWidget {
+  const _WorkPageContent({required this.onBack, required this.visible});
+  final VoidCallback onBack;
+  final bool visible;
+  @override
+  Widget build(BuildContext context, WidgetRef ref) => WorkPage(
+    onBack: onBack,
+    visible: visible,
+    channels: ref
+        .watch(channelsProvider)
+        .whenData(
+          (channels) => [
+            for (final channel in channels)
+              if (channel.isMember && !channel.isArchived)
+                TaskChannel(id: channel.id, name: channel.name),
+          ],
+        ),
+    onRefreshChannels: () => ref.read(channelsProvider.notifier).refresh(),
+  );
 }
 
 Widget _buildSettingsPage(BuildContext context) => const _SettingsPageContent();

@@ -103,6 +103,48 @@ void main() {
   });
 
   group('listTasks', () {
+    test(
+      'preserves the page cursor and signs it on the next request',
+      () async {
+        final requests = <http.Request>[];
+        final api = apiWith((request) async {
+          requests.add(request);
+          return http.Response(
+            jsonEncode({
+              'tasks': [
+                _taskJson(id: requests.length == 1 ? 'newer' : 'older'),
+              ],
+              'next_cursor': requests.length == 1 ? 'opaque_cursor-42' : null,
+            }),
+            200,
+          );
+        });
+
+        final first = await api.listTaskPage(
+          status: TaskStatus.blocked,
+          limit: 20,
+        );
+        expect(first.tasks.single.id, 'newer');
+        expect(first.nextCursor, 'opaque_cursor-42');
+        final second = await api.listTaskPage(
+          status: TaskStatus.blocked,
+          limit: 20,
+          before: first.nextCursor,
+        );
+        expect(second.tasks.single.id, 'older');
+        expect(second.nextCursor, isNull);
+        expect(requests.last.url.queryParameters, {
+          'status': 'blocked',
+          'limit': '20',
+          'before': 'opaque_cursor-42',
+        });
+        expect(
+          _tag(_nip98Event(requests.last), 'u'),
+          requests.last.url.toString(),
+        );
+      },
+    );
+
     test('signs the URL including its query string', () async {
       late http.Request captured;
       final api = apiWith((request) async {
@@ -290,6 +332,33 @@ void main() {
   });
 
   group('updateTask', () {
+    test('signs the exact expected revision with the changed status', () async {
+      late http.Request captured;
+      final api = apiWith((request) async {
+        captured = request;
+        return http.Response(jsonEncode(_taskJson()), 200);
+      });
+      await api.updateTask(
+        'task-1',
+        status: TaskStatus.done,
+        expectedRevision: 17,
+      );
+      expect(jsonDecode(captured.body), {
+        'status': 'done',
+        'expected_revision': 17,
+      });
+      final encoded = captured.headers['Authorization']!.substring(
+        'Nostr '.length,
+      );
+      final event =
+          jsonDecode(
+                utf8.decode(base64Url.decode(base64Url.normalize(encoded))),
+              )
+              as Map<String, dynamic>;
+      final hash = sha256.convert(utf8.encode(captured.body)).toString();
+      expect(event['tags'], anyElement(equals(['payload', hash])));
+    });
+
     test('sends only the fields being changed', () async {
       late http.Request captured;
       final api = apiWith((request) async {

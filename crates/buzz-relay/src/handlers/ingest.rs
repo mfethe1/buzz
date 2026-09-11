@@ -437,6 +437,7 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 /// Returns `Err` for unknown kinds — the relay rejects them.
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
+        buzz_core::kind::KIND_MACHINE_ENROLLMENT | buzz_core::kind::KIND_MACHINE_OBSERVATION => Ok(Scope::UsersWrite),
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
@@ -2276,10 +2277,22 @@ async fn ingest_event_inner(
         .tags
         .iter()
         .any(|tag| tag.as_slice().first().map(String::as_str) == Some("protocol"));
-    if is_job_kind && has_protocol_tag {
-        buzz_core::cml_event::validate_cml_event_after_signature(&event)
-            .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
-    }
+    let is_fleet_event = if is_job_kind && has_protocol_tag {
+        if buzz_core::fleet::is_receipt(&event) {
+            buzz_core::fleet::FleetReceipt::from_event_after_signature(&event)
+                .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+            true
+        } else {
+            // Other protocol-tagged jobs retain the strict CML validation path.
+            let cml = buzz_core::cml_event::validate_cml_event_after_signature(&event)
+                .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+            buzz_core::fleet::FleetScope::from_task(&cml.task)
+                .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?
+                .is_some()
+        }
+    } else {
+        false
+    };
 
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
     if event.pubkey != *auth.pubkey() && !is_gift_wrap {
@@ -2428,6 +2441,28 @@ async fn ingest_event_inner(
                 )));
             }
         }
+    }
+
+    if matches!(
+        kind_u32,
+        buzz_core::kind::KIND_MACHINE_ENROLLMENT | buzz_core::kind::KIND_MACHINE_OBSERVATION
+    ) {
+        if auth.channel_ids().is_some() {
+            return Err(IngestError::AuthFailed(
+                "restricted: machine commands require a global token".into(),
+            ));
+        }
+        let inserted = super::machine::handle(state, tenant, &event).await?;
+        emit_product_feedback_success(tracer, tenant, &event, &auth);
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: if inserted {
+                String::new()
+            } else {
+                "duplicate: machine command already accepted".into()
+            },
+        });
     }
 
     let mut channel_id = if kind_u32 == KIND_REACTION {
@@ -3176,7 +3211,27 @@ async fn ingest_event_inner(
         });
     }
 
-    let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
+    let (stored_event, was_inserted) = if is_fleet_event {
+        // All normal ingress checks above still apply. The signed event,
+        // thread metadata and attempt projection share one commit; dispatch
+        // below occurs only after it succeeds.
+        state
+            .db
+            .insert_fleet_event(
+                tenant.community(),
+                &event,
+                channel_id,
+                thread_meta.as_ref().map(|metadata| metadata.as_params()),
+            )
+            .await
+            .map_err(|error| match error {
+                buzz_db::DbError::AccessDenied(message)
+                | buzz_db::DbError::InvalidData(message) => {
+                    IngestError::Rejected(format!("restricted: {message}"))
+                }
+                other => IngestError::Internal(format!("error: {other}")),
+            })?
+    } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
         state

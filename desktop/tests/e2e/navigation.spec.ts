@@ -579,7 +579,7 @@ test("composer Buzz chip labels wrap without orphaning their icons", async ({
   await expect(sentChip).toBeVisible();
   await sentChip.evaluate((element) => {
     const container = element.parentElement;
-    if (container) container.style.width = "220px";
+    if (container) container.style.width = "140px";
   });
   const fragmentRects = await sentChip.evaluate((element) =>
     Array.from(element.getClientRects(), (rect) => ({

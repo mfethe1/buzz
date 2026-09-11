@@ -49,13 +49,15 @@ pub(crate) use runtime::{
     insert_mentions_in_transaction, observability, route_proof, ReadSessionInner, RouteDecision,
     RoutePredicate,
 };
+pub use store::machine;
 pub use store::{
-    admin_moderation, allowlist, api_token, archived_identities, channel, channel_members,
-    community, deletion, dm, event, feed, git_repo, moderation, partition, product_feedback, push,
-    reaction, relay_admin_actions, relay_invite, relay_members, relay_operators, reminder,
-    replaceable, thread, usage, user, workflow,
+    admin_moderation, agent_capability_grants, allowlist, api_token, archived_identities, channel,
+    channel_members, community, deletion, dm, event, feed, fleet_attempt, git_repo, moderation,
+    partition, product_feedback, push, reaction, relay_admin_actions, relay_invite, relay_members,
+    relay_operators, reminder, replaceable, thread, usage, user, workflow,
 };
 
+pub use agent_capability_grants::{CapabilityGrant, CAP_CROSS_SSH, TARGET_ANY};
 pub use allowlist::AllowlistEntry;
 pub use api_token::{ApiTokenRecord, TokenSummary};
 pub use community::{

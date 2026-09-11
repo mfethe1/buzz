@@ -240,6 +240,9 @@ enum Cmd {
     /// Durable community work items for humans and agents
     #[command(subcommand)]
     Tasks(TasksCmd),
+    /// Private computer enrollment and coordinator observations
+    #[command(subcommand)]
+    Machines(MachinesCmd),
     /// Validate and canonicalize local Buzz CML task snapshots
     #[command(subcommand)]
     Cml(CmlCmd),
@@ -1989,6 +1992,18 @@ pub enum CmlEventsCmd {
         #[arg(long)]
         prev: Option<String>,
     },
+    /// Sign and publish a typed terminal or unknown fleet receipt
+    Receipt {
+        /// Channel UUID hosting the task
+        #[arg(long)]
+        channel: String,
+        /// Path to the typed receipt JSON
+        #[arg(long)]
+        receipt_file: String,
+        /// Frozen publication timestamp; completion time remains in the receipt
+        #[arg(long)]
+        created_at: u64,
+    },
     /// Fetch a task's CML events and print the observation-time workstream card
     Card {
         /// Channel UUID hosting the task
@@ -2018,6 +2033,43 @@ pub enum PackCmd {
     },
 }
 
+/// Private machine commands; writes consume the versioned typed JSON document.
+#[derive(Subcommand)]
+pub enum MachinesCmd {
+    /// Create a short-lived NIP-OA enrollment proof as the owner (local only)
+    Authorize {
+        #[arg(long)]
+        coordinator: String,
+    },
+    /// Sign exact enrollment consent as the coordinator (local only; never publishes)
+    Consent {
+        #[arg(long)]
+        file: String,
+    },
+    /// List this signing owner's registered machines
+    List {
+        #[arg(long, value_parser=commands::machines::parse_id)]
+        after: Option<uuid::Uuid>,
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+    /// Read one owned machine and its signed enrollment/current observation
+    Get {
+        #[arg(value_parser=commands::machines::parse_id)]
+        id: uuid::Uuid,
+    },
+    /// Sign enrollment as the owner; JSON requires owner proof and coordinator-signed consent
+    Enroll {
+        #[arg(long)]
+        file: String,
+    },
+    /// Sign a fresh observation as the enrolled coordinator
+    Observe {
+        #[arg(long)]
+        file: String,
+    },
+}
+
 /// Durable task commands share the relay's host-derived community boundary.
 #[derive(Subcommand)]
 pub enum TasksCmd {
@@ -2038,6 +2090,14 @@ pub enum TasksCmd {
     },
     /// Get one task with its append-only event history
     Get { task: String },
+    /// Recheck a particular newly accepted fleet start on the relay's primary
+    Admission {
+        task: String,
+        #[arg(long)]
+        attempt: String,
+        #[arg(long)]
+        start_event: String,
+    },
     /// Create a task
     Create {
         #[arg(long)]
@@ -2081,6 +2141,9 @@ pub enum TasksCmd {
         due_at: Option<String>,
         #[arg(long, default_value_t = false)]
         clear_due: bool,
+        /// HW-017: reject the PATCH with 409 if the task's revision does not match
+        #[arg(long)]
+        expected_revision: Option<i32>,
     },
     /// Append a progress/comment event; use '-' to read stdin
     Comment { task: String, body: String },
@@ -2300,6 +2363,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Tasks(sub) => commands::tasks::dispatch(sub, &client, &cli.format).await,
+        Cmd::Machines(sub) => commands::machines::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Cml(sub) => match sub {
             CmlCmd::Validate { path } => commands::cml::cmd_validate(path.as_str()),
@@ -2325,6 +2389,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         prev.as_deref(),
                     )
                     .await
+                }
+                CmlEventsCmd::Receipt {
+                    channel,
+                    receipt_file,
+                    created_at,
+                } => {
+                    commands::cml::cmd_events_receipt(&client, &channel, &receipt_file, created_at)
+                        .await
                 }
                 CmlEventsCmd::Card {
                     channel,
@@ -2496,6 +2568,7 @@ mod tests {
             "feed",
             "gifs",
             "issues",
+            "machines",
             "media",
             "mem",
             "messages",
@@ -2722,7 +2795,7 @@ mod tests {
             ("reactions", 3),
             ("repos", 5),
             ("social", 7),
-            ("tasks", 6),
+            ("tasks", 7),
             ("upload", 1),
             ("users", 5),
             ("workflows", 8),
