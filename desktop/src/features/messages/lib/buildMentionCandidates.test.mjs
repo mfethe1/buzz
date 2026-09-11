@@ -38,6 +38,10 @@ function input(overrides = {}) {
 test("a roster entry and its relay agent record coalesce into one candidate", () => {
   const candidates = buildMentionCandidates(
     input({
+      // REG-27: liveness now comes ONLY from the injected set, so the caller
+      // must supply it. Previously the relay row re-derived it from the
+      // unexpiring directory status.
+      activeAgentPubkeys: new Set([AGENT_PUBKEY]),
       members: [
         { pubkey: AGENT_PUBKEY, displayName: null, isAgent: true, role: "bot" },
       ],
@@ -168,3 +172,51 @@ for (const locallyManaged of [true, false]) {
     assert.equal(Boolean(candidate.isManagedAgent), locallyManaged);
   });
 }
+
+// REG-27: the relay-agent row must honour the injected set, not the directory.
+test("relay-agent row honours activeAgentPubkeys, not the directory status", () => {
+  const relayAgents = [
+    {
+      pubkey: AGENT_PUBKEY,
+      name: "Scout",
+      ownerPubkey: null,
+      status: "online",
+    },
+  ];
+  const base = {
+    mentionableAgentPubkeys: new Set([AGENT_PUBKEY]),
+    relayAgents,
+  };
+
+  // Directory says online but presence demoted it => set-absent => INACTIVE.
+  const [ghost] = buildMentionCandidates(input(base));
+  assert.equal(ghost.pubkey, AGENT_PUBKEY);
+  assert.equal(ghost.isActiveAgent, false);
+
+  // Directory says offline but presence says online => set-present => ACTIVE.
+  const [live] = buildMentionCandidates(
+    input({
+      ...base,
+      activeAgentPubkeys: new Set([AGENT_PUBKEY]),
+      relayAgents: [{ ...relayAgents[0], status: "offline" }],
+    }),
+  );
+  assert.equal(live.isActiveAgent, true);
+});
+
+test("E9 managed-agent classification is unchanged by the relay presence join", () => {
+  for (const [status, expected] of [
+    ["running", true],
+    ["deployed", true],
+    ["stopped", false],
+  ]) {
+    const [candidate] = buildMentionCandidates(
+      input({
+        managedAgentNamesByPubkey: new Map([[AGENT_PUBKEY, "Scout"]]),
+        managedAgents: [{ pubkey: AGENT_PUBKEY, name: "Scout", status }],
+        mentionableAgentPubkeys: new Set([AGENT_PUBKEY]),
+      }),
+    );
+    assert.equal(candidate.isActiveAgent, expected, status);
+  }
+});
