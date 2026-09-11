@@ -83,7 +83,12 @@ function buildPersonaCards(
   const liveGroups = displayGroups.filter(
     (group) => pickProfileAgent(group.agents, isArchived) !== undefined,
   );
-  if (liveGroups.length === 0) return [personaOnlyCard(agents)];
+  // A split card only earns its own identity when a *rival* live name exists.
+  // With one live name left (or none), the persona's name once again stands for
+  // every surviving instance, so the persona keeps its canonical card — and its
+  // canonical key. Splitting a lone survivor would rename the persona's only
+  // card to `<persona id>::<name>` and strand every deep link to the persona.
+  if (liveGroups.length <= 1) return [personaOnlyCard(agents)];
 
   const ownerIndex = pickPersonaActionsIndex(persona, liveGroups);
   return liveGroups.map((group, index) => ({
