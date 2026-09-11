@@ -4846,6 +4846,40 @@ mod tests {
         (client, server.await.expect("join test websocket server"))
     }
 
+    /// Same pair, but with both socket buffers pinned small.
+    ///
+    /// "The peer never reads, so the writer blocks" is only true where the
+    /// kernel refuses to absorb the payload. Windows loopback auto-tunes to
+    /// tens of MB and swallows a 16MB frame outright, so a write that must
+    /// backpressure returns immediately there. Pinning SO_SNDBUF/SO_RCVBUF
+    /// makes the stall a property of the test, not of the host's TCP stack.
+    pub(super) async fn stalled_test_ws_pair() -> (WsStream, WebSocketStream<tokio::net::TcpStream>)
+    {
+        const BUF: usize = 4 * 1024;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test websocket");
+        let address = listener.local_addr().expect("read test address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept test websocket");
+            let _ = socket2::SockRef::from(&stream).set_recv_buffer_size(BUF);
+            tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("complete server websocket handshake")
+        });
+        let stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect test websocket");
+        let _ = socket2::SockRef::from(&stream).set_send_buffer_size(BUF);
+        let (client, _) = tokio_tungstenite::client_async(
+            format!("ws://{address}"),
+            MaybeTlsStream::Plain(stream),
+        )
+        .await
+        .expect("complete client websocket handshake");
+        (client, server.await.expect("join test websocket server"))
+    }
+
     pub(super) async fn next_test_frame(
         server: &mut WebSocketStream<tokio::net::TcpStream>,
     ) -> serde_json::Value {

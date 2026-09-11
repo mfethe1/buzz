@@ -1,5 +1,8 @@
 //! Bounded synthetic WebSocket fixtures; no relay service, proxy or real agent.
-use super::tests::{next_test_frame, seed_test_subscription, test_channel_filter, test_ws_pair};
+use super::tests::{
+    next_test_frame, seed_test_subscription, stalled_test_ws_pair, test_channel_filter,
+    test_ws_pair,
+};
 use super::*;
 
 fn fixture_event(channel: Uuid, n: u64, kind: u16) -> Event {
@@ -342,12 +345,13 @@ async fn advance_clock(duration: Duration) {
 
 #[tokio::test]
 async fn blocked_recovery_write_is_bounded_and_retains_loss() {
-    let (mut client, _stalled_server) = test_ws_pair().await;
+    let (mut client, _stalled_server) = stalled_test_ws_pair().await;
     let mut state = BgState::new();
     let ch = Uuid::new_v4();
     seed_test_subscription(&mut state, ch);
-    // Bounded 16MB JSON request exceeds loopback TCP buffering. The server does
-    // not read it. This tests the real production write/timeout, not a mock sink.
+    // Bounded 16MB JSON request against pinned 4KB socket buffers. The server
+    // never reads it, so the write must block on real backpressure — this
+    // tests the production write/timeout path, not a mock sink.
     state.active_filters.get_mut(&ch).unwrap().kinds = Some(vec![9; 8_000_000]);
     state.channel_dropped_since.insert(ch, 700);
     let (tx, _rx) = mpsc::channel(1);
