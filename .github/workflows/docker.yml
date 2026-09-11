@@ -555,7 +555,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/buzz-push-gateway,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/buzz-push-gateway-buildcache:${{ matrix.arch }}
-          cache-to: ${{ (github.event_name != 'pull_request' || github.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref=ghcr.io/{0}/buzz-push-gateway-buildcache:{1},mode=max,compression=zstd', github.repository_owner, matrix.arch) || '' }}
+          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref=ghcr.io/{0}/buzz-push-gateway-buildcache:{1},mode=max,compression=zstd', github.repository_owner, matrix.arch) || '' }}
       - name: Export digest
         if: github.event_name != 'pull_request'
         env:
