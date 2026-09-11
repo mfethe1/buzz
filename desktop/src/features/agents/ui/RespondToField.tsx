@@ -5,11 +5,7 @@ import {
   parsePubkeyInput,
 } from "@/features/agents/lib/respondToAllowlist";
 import { parsePubkeyInput as parseCanonicalPubkey } from "@/shared/lib/nostrUtils";
-import {
-  normalizePubkey,
-  truncateNpub,
-  truncatePubkey,
-} from "@/shared/lib/pubkey";
+import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
