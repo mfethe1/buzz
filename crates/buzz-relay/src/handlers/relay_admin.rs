@@ -10,7 +10,7 @@
 //! | 9030 | Add member      | admin or owner       |
 //! | 9031 | Remove member   | admin or owner       |
 //! | 9032 | Change role     | owner only           |
-//! | 9033 | Set workspace profile (icon) | admin or owner; on an open relay whose community has no admin/owner row at all, any authenticated sender (see [`may_set_workspace_profile`]) |
+//! | 9033 | Set workspace profile (icon/brand color) | admin or owner; on an open relay whose community has no admin/owner row at all, any authenticated sender (see [`may_set_workspace_profile`]) |
 
 use std::sync::Arc;
 
@@ -90,6 +90,37 @@ fn validate_workspace_icon(icon: &str) -> Result<(), String> {
             "icon URL too long: {} bytes (max {MAX_WORKSPACE_ICON_URL_LEN})",
             icon.len()
         ));
+    }
+    Ok(())
+}
+
+/// Maximum accepted brand color length (`#rrggbb` is exactly 7 bytes; the cap
+/// is a defensive bound, the format check below is the real gate).
+const MAX_BRAND_COLOR_LEN: usize = 7;
+
+/// Validate a brand color: empty (clear) or a `#rrggbb` hex triplet.
+///
+/// Deliberately the strictest possible surface: no named colors, no `rgb()`,
+/// no alpha, no 3-digit shorthand. The value is served in an unauthenticated
+/// NIP-11 document and consumed as a CSS custom property, so anything that is
+/// not provably a color literal must be refused at the write path rather than
+/// sanitized at every read site.
+fn validate_brand_color(color: &str) -> Result<(), String> {
+    if color.is_empty() {
+        return Ok(());
+    }
+    if color.len() != MAX_BRAND_COLOR_LEN {
+        return Err(format!(
+            "brand color must be exactly {MAX_BRAND_COLOR_LEN} characters (#rrggbb), got {}",
+            color.len()
+        ));
+    }
+    let mut chars = color.chars();
+    if chars.next() != Some('#') {
+        return Err("brand color must start with '#'".to_string());
+    }
+    if !chars.all(|c| c.is_ascii_hexdigit()) {
+        return Err("brand color must be a #rrggbb hex triplet".to_string());
     }
     Ok(())
 }
@@ -291,6 +322,12 @@ async fn execute_relay_admin_command(
         let icon = extract_tag_value(event, "icon").unwrap_or_default();
         validate_workspace_icon(&icon)?;
 
+        // Empty or missing brand_color tag clears the brand color. Validated
+        // before EITHER write so a malformed color cannot land a partial
+        // profile update (icon stored, color rejected).
+        let brand_color = extract_tag_value(event, "brand_color").unwrap_or_default();
+        validate_brand_color(&brand_color)?;
+
         state
             .db
             .set_community_icon(
@@ -300,7 +337,21 @@ async fn execute_relay_admin_command(
             .await
             .map_err(|e| format!("failed to store workspace icon: {e}"))?;
 
-        info!(sender = %sender_hex, icon_len = icon.len(), "workspace profile updated");
+        state
+            .db
+            .set_community_brand_color(
+                tenant.community(),
+                (!brand_color.is_empty()).then_some(brand_color.as_str()),
+            )
+            .await
+            .map_err(|e| format!("failed to store brand color: {e}"))?;
+
+        info!(
+            sender = %sender_hex,
+            icon_len = icon.len(),
+            brand_color_set = !brand_color.is_empty(),
+            "workspace profile updated"
+        );
         return Ok(());
     }
 
@@ -683,6 +734,35 @@ mod postgres_tests {
         assert!(validate_workspace_icon(&long_url).is_err());
         let long_data = format!("data:image/png;base64,{}", "A".repeat(98_304));
         assert!(validate_workspace_icon(&long_data).is_err());
+    }
+
+    #[test]
+    fn brand_color_empty_ok() {
+        assert!(validate_brand_color("").is_ok());
+    }
+
+    #[test]
+    fn brand_color_hex_triplet_ok() {
+        assert!(validate_brand_color("#ff8800").is_ok());
+        assert!(validate_brand_color("#FFFFFF").is_ok());
+        assert!(validate_brand_color("#000000").is_ok());
+    }
+
+    #[test]
+    fn brand_color_rejects_non_hex_triplets() {
+        for bad in [
+            "#fff",
+            "#ff8800ff",
+            "red",
+            "rgb(255,136,0)",
+            "ff8800",
+            "#gggggg",
+            "#ff 880",
+            " #ff8800",
+            "#ff8800 ",
+        ] {
+            assert!(validate_brand_color(bad).is_err(), "must reject {bad:?}");
+        }
     }
 
     // ─── Call-site integration: the 9033 gate wired to real config + DB ────
