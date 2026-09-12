@@ -704,9 +704,11 @@ mod postgres_tests {
 
         // upstream carries 44 (0032-0034 and 0040 adopted from our PRs);
         // fork adds 0046_task_system (PR #6425 pending upstream) and
+        // 0047_agent_machine_homes (AGENT-HOMES-001 PR-3), and
         // 0048_community_brand_color (REG-10; renumbered from 0037, which is
         // upstream-owned relay_admin_action_lease).
-        assert_eq!(migrations.len(), 46);
+        assert_eq!(migrations.len(), 47);
+        assert_eq!(migrations[46].version, 48);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -2838,7 +2840,13 @@ mod postgres_tests {
             "all NIP-FI tables must be absent after migration 0044: {present:?}"
         );
 
-        // The deletion catalog must validate with ledger relations gone.
+        // The catalog describes the fully-migrated schema, so bring the DB up to
+        // head before validating: ledger relations stay gone, and tables added
+        // after 0044 are present.
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("remaining migrations apply after ledger removal");
         crate::deletion::DeletionStore::new(pool.clone())
             .validate_catalog()
             .await

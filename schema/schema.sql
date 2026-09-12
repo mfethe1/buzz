@@ -184,8 +184,29 @@ CREATE TABLE users (
     metadata_event_id   BYTEA,
     agent_owner_pubkey  BYTEA,
     channel_add_policy  channel_add_policy NOT NULL DEFAULT 'anyone',
+    -- Machine home (0047): the machine an agent actually runs on. Columns on
+    -- `users`, not a side table -- agents in Buzz *are* users (0046), and
+    -- `agent_owner_pubkey` already set the precedent that agent-shaped facts
+    -- live on the agent's own row. `machine_id` is the stable host identity;
+    -- `machine_runtime` is unconstrained TEXT so a new runtime is addable
+    -- across a rolling upgrade without a schema migration.
+    machine_id          VARCHAR(255),
+    machine_label       VARCHAR(255),
+    machine_runtime     TEXT,
     PRIMARY KEY (community_id, pubkey),
     CONSTRAINT chk_users_pubkey_len CHECK (LENGTH(pubkey) = 32),
+    -- A machine home is meaningless without the machine it names: a bare label
+    -- or runtime with no `machine_id` is unaddressable.
+    CONSTRAINT chk_users_machine_fields_require_machine_id
+        CHECK (machine_id IS NOT NULL
+               OR (machine_label IS NULL AND machine_runtime IS NULL)),
+    -- Blank/whitespace values are the other way a home becomes unaddressable.
+    CONSTRAINT chk_users_machine_id_not_blank
+        CHECK (machine_id IS NULL OR length(btrim(machine_id)) > 0),
+    CONSTRAINT chk_users_machine_label_not_blank
+        CHECK (machine_label IS NULL OR length(btrim(machine_label)) > 0),
+    CONSTRAINT chk_users_machine_runtime_not_blank
+        CHECK (machine_runtime IS NULL OR length(btrim(machine_runtime)) > 0),
     -- agent owner is a user in the SAME community.
     FOREIGN KEY (community_id, agent_owner_pubkey)
         REFERENCES users (community_id, pubkey) ON DELETE SET NULL
@@ -196,6 +217,14 @@ CREATE UNIQUE INDEX idx_users_nip05 ON users (community_id, lower(nip05_handle))
     WHERE nip05_handle IS NOT NULL;
 CREATE UNIQUE INDEX idx_users_okta ON users (community_id, okta_user_id)
     WHERE okta_user_id IS NOT NULL;
+
+-- One home agent per machine, per community (0047). Two agents claiming the
+-- same host is the exact ambiguity that makes a task assignee meaningless.
+-- Partial, so the majority of users -- who carry no machine_id -- are
+-- entirely unconstrained.
+CREATE UNIQUE INDEX idx_users_one_home_per_machine
+    ON users (community_id, machine_id)
+    WHERE machine_id IS NOT NULL;
 
 -- ── Events (partitioned by month on created_at) ──────────────────────────────
 -- Conformance: "Channel-less global events and DMs". `community_id` leads the
