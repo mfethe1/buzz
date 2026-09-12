@@ -998,15 +998,19 @@ async fn steer_rejected_on_run_id_mismatch() {
         )
         .await;
 
-    // Wait for the steer response itself: the turn may finish first, so keying
-    // the drain on `p_id` would race the rejection we are asserting on.
-    let v = h.recv_until(|v| v["id"] == json!(s_id)).await;
+    // Wait for the steer response itself, but DRAIN every frame that arrives
+    // first: the turn may finish before the rejection, and a dropped prompt
+    // response here would make the wait for `p_id` below hang forever.
+    let (frames_before, v) = recv_until_with_drain(&mut h, |v| v["id"] == json!(s_id)).await;
     assert_eq!(
         v["error"]["code"], -32602,
         "mismatched runId must be rejected"
     );
-    // Turn finishes normally regardless of the rejected steer.
-    h.recv_until(|v| v["id"] == json!(p_id)).await;
+    // Turn finishes normally regardless of the rejected steer. Its response
+    // may already be in the drained frames; only wait if it is not.
+    if !frames_before.iter().any(|f| f["id"] == json!(p_id)) {
+        h.recv_until(|v| v["id"] == json!(p_id)).await;
+    }
     h.shutdown().await;
 }
 
@@ -1417,8 +1421,10 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     // Wait for the activeRunId advert (agent is live).
     let _run_id = recv_active_run_id(&mut h).await;
     // Wait for tool_call_update — proves round 1 LLM response is fully processed
-    // and tokens are captured before we send cancel.
-    h.recv_until(|v| {
+    // and tokens are captured before we send cancel. DRAIN (not discard) the
+    // frames seen along the way: the round-1 usage_update may land in any of
+    // these windows, and every frame collected here feeds the assertions below.
+    let (mut frames, _) = recv_until_with_drain(&mut h, |v| {
         v.get("method") == Some(&json!("session/update"))
             && v["params"]["update"]["sessionUpdate"] == "tool_call_update"
     })
@@ -1429,34 +1435,31 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     // `cancel_session` before replying, so once the ack lands the cancellation
     // is registered and round 2 cannot beat it to the turn's end.
     let c_id = h.send("session/cancel", json!({"sessionId": sid})).await;
-    h.recv_until(|v| v["id"] == json!(c_id)).await;
+    let (ack_frames, cancel_ack) = recv_until_with_drain(&mut h, |v| v["id"] == json!(c_id)).await;
+    frames.extend(ack_frames);
+    assert!(
+        cancel_ack.get("result").is_some() && cancel_ack.get("error").is_none(),
+        "session/cancel must be acknowledged with a success response"
+    );
     let _ = gate_tx.send(()); // unblock round 2
 
-    let mut saw_usage_before_prompt_response = false;
-    let mut saw_usage = false;
-    loop {
-        let v = h.recv().await;
-        if is_usage_update(&v) {
-            saw_usage = true;
-            saw_usage_before_prompt_response = true;
-        } else if v["id"] == json!(p_id) {
-            // The gate guarantees stopReason: cancelled — not a race-driven error.
-            assert_eq!(
-                v["result"]["stopReason"], "cancelled",
-                "turn must end with stopReason: cancelled"
-            );
-            break;
-        }
-    }
-    assert!(
-        saw_usage,
-        "expected usage_update notification for cancelled turn with observed tokens"
+    // Drain everything up to and including the prompt response. The usage_update
+    // may have arrived in any earlier window or this one — accumulating all
+    // frames means no ordering is lost and none is discarded.
+    let (tail_frames, prompt_response) =
+        recv_until_with_drain(&mut h, |v| v["id"] == json!(p_id)).await;
+    frames.extend(tail_frames);
+    // The gate guarantees stopReason: cancelled — not a race-driven error.
+    assert_eq!(
+        prompt_response["result"]["stopReason"], "cancelled",
+        "turn must end with stopReason: cancelled"
     );
     assert!(
-        saw_usage_before_prompt_response,
-        "usage_update must arrive before the session/prompt response"
+        frames.iter().any(is_usage_update),
+        "expected usage_update notification for cancelled turn with observed tokens; frames: {frames:#?}"
     );
-
+    // Every collected frame arrived BEFORE the prompt response (the drain stops
+    // there), so "usage_update arrives before the response" holds by construction.
     h.shutdown().await;
 }
 
