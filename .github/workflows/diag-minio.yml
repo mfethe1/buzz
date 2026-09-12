@@ -7,11 +7,9 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Start minio only
         run: docker compose up -d minio || true
-      - name: Wait and capture
+      - name: Probe
         run: |
-          sleep 25
-          echo "=== docker ps"; docker ps -a --filter name=buzz-minio --format '{{.Status}}'
-          echo "=== health"; docker inspect --format='{{json .State.Health}}' buzz-minio | head -c 3000
-          echo; echo "=== logs"; docker logs buzz-minio 2>&1 | tail -40
-          echo "=== tools"; docker exec buzz-minio sh -c 'command -v wget; command -v curl; echo PATH=$PATH; id' || true
-          echo "=== wget probe"; docker exec buzz-minio wget -q -O /dev/null http://127.0.0.1:9000/minio/health/live; echo "wget exit: $?"
+          sleep 15
+          echo "=== ls /bin"; docker exec buzz-minio ls /bin /usr/bin 2>&1 | head -40
+          echo "=== minio help"; docker exec buzz-minio minio --help 2>&1 | head -40
+          echo "=== minio ready"; docker exec buzz-minio minio ready local 2>&1; echo "minio ready exit: $?"
