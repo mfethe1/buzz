@@ -114,6 +114,10 @@ jobs:
           scripts/test-rust-cache-contract-regressions.sh
       - name: CI required-context isolation contract
         run: scripts/test-ci-required-context-isolation.sh
+      - name: Product DCO regressions
+        run: node --test .github/scripts/product-dco.test.js
+      - name: Product qualification regressions
+        run: python3 scripts/test-product-qualification.py
       - name: File size policy
         run: just file-size-check
 
