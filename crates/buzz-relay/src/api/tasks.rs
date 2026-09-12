@@ -79,6 +79,9 @@ pub struct UpdateTaskRequest {
     due_at: Option<Option<DateTime<Utc>>>,
     #[serde(default, deserialize_with = "deserialize_double_option")]
     assignee: Option<Option<String>>,
+    /// HW-017: optimistic concurrency guard. If present, the PATCH is rejected
+    /// with 409 when the task's `revision` does not match this value.
+    expected_revision: Option<i32>,
 }
 
 /// Body of `POST /api/tasks/{id}/events`.
@@ -155,6 +158,11 @@ fn map_task_error(context: &str, error: buzz_db::DbError) -> (StatusCode, Json<V
     match &error {
         buzz_db::DbError::NotFound(_) => api_error(StatusCode::NOT_FOUND, "task not found"),
         buzz_db::DbError::InvalidData(message) => api_error(StatusCode::BAD_REQUEST, message),
+        buzz_db::DbError::StaleRevision { task_id, expected, actual } => {
+            api_error(StatusCode::CONFLICT, &format!(
+                "task {task_id} was modified by another writer: expected revision {expected}, found {actual}; re-fetch and retry"
+            ))
+        }
         buzz_db::DbError::AccessDenied(_) => api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "community writes are temporarily unavailable",
@@ -437,6 +445,7 @@ pub async fn update_task(
             Some(None) => Some(None),
             Some(Some(raw)) => Some(Some(parse_pubkey("assignee", &raw)?)),
         },
+        expected_revision: request.expected_revision,
     };
     if patch.is_empty() {
         return Err(api_error(
@@ -550,6 +559,7 @@ fn task_json(task: &TaskRecord) -> Value {
         "archived_at": task.archived_at.map(|value| value.timestamp()),
         "created_at": task.created_at.timestamp(),
         "updated_at": task.updated_at.timestamp(),
+        "revision": task.revision,
     })
 }
 
@@ -686,6 +696,7 @@ mod tests {
             archived_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            revision: 0,
         };
         let wire = task_json(&task);
         assert_eq!(wire["status"], "in_progress");

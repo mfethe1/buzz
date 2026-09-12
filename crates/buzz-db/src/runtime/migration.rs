@@ -704,8 +704,10 @@ mod postgres_tests {
 
         // upstream carries 44 (0032-0034 and 0040 adopted from our PRs);
         // fork adds 0046_task_system (PR #6425 pending upstream) and
-        // 0047_agent_machine_homes (AGENT-HOMES-001 PR-3).
-        assert_eq!(migrations.len(), 46);
+        // 0047_agent_machine_homes (AGENT-HOMES-001 PR-3), and
+        // 0050_task_optimistic_concurrency (HW-017 optimistic concurrency guard).
+        assert_eq!(migrations.len(), 47);
+        assert_eq!(migrations[46].version, 50);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]

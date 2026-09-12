@@ -102,6 +102,7 @@ class Task {
     required this.priority,
     required this.createdAt,
     required this.updatedAt,
+    required this.revision,
     this.channelId,
     this.createdBy,
     this.assignee,
@@ -128,6 +129,7 @@ class Task {
       priority: json['priority'] is int ? json['priority'] as int : 0,
       createdAt: _dateFromSeconds(json['created_at']) ?? DateTime.now().toUtc(),
       updatedAt: _dateFromSeconds(json['updated_at']) ?? DateTime.now().toUtc(),
+      revision: json['revision'] is int ? json['revision'] as int : 0,
       channelId: _stringOrNull(json['channel_id']),
       createdBy: _stringOrNull(json['created_by']),
       assignee: _stringOrNull(json['assignee']),
@@ -158,6 +160,9 @@ class Task {
 
   /// When the task last changed.
   final DateTime updatedAt;
+
+  /// Monotonic revision counter for optimistic concurrency (HW-017).
+  final int revision;
 
   /// Channel this task is scoped to, or null for a community-wide task.
   final String? channelId;

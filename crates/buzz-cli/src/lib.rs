@@ -2149,6 +2149,9 @@ pub enum TasksCmd {
         due_at: Option<String>,
         #[arg(long, default_value_t = false)]
         clear_due: bool,
+        /// HW-017: reject the PATCH with 409 if the task's revision does not match
+        #[arg(long)]
+        expected_revision: Option<i32>,
     },
     /// Append a progress/comment event; use '-' to read stdin
     Comment { task: String, body: String },
