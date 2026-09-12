@@ -41,8 +41,12 @@ services:
       retries: 10
       start_period: 5s
 
+  # MinIO's own Docker Hub / Quay repositories were removed when the project
+  # went source-only (2025-10); digest-pinned chainguard/minio (built from
+  # upstream source, CVE-2025-62506 fixed). See docker-compose.yml note.
   minio:
-    image: minio/minio:latest
+    image: chainguard/minio@sha256:039800e64ec7247d2fde7cff3697e964f6fe20b6d7d2c46aa7d82cc63355d512
+    user: "0:0"
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: buzz_dev
@@ -53,19 +57,26 @@ services:
     volumes:
       - harness-minio-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      # chainguard/minio ships no curl/wget/busybox; bash /dev/tcp HTTP probe
+      # is the image-supported liveness check (verified against the pinned
+      # digest: HTTP/1.x 200 on /minio/health/live).
+      test:
+        - CMD-SHELL
+        - "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/9000; printf \"GET /minio/health/live HTTP/1.0\\r\\nHost: 127.0.0.1\\r\\n\\r\\n\" >&3; read -t 4 -r line <&3; case \"$$line\" in *\" 200 \"*) exit 0;; *) exit 1;; esac'"
       interval: 5s
       timeout: 5s
       retries: 10
       start_period: 10s
 
   minio-init:
-    image: minio/mc:latest
+    image: chainguard/minio-client@sha256:01fda3c663e18914a1c39ea7b5bec8aa9a792066933ad264fd5b0847f082d6cb
+    environment:
+      MC_CONFIG_DIR: /tmp/.mc
     depends_on:
       minio:
         condition: service_healthy
     entrypoint: >
-      /bin/sh -c "
+      /usr/bin/bash -c "
         mc alias set local http://minio:9000 buzz_dev buzz_dev_secret &&
         mc mb --ignore-existing local/buzz-media &&
         mc anonymous set none local/buzz-media

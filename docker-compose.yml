@@ -100,8 +100,17 @@ services:
       com.buzz.env: "dev"
     restart: unless-stopped
 
+  # MinIO's own Docker Hub / Quay repositories were removed when the project
+  # went source-only (2025-10); chainguard/minio is built from upstream MinIO
+  # source (incl. the CVE-2025-62506 fix the last official image never got) and
+  # is digest-pinned for reproducible pulls. No registry login required.
   minio:
-    image: minio/minio:latest
+    image: chainguard/minio@sha256:039800e64ec7247d2fde7cff3697e964f6fe20b6d7d2c46aa7d82cc63355d512
+    # Last verified 2026-09-12 via hub.docker.com/v2/repositories/chainguard/minio/tags/latest
+    # (index digest; amd64 28bcf77e..., arm64 d3241231...). Runs as 65532 by default;
+    # root keeps compatibility with buzz-minio-data volumes created by earlier
+    # root-owned minio/minio images so existing object data keeps working.
+    user: "0:0"
     container_name: buzz-minio
     command: server /data --console-address ":9001"
     environment:
@@ -115,7 +124,12 @@ services:
     networks:
       - buzz-net
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      # chainguard/minio ships no curl/wget/busybox; bash /dev/tcp HTTP probe
+      # is the image-supported liveness check (verified against the pinned
+      # digest: HTTP/1.x 200 on /minio/health/live).
+      test:
+        - CMD-SHELL
+        - "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/9000; printf \"GET /minio/health/live HTTP/1.0\\r\\nHost: 127.0.0.1\\r\\n\\r\\n\" >&3; read -t 4 -r line <&3; case \"$$line\" in *\" 200 \"*) exit 0;; *) exit 1;; esac'"
       interval: 5s
       timeout: 5s
       retries: 10
@@ -130,15 +144,19 @@ services:
     restart: unless-stopped
 
   minio-init:
-    image: minio/mc:latest
+    image: chainguard/minio-client@sha256:01fda3c663e18914a1c39ea7b5bec8aa9a792066933ad264fd5b0847f082d6cb
+    # Last verified 2026-09-12; see minio service note. Entrypoint /usr/bin/mc,
+    # runs as 65532; HOME must be writable for the mc config dir.
     container_name: buzz-minio-init
+    environment:
+      MC_CONFIG_DIR: /tmp/.mc
     depends_on:
       minio:
         condition: service_healthy
     networks:
       - buzz-net
     entrypoint: >
-      /bin/sh -c "
+      /usr/bin/bash -c "
         mc alias set local http://minio:9000 buzz_dev buzz_dev_secret &&
         mc mb --ignore-existing local/buzz-media &&
         mc anonymous set none local/buzz-media
