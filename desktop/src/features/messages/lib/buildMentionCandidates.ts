@@ -182,7 +182,10 @@ export function buildMentionCandidates({
         (activePersonaById.has(pubkey) ? pubkey : undefined),
       ownerPubkey: agent.ownerPubkey,
       isAgent: true,
-      isActiveAgent: agent.status === "online" || agent.status === "away",
+      // Liveness comes from the injected set, which joins TTL'd relay presence
+      // over the unexpiring kind:10100 directory status. Same shape as the
+      // member row above, so the two rows cannot disagree.
+      isActiveAgent: activeAgentPubkeys.has(pubkey),
     });
   }
   for (const agent of managedAgents ?? []) {
