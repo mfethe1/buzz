@@ -58,6 +58,9 @@ jobs:
               - 'scripts/run-tests.sh'
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
+              # The relay/desktop integration lanes start MinIO/Postgres/Redis
+              # from docker-compose.yml; compose changes must run those lanes.
+              - 'docker-compose.yml'
               - 'justfile'
             desktop:
               - 'scripts/model-capabilities.json'
