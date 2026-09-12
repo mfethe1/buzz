@@ -998,21 +998,15 @@ async fn steer_rejected_on_run_id_mismatch() {
         )
         .await;
 
-    let mut saw_reject = false;
-    for _ in 0..40 {
-        let v = h.recv().await;
-        if v["id"] == json!(s_id) {
-            assert_eq!(
-                v["error"]["code"], -32602,
-                "mismatched runId must be rejected"
-            );
-            saw_reject = true;
-        } else if v["id"] == json!(p_id) {
-            // Turn finishes normally regardless of the rejected steer.
-            break;
-        }
-    }
-    assert!(saw_reject, "run-id mismatch was not rejected");
+    // Wait for the steer response itself: the turn may finish first, so keying
+    // the drain on `p_id` would race the rejection we are asserting on.
+    let v = h.recv_until(|v| v["id"] == json!(s_id)).await;
+    assert_eq!(
+        v["error"]["code"], -32602,
+        "mismatched runId must be rejected"
+    );
+    // Turn finishes normally regardless of the rejected steer.
+    h.recv_until(|v| v["id"] == json!(p_id)).await;
     h.shutdown().await;
 }
 
@@ -1430,37 +1424,30 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
     })
     .await;
 
-    // Now send cancel and release the round-2 gate. Cancel is enqueued before
-    // round 2 can respond, so the turn exits with stopReason: cancelled.
+    // Now send cancel and release the round-2 gate. Waiting for the cancel ack
+    // first is what makes this deterministic: the handler awaits
+    // `cancel_session` before replying, so once the ack lands the cancellation
+    // is registered and round 2 cannot beat it to the turn's end.
     let c_id = h.send("session/cancel", json!({"sessionId": sid})).await;
+    h.recv_until(|v| v["id"] == json!(c_id)).await;
     let _ = gate_tx.send(()); // unblock round 2
 
     let mut saw_usage_before_prompt_response = false;
     let mut saw_usage = false;
-    let mut saw_cancel_ok = false;
-    let mut saw_prompt_response = false;
-    for _ in 0..40 {
+    loop {
         let v = h.recv().await;
-        if v["id"] == json!(c_id) {
-            saw_cancel_ok = true;
-        } else if is_usage_update(&v) {
+        if is_usage_update(&v) {
             saw_usage = true;
-            if !saw_prompt_response {
-                saw_usage_before_prompt_response = true;
-            }
+            saw_usage_before_prompt_response = true;
         } else if v["id"] == json!(p_id) {
-            saw_prompt_response = true;
             // The gate guarantees stopReason: cancelled — not a race-driven error.
             assert_eq!(
                 v["result"]["stopReason"], "cancelled",
                 "turn must end with stopReason: cancelled"
             );
-        }
-        if saw_usage && saw_prompt_response && saw_cancel_ok {
             break;
         }
     }
-    assert!(saw_cancel_ok, "session/cancel was not acknowledged");
     assert!(
         saw_usage,
         "expected usage_update notification for cancelled turn with observed tokens"
