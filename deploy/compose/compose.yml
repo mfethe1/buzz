@@ -102,8 +102,12 @@ services:
     volumes:
       - buzz-minio-data:/data
     healthcheck:
-      # chainguard/minio ships no curl; busybox wget is present (has a shell).
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/minio/health/live"]
+      # chainguard/minio ships no curl/wget/busybox; bash /dev/tcp HTTP probe
+      # is the image-supported liveness check (verified against the pinned
+      # digest: HTTP/1.x 200 on /minio/health/live).
+      test:
+        - CMD-SHELL
+        - "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/9000; printf \"GET /minio/health/live HTTP/1.0\\r\\nHost: 127.0.0.1\\r\\n\\r\\n\" >&3; read -t 4 -r line <&3; case \"$$line\" in *\" 200 \"*) exit 0;; *) exit 1;; esac'"
       interval: 5s
       timeout: 5s
       retries: 12
@@ -126,7 +130,7 @@ services:
       BUZZ_S3_SECRET_KEY: ${BUZZ_S3_SECRET_KEY:?set BUZZ_S3_SECRET_KEY}
       BUZZ_S3_BUCKET: ${BUZZ_S3_BUCKET:-buzz-media}
     entrypoint: >
-      /bin/sh -euc '
+      /usr/bin/bash -euc '
         mc alias set local http://minio:9000 "$${BUZZ_S3_ACCESS_KEY}" "$${BUZZ_S3_SECRET_KEY}"
         mc mb --ignore-existing "local/$${BUZZ_S3_BUCKET}"
         mc anonymous set none "local/$${BUZZ_S3_BUCKET}"
