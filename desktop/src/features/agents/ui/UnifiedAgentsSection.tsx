@@ -6,33 +6,44 @@ import {
   resolveAgentCardAvatarUrl,
 } from "@/features/agents/lib/agentCardAvatar";
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
+import { effectiveAgentDescription } from "@/features/agents/lib/agentDescription";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
+import type { AgentAvailabilityReader } from "@/features/agents/lib/useAgentAvailability";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { hermesProfileNameFromAgent } from "@/features/agents/lib/hermesProfileBinding";
+import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserProfileQuery } from "@/features/profile/hooks";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
-import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
 import { Badge } from "@/shared/ui/badge";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/shared/ui/dropdown-menu";
+  ProtectedBestieCardBadge,
+  useProtectedBestiePubkey,
+} from "@protected-feature-components";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { PersonaActionsMenu } from "./PersonaActionsMenu";
-import { buildUnifiedGroups, pickProfileAgent } from "./unifiedAgentGroups";
+import { SubagentTree } from "./SubagentTree";
+import { buildUnifiedGroups } from "./unifiedAgentGroups";
+import type { SubagentStatus } from "@/features/agents/lib/subagents";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type UnifiedAgentsSectionProps = {
   defaultModel: string;
+  getAvailability: AgentAvailabilityReader;
   actionErrorMessage: string | null;
   actionNoticeMessage: string | null;
   agents: ManagedAgent[];
   agentsError: Error | null;
+  /**
+   * Live subagent records (SPEC-nested-subagents). Optional and empty by
+   * default until Workstream A streams parent-tagged lifecycle events; the
+   * tree renders nothing without records.
+   */
+  subagents?: readonly SubagentStatus[];
   isActionPending: boolean;
   isAgentsLoading: boolean;
   restartingAgentPubkey: string | null;
@@ -52,8 +63,7 @@ type UnifiedAgentsSectionProps = {
   personaFeedbackNoticeMessage: string | null;
   isPersonasLoading: boolean;
   isPersonasPending: boolean;
-  onCreatePersona: () => void;
-  onDiscoverPersonas: () => void;
+  onOpenCatalog: () => void;
   onDuplicatePersona: (persona: AgentPersona) => void;
   onEditPersona: (persona: AgentPersona) => void;
   onSharePersona: (
@@ -63,21 +73,22 @@ type UnifiedAgentsSectionProps = {
   ) => void;
   onDeactivatePersona: (persona: AgentPersona) => void;
   onDeletePersona: (persona: AgentPersona) => void;
-  onImportSnapshotFile: (fileBytes: number[], fileName: string) => void;
 };
 
 const AGENT_CARD_COLUMN_CLASS = "w-full";
 export const AGENT_CARD_GRID_COLUMNS_CLASS =
-  "grid-cols-[repeat(auto-fill,minmax(220px,240px))]";
-export const IDENTITY_CARD_GRID_CLASS = `${AGENT_CARD_COLUMN_CLASS} ${AGENT_CARD_GRID_COLUMNS_CLASS} grid justify-start gap-3 [@container(max-width:40rem)]:justify-center`;
+  "grid-cols-1 [@container(min-width:21rem)]:grid-cols-2 [@container(min-width:32rem)]:grid-cols-3 [@container(min-width:43rem)]:grid-cols-4 [@container(min-width:54rem)]:grid-cols-5";
+export const IDENTITY_CARD_GRID_CLASS = `${AGENT_CARD_COLUMN_CLASS} ${AGENT_CARD_GRID_COLUMNS_CLASS} grid gap-3`;
 
 export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   const {
     actionErrorMessage,
     actionNoticeMessage,
     defaultModel,
+    getAvailability,
     agents,
     agentsError,
+    subagents = [],
     isActionPending,
     isAgentsLoading,
     restartingAgentPubkey,
@@ -94,29 +105,22 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     personaFeedbackNoticeMessage,
     isPersonasLoading,
     isPersonasPending,
-    onCreatePersona,
-    onDiscoverPersonas,
+    onOpenCatalog,
     onDuplicatePersona,
     onEditPersona,
     onSharePersona,
     onDeactivatePersona,
     onDeletePersona,
-    onImportSnapshotFile,
   } = props;
 
+  const isArchived = useIsArchivedPredicate();
+  const bestieRaw = useProtectedBestiePubkey(agents);
+  const bestiePubkey = bestieRaw ? normalizePubkey(bestieRaw) : null;
   const { groups, ungrouped, unknown } = React.useMemo(
-    () => buildUnifiedGroups(personas, agents),
-    [personas, agents],
+    () => buildUnifiedGroups(personas, agents, isArchived),
+    [personas, agents, isArchived],
   );
   const [collapsed, setCollapsed] = React.useState<Set<string>>(new Set());
-  const {
-    fileInputRef,
-    isDragOver,
-    dropHandlers,
-    handleFileChange,
-    openFilePicker,
-  } = useFileImportZone({ onImportFile: onImportSnapshotFile });
-
   function toggle(key: string) {
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -134,82 +138,84 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     <section
       className="relative space-y-4"
       data-testid="agents-library-personas"
-      {...dropHandlers}
     >
-      {isDragOver ? (
-        <div className="pointer-events-none absolute -inset-1 z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary/50 bg-background/80 backdrop-blur-sm">
-          <p className="text-sm font-medium text-primary">
-            Drop .agent.json or .agent.png to import
-          </p>
-        </div>
-      ) : null}
-
-      <input
-        accept=".agent.json,.agent.png"
-        className="hidden"
-        onChange={handleFileChange}
-        ref={fileInputRef}
-        type="file"
-      />
-
       {isLoading ? <LoadingSkeleton /> : null}
 
       {!isLoading ? (
         <div className="space-y-3" data-testid="unified-agents-groups">
           <div className={IDENTITY_CARD_GRID_CLASS}>
-            {groups.map((group) => {
-              const profileAgent = pickProfileAgent(group.agents);
-              return (
+            <CreateIdentityCard
+              ariaLabel="New agent"
+              dataTestId="new-agent-card"
+              disabled={isPersonasPending}
+              onClick={onOpenCatalog}
+            />
+            {groups.flatMap((group) =>
+              group.cards.map((card) => (
                 <AgentPersonaCard
-                  actions={(effectiveAvatarUrl, isEffectiveAvatarLoading) => (
-                    <PersonaActionsMenu
-                      isActionPending={
-                        isActionPending || isEffectiveAvatarLoading
-                      }
-                      isPending={isPersonasPending}
-                      persona={group.persona}
-                      linkedAgent={profileAgent}
-                      onDeactivate={onDeactivatePersona}
-                      onDelete={onDeletePersona}
-                      onDuplicate={onDuplicatePersona}
-                      onEdit={onEditPersona}
-                      onShare={(persona, linkedAgent) =>
-                        onSharePersona(persona, linkedAgent, effectiveAvatarUrl)
-                      }
-                    />
-                  )}
-                  agent={profileAgent}
+                  actions={
+                    card.ownsPersonaActions
+                      ? (effectiveAvatarUrl, isEffectiveAvatarLoading) => (
+                          <PersonaActionsMenu
+                            isActionPending={
+                              isActionPending || isEffectiveAvatarLoading
+                            }
+                            isPending={isPersonasPending}
+                            persona={card.persona}
+                            linkedAgent={card.agent}
+                            onDeactivate={onDeactivatePersona}
+                            onDelete={onDeletePersona}
+                            onDuplicate={onDuplicatePersona}
+                            onEdit={onEditPersona}
+                            onShare={(persona, linkedAgent) =>
+                              onSharePersona(
+                                persona,
+                                linkedAgent,
+                                effectiveAvatarUrl,
+                              )
+                            }
+                          />
+                        )
+                      : undefined
+                  }
+                  agent={card.agent}
+                  getAvailability={getAvailability}
                   defaultModel={defaultModel}
-                  key={group.persona.id}
-                  persona={group.persona}
+                  isBestie={
+                    card.agent
+                      ? normalizePubkey(card.agent.pubkey) === bestiePubkey
+                      : false
+                  }
+                  key={card.key}
+                  label={card.label}
+                  persona={card.persona}
                   restartingAgentPubkey={restartingAgentPubkey}
                   startingAgentPubkey={startingAgentPubkey}
                   startingPersonaIds={startingPersonaIds}
+                  subtitle={card.personaLabel}
+                  testId={`persona-agent-row-${card.key}`}
                   onOpenAgentProfile={onOpenAgentProfile}
                   onOpenPersonaProfile={onOpenPersonaProfile}
                   onRestartAgent={onRestartAgent}
                   onStartAgent={onStartAgent}
                   onStartPersona={onStartPersona}
                 />
-              );
-            })}
-            <NewAgentCard
-              isPending={isPersonasPending}
-              onCreate={onCreatePersona}
-              onDiscover={onDiscoverPersonas}
-              onImport={openFilePicker}
-            />
+              )),
+            )}
           </div>
 
           {unknown.length > 0 ? (
             <CollapsibleAgentGroup
               agents={unknown}
               collapsed={collapsed}
+              getAvailability={getAvailability}
               defaultModel={defaultModel}
               groupKey="__unknown__"
+              bestiePubkey={bestiePubkey}
               label="Unknown agents"
               restartingAgentPubkey={restartingAgentPubkey}
               startingAgentPubkey={startingAgentPubkey}
+              subagents={subagents}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
               onRestartAgent={onRestartAgent}
@@ -220,11 +226,14 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
             <CollapsibleAgentGroup
               agents={ungrouped}
               collapsed={collapsed}
+              getAvailability={getAvailability}
               defaultModel={defaultModel}
               groupKey="__ungrouped__"
+              bestiePubkey={bestiePubkey}
               label="Custom agents"
               restartingAgentPubkey={restartingAgentPubkey}
               startingAgentPubkey={startingAgentPubkey}
+              subagents={subagents}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
               onRestartAgent={onRestartAgent}
@@ -256,10 +265,15 @@ function AgentPersonaCard({
   actions,
   agent,
   defaultModel,
+  label,
+  isBestie,
+  getAvailability,
   persona,
   restartingAgentPubkey,
   startingAgentPubkey,
   startingPersonaIds,
+  subtitle,
+  testId,
   onOpenAgentProfile,
   onOpenPersonaProfile,
   onRestartAgent,
@@ -272,10 +286,15 @@ function AgentPersonaCard({
   ) => React.ReactNode;
   agent: ManagedAgent | undefined;
   defaultModel: string;
+  label: string;
+  isBestie: boolean;
+  getAvailability: AgentAvailabilityReader;
   persona: AgentPersona;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
+  subtitle: string | null;
+  testId: string;
   onOpenAgentProfile: (
     pubkey: string,
     options?: ProfilePanelOpenOptions,
@@ -285,12 +304,8 @@ function AgentPersonaCard({
   onStartAgent: (pubkey: string) => void;
   onStartPersona: (persona: AgentPersona) => void;
 }) {
-  const title = persona.displayName;
-  const modelLabel = resolveAgentCardModelLabel({
-    agent,
-    personaModel: persona.model,
-    defaultModel,
-  });
+  const availability = getAvailability(agent?.pubkey);
+  const title = label;
   const isActive = agent ? isManagedAgentActive(agent) : false;
   const profileQuery = useUserProfileQuery(agent?.pubkey);
   const avatarUrl = agent
@@ -299,7 +314,23 @@ function AgentPersonaCard({
   const friendlyError = agent
     ? friendlyAgentLastError(agent.lastError, agent.lastErrorCode)?.copy
     : null;
-  const opensRuntimeTab = Boolean(agent && friendlyError && !isActive);
+  const hermesProfile = agent ? hermesProfileNameFromAgent(agent) : null;
+  // A split card passes its rival name as `subtitle`; a canonical card passes
+  // nothing, and then the card face should show the persona's authored
+  // description — the same second line upstream renders. Without this fallback
+  // an edited description is saved but never displayed.
+  const runtimeSubtitle = [
+    subtitle ?? effectiveAgentDescription(persona),
+    hermesProfile ? `Hermes · ${hermesProfile}` : null,
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join(" · ");
+  const modelLabel = resolveAgentCardModelLabel({
+    agent,
+    personaModel: null,
+    provider: agent?.provider,
+    defaultModel,
+  });
 
   return (
     <AgentIdentityCard
@@ -316,6 +347,7 @@ function AgentPersonaCard({
             errorLabel={friendlyError}
             errorTestId={`agent-runtime-error-${agent.pubkey}`}
             isActive={isActive}
+            availability={availability}
             isRestarting={restartingAgentPubkey === agent.pubkey}
             isStarting={startingAgentPubkey === agent.pubkey}
             label={title}
@@ -343,17 +375,25 @@ function AgentPersonaCard({
         )
       }
       avatarUrl={avatarUrl}
-      dataTestId={`persona-agent-row-${persona.id}`}
+      dataTestId={testId}
+      footerAccessory={
+        agent ? (
+          <ProtectedBestieCardBadge agent={agent} isBestie={isBestie} />
+        ) : null
+      }
       label={title}
       modelLabel={modelLabel}
+      subtitle={runtimeSubtitle || null}
       onClick={() => {
-        if (agent) {
-          onOpenAgentProfile(
-            agent.pubkey,
-            opensRuntimeTab ? { tab: "runtime" } : undefined,
-          );
-          return;
-        }
+        // The card's main click always opens the PERSONA target, never an
+        // explicit pubkey. A pubkey target is durable in the panel, so a pick
+        // made during the archive-snapshot fail-open window would strand the
+        // panel on an archived identity after hydration (Carl's cold-hydration
+        // race). A persona target re-resolves every render through the shared
+        // archive-aware selector, so it self-corrects to a live sibling — or
+        // persona-only mode when every instance is archived. Deliberate
+        // instance navigation and the runtime-error affordance keep their
+        // explicit-pubkey path via the avatar control below.
         onOpenPersonaProfile(persona);
       }}
       statusBadge={
@@ -370,7 +410,9 @@ function AgentPersonaCard({
 
 function StandaloneAgentCard({
   agent,
+  isBestie,
   defaultModel,
+  getAvailability,
   restartingAgentPubkey,
   startingAgentPubkey,
   onOpenAgentProfile,
@@ -378,7 +420,9 @@ function StandaloneAgentCard({
   onStartAgent,
 }: {
   agent: ManagedAgent;
+  isBestie: boolean;
   defaultModel: string;
+  getAvailability: AgentAvailabilityReader;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
   onOpenAgentProfile: (
@@ -388,6 +432,7 @@ function StandaloneAgentCard({
   onRestartAgent: (pubkey: string) => void;
   onStartAgent: (pubkey: string) => void;
 }) {
+  const availability = getAvailability(agent.pubkey);
   const title = agent.name;
   const profileQuery = useUserProfileQuery(agent.pubkey);
   const friendlyError = friendlyAgentLastError(
@@ -407,6 +452,7 @@ function StandaloneAgentCard({
           errorLabel={friendlyError}
           errorTestId={`agent-runtime-error-${agent.pubkey}`}
           isActive={isActive}
+          availability={availability}
           isRestarting={restartingAgentPubkey === agent.pubkey}
           isStarting={startingAgentPubkey === agent.pubkey}
           label={title}
@@ -424,12 +470,20 @@ function StandaloneAgentCard({
       }
       avatarUrl={profileQuery.data?.avatarUrl}
       dataTestId={`managed-agent-${agent.pubkey}`}
+      footerAccessory={
+        <ProtectedBestieCardBadge agent={agent} isBestie={isBestie} />
+      }
       label={title}
-      modelLabel={resolveAgentCardModelLabel({
-        agent,
-        personaModel: null,
-        defaultModel,
-      })}
+      subtitle={
+        // Definition-less instance: no authored description exists, so fall
+        // back to the model label.
+        resolveAgentCardModelLabel({
+          agent,
+          personaModel: null,
+          provider: agent.provider,
+          defaultModel,
+        })
+      }
       onClick={() => {
         onOpenAgentProfile(
           agent.pubkey,
@@ -445,44 +499,6 @@ function StandaloneAgentCard({
         ) : null
       }
     />
-  );
-}
-
-function NewAgentCard({
-  isPending,
-  onCreate,
-  onDiscover,
-  onImport,
-}: {
-  isPending: boolean;
-  onCreate: () => void;
-  onDiscover: () => void;
-  onImport: () => void;
-}) {
-  return (
-    <DropdownMenu modal={false}>
-      <DropdownMenuTrigger asChild>
-        <CreateIdentityCard ariaLabel="New agent" dataTestId="new-agent-card" />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="start"
-        onCloseAutoFocus={(event) => event.preventDefault()}
-      >
-        <DropdownMenuItem disabled={isPending} onClick={onCreate}>
-          Create agent
-        </DropdownMenuItem>
-        <DropdownMenuItem disabled={isPending} onClick={onDiscover}>
-          Discover agents
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          data-testid="import-agent-snapshot-menu-item"
-          disabled={isPending}
-          onClick={onImport}
-        >
-          Import
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
   );
 }
 
@@ -509,10 +525,13 @@ function CollapsibleAgentGroup({
   groupKey,
   label,
   agents,
+  bestiePubkey,
   collapsed,
   defaultModel,
+  getAvailability,
   restartingAgentPubkey,
   startingAgentPubkey,
+  subagents,
   onToggle,
   onOpenAgentProfile,
   onRestartAgent,
@@ -521,10 +540,13 @@ function CollapsibleAgentGroup({
   groupKey: string;
   label: string;
   agents: ManagedAgent[];
+  bestiePubkey: string | null;
   collapsed: ReadonlySet<string>;
   defaultModel: string;
+  getAvailability: AgentAvailabilityReader;
   restartingAgentPubkey: string | null;
   startingAgentPubkey: string | null;
+  subagents: readonly SubagentStatus[];
   onToggle: (key: string) => void;
   onOpenAgentProfile: (
     pubkey: string,
@@ -550,20 +572,31 @@ function CollapsibleAgentGroup({
         <span className="text-xs text-muted-foreground">({agents.length})</span>
       </button>
       {!isCollapsed ? (
-        <div className={IDENTITY_CARD_GRID_CLASS}>
-          {agents.map((agent) => (
-            <StandaloneAgentCard
-              agent={agent}
-              defaultModel={defaultModel}
-              key={agent.pubkey}
-              restartingAgentPubkey={restartingAgentPubkey}
-              startingAgentPubkey={startingAgentPubkey}
-              onOpenAgentProfile={onOpenAgentProfile}
-              onRestartAgent={onRestartAgent}
-              onStartAgent={onStartAgent}
-            />
-          ))}
-        </div>
+        <>
+          <div className={IDENTITY_CARD_GRID_CLASS}>
+            {agents.map((agent) => (
+              <StandaloneAgentCard
+                agent={agent}
+                getAvailability={getAvailability}
+                isBestie={normalizePubkey(agent.pubkey) === bestiePubkey}
+                defaultModel={defaultModel}
+                key={agent.pubkey}
+                restartingAgentPubkey={restartingAgentPubkey}
+                startingAgentPubkey={startingAgentPubkey}
+                onOpenAgentProfile={onOpenAgentProfile}
+                onRestartAgent={onRestartAgent}
+                onStartAgent={onStartAgent}
+              />
+            ))}
+          </div>
+          {/* SPEC-nested-subagents B2: default-collapsed subagent rows
+              under any parent card in this group; renders nothing while no
+              parent here has subagent records. */}
+          <SubagentTree
+            parentPubkeys={agents.map((agent) => agent.pubkey)}
+            subagents={subagents}
+          />
+        </>
       ) : null}
     </div>
   );

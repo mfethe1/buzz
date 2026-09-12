@@ -5,7 +5,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../../shared/theme/theme.dart';
 import '../../../shared/widgets/buzz_loading_indicator.dart';
-import '../../profile/user_cache_provider.dart';
+import '../../../shared/profile/user_cache_provider.dart';
 import '../date_formatters.dart';
 import 'observer_models.dart';
 import 'observer_subscription.dart';
@@ -124,6 +124,11 @@ class AgentActivitySheet extends HookConsumerWidget {
                       child: _EmptyState(
                         connection: connection,
                         errorMessage: observerState.errorMessage,
+                        onRetry: connection == ObserverConnectionState.error
+                            ? () => ref
+                                  .read(observerRelayProvider.notifier)
+                                  .retry()
+                            : null,
                       ),
                     )
                   : ListView.builder(
@@ -150,8 +155,13 @@ class AgentActivitySheet extends HookConsumerWidget {
 class _EmptyState extends StatelessWidget {
   final ObserverConnectionState connection;
   final String? errorMessage;
+  final VoidCallback? onRetry;
 
-  const _EmptyState({required this.connection, this.errorMessage});
+  const _EmptyState({
+    required this.connection,
+    this.errorMessage,
+    this.onRetry,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -169,6 +179,14 @@ class _EmptyState extends StatelessWidget {
               ),
               textAlign: TextAlign.center,
             ),
+            if (onRetry != null) ...[
+              const SizedBox(height: Grid.xxs),
+              FilledButton.tonalIcon(
+                onPressed: onRetry,
+                icon: const Icon(LucideIcons.rotateCcw, size: 16),
+                label: const Text('Try again'),
+              ),
+            ],
           ],
         ),
       );

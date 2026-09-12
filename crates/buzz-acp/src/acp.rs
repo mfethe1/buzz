@@ -14,11 +14,16 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
 use crate::observer::{ObserverContext, ObserverHandle};
-use crate::usage::{TurnUsage, UsageTracker};
+use crate::usage::{
+    PromptResponseUsage, StandardAdapterKind, StandardUsageTracker, TurnUsage, UsageTracker,
+};
 
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
+
+/// Package and binary name used by Buzz's Pi ACP fork.
+pub(crate) const BUZZ_PI_ACP_NAME: &str = "buzz-pi-acp";
 
 /// An MCP server configuration passed to `session/new`.
 ///
@@ -155,7 +160,7 @@ pub struct AcpClient {
     /// a `cancelled` outcome before the agent returns from `session/prompt`.
     pending_permission_id: Option<serde_json::Value>,
     /// Whether we have already sent a response to the pending permission request.
-    /// Guards against double-response if a timeout fires after the rejection
+    /// Guards against double-response if a timeout fires after the allow_once
     /// response was written but before `pending_permission_id` was cleared.
     permission_responded: bool,
     /// The JSON-RPC id of the most recently sent `session/prompt` request.
@@ -168,6 +173,8 @@ pub struct AcpClient {
     current_hard_deadline: Option<tokio::time::Instant>,
     /// Optional local observer feed used by the desktop app.
     observer: Option<ObserverHandle>,
+    /// Per-client delegation-tool correlation for subagent lifecycle events.
+    subagent_tracker: crate::subagent::SubagentTracker,
     /// Pool slot index for this agent process.
     observer_agent_index: Option<usize>,
     /// Best-effort context attached to raw ACP wire events.
@@ -198,6 +205,8 @@ pub struct AcpClient {
     /// a JSON-RPC *success*, not `-32601` — which the main loop would read as
     /// a delivered steer and drop the user's message from the queue.
     steering_supported: bool,
+    /// Whether the agent advertised `agentCapabilities.loadSession == true`.
+    load_session_supported: bool,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -206,11 +215,12 @@ pub struct AcpClient {
     /// outside of a goose-native turn — the read loop's steer arm is
     /// disabled in that case.
     steer_rx: Option<tokio::sync::mpsc::Receiver<crate::pool::SteerRequest>>,
-    /// Usage tracker — accumulates cumulative token counts from
-    /// `_goose/unstable/session/update` notifications and computes per-turn
-    /// deltas. Both goose and buzz-agent emit this notification; goose gates
-    /// on client capability advertisement, buzz-agent emits unconditionally.
+    /// Usage tracker for goose/buzz-agent's cumulative notification format.
     goose_usage: UsageTracker,
+    /// Per-turn prompt-response usage and Claude's optional cumulative cost.
+    standard_usage: StandardUsageTracker,
+    /// Known adapter identity for prompt-response usage mapping.
+    standard_adapter: Option<StandardAdapterKind>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -457,8 +467,17 @@ impl AcpClient {
         use std::process::Stdio;
 
         let mut cmd = tokio::process::Command::new(command);
-        cmd.args(args)
-            .stdin(Stdio::piped())
+        cmd.args(args);
+        if crate::config::normalize_agent_command_identity(command) == BUZZ_PI_ACP_NAME {
+            if !args.iter().any(|arg| arg == "--") {
+                cmd.arg("--");
+            }
+            // Desktop launches buzz-acp in the Buzz nest; adapters inherit that
+            // workspace. Keep managed skills tied to launch CWD across sessions.
+            cmd.arg("--skill")
+                .arg(std::env::current_dir()?.join(".agents/skills"));
+        }
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Inherit stderr so agent logs are visible in the harness terminal.
             .stderr(Stdio::inherit())
@@ -523,6 +542,14 @@ impl AcpClient {
         // console-subsystem child process spawned from a GUI/non-console parent.
         configure_no_window(&mut cmd);
 
+        let standard_adapter =
+            match crate::config::normalize_agent_command_identity(command).as_str() {
+                "claude-agent-acp" | "claude-code-acp" | "claude-code" | "claudecode" => {
+                    Some(StandardAdapterKind::Claude)
+                }
+                "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
+                _ => None,
+            };
         let mut child = cmd.spawn()?;
 
         let stdin = child
@@ -544,12 +571,16 @@ impl AcpClient {
             last_prompt_id: None,
             current_hard_deadline: None,
             observer: None,
+            subagent_tracker: crate::subagent::SubagentTracker::new(),
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
             active_run_id: None,
             steering_supported: false,
+            load_session_supported: false,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            standard_usage: StandardUsageTracker::default(),
+            standard_adapter,
         })
     }
 
@@ -604,6 +635,10 @@ impl AcpClient {
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        self.load_session_supported = result
+            .pointer("/agentCapabilities/loadSession")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
     }
@@ -624,14 +659,16 @@ impl AcpClient {
     ///
     /// - `None` — no system-prompt field in the request (legacy framing).
     /// - `Some(SystemPromptTransport::Field(text))` — bare `systemPrompt` field
-    ///   (ACP protocol v2, buzz-agent, goose unused).
+    ///   (ACP protocol v2, buzz-agent; goose unused).
+    /// - `Some(SystemPromptTransport::PiMeta(text))` — `_meta.systemPrompt`
+    ///   as a replacement string for the Buzz pi-acp fork.
     /// - `Some(SystemPromptTransport::ClaudeMeta(text))` — `_meta.systemPrompt`
     ///   as `{"append": text}`, keeping claude-agent-acp's native preset intact.
     ///
     /// `session_title` rides in `_meta.sessionTitle` when `Some`; `_meta` is
     /// omitted entirely otherwise, since adapters may distinguish an absent
-    /// member from a null one. When both `ClaudeMeta` and `session_title` are
-    /// present the two `_meta` members are merged into a single object.
+    /// member from a null one. Metadata prompt transports and the title are
+    /// merged into a single object.
     ///
     /// Callers use [`extract_model_config_options`] and [`extract_model_state`]
     /// to pull model info from the raw result.
@@ -650,6 +687,9 @@ impl AcpClient {
             Some(SystemPromptTransport::Field(sp)) => {
                 params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
             }
+            Some(SystemPromptTransport::PiMeta(sp)) => {
+                params["_meta"]["systemPrompt"] = serde_json::Value::String(sp.to_owned());
+            }
             Some(SystemPromptTransport::ClaudeMeta(sp)) => {
                 // Merge into _meta so sessionTitle (set below) is not clobbered.
                 params["_meta"]["systemPrompt"] = serde_json::json!({ "append": sp });
@@ -657,7 +697,7 @@ impl AcpClient {
             None => {}
         }
         if let Some(title) = session_title {
-            // Merge — _meta may already carry systemPrompt from ClaudeMeta above.
+            // Merge — _meta may already carry a system prompt from an adapter extension.
             params["_meta"]["sessionTitle"] = serde_json::Value::String(title.to_owned());
         }
         let result = self.send_request("session/new", params).await?;
@@ -689,7 +729,28 @@ impl AcpClient {
             .session_id)
     }
 
-    /// Send Goose's custom system-prompt request after `session/new`.
+    /// Re-attach to an adapter-persisted session via ACP `session/load`.
+    ///
+    /// Gate on [`Self::load_session_supported`]. The adapter may replay the
+    /// session's history as `session/update` notifications before responding;
+    /// the read loop treats out-of-turn updates as passive.
+    pub async fn session_load(
+        &mut self,
+        session_id: &str,
+        cwd: &str,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<(), AcpError> {
+        let params = serde_json::json!({
+            "sessionId": session_id,
+            "cwd": cwd,
+            "mcpServers": mcp_servers,
+        });
+        self.send_request("session/load", params).await?;
+        tracing::info!(target: "acp::session", "session loaded: {session_id}");
+        Ok(())
+    }
+
+    /// Replace Goose's native system prompt after `session/new`.
     pub async fn session_set_goose_system_prompt(
         &mut self,
         session_id: &str,
@@ -699,7 +760,7 @@ impl AcpClient {
             "_goose/unstable/session/system-prompt/set",
             serde_json::json!({
                 "sessionId": session_id,
-                "mode": "append",
+                "mode": "set",
                 "key": "buzz",
                 "text": text,
             }),
@@ -776,6 +837,7 @@ impl AcpClient {
         // prompt so that any setup notifications recorded earlier are not
         // misattributed to this turn.
         self.goose_usage.begin_turn(session_id);
+        self.standard_usage.begin_turn(session_id);
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -821,7 +883,7 @@ impl AcpClient {
                 self.current_hard_deadline = None;
             }
         }
-        self.parse_stop_reason(&result?)
+        self.parse_prompt_response(session_id, &result?)
     }
 
     /// Send a `session/cancel` **notification** (no `id` field, no response expected).
@@ -867,18 +929,34 @@ impl AcpClient {
         self.steering_supported
     }
 
-    /// Consume and return the per-turn usage record computed from the most
-    /// recent `_goose/unstable/session/update` notification.
-    ///
-    /// Returns `None` if no usage update arrived since the last call (i.e.
-    /// the harness did not emit one for this turn, or this is not a goose
-    /// agent). Must be called at most once per turn; subsequent calls return
-    /// `None` until the next `usage_update` notification is recorded.
-    ///
-    /// Intended for consumption by `publish_agent_turn_metric` in `pool.rs` to
-    /// publish a kind 44200 NIP-AM event.
+    /// Whether the agent advertised `agentCapabilities.loadSession`.
+    pub fn load_session_supported(&self) -> bool {
+        self.load_session_supported
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_load_session_supported(&mut self, value: bool) {
+        self.load_session_supported = value;
+    }
+
+    /// Consume per-turn usage for NIP-AM publishing. Goose/buzz-agent is an
+    /// exclusive cumulative path; standard ACP prompt usage is used only when
+    /// goose emitted nothing for this turn.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
-        self.goose_usage.take()
+        let goose_usage = self.goose_usage.take();
+        let standard_usage = self.standard_usage.take();
+        goose_usage.or(standard_usage)
+    }
+
+    /// Notify the usage tracker that buzz-acp just spawned a new session.
+    ///
+    /// Seeds a zero baseline so the first usage notification for `session_id`
+    /// produces `delta_reliable: true` (turn delta == cumulative from zero).
+    /// Must be called only when buzz-acp created the session via `session/new`;
+    /// never when attaching to a pre-existing session.
+    pub(crate) fn notify_session_spawned(&mut self, session_id: &str) {
+        self.goose_usage.seed_zero_baseline(session_id);
+        self.standard_usage.seed_zero_baseline(session_id);
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1038,7 +1116,7 @@ impl AcpClient {
                 remaining,
             )
             .await?;
-        self.parse_stop_reason(&result)
+        self.parse_prompt_response(session_id, &result)
     }
 
     /// Serialize `value` as a single NDJSON line and flush to the agent's stdin.
@@ -1162,8 +1240,7 @@ impl AcpClient {
     ///
     /// While waiting, handles:
     /// - `session/update` notifications → logged via tracing
-    /// - `session/request_permission` requests → rejected unless an owner has
-    ///   already selected a non-interactive permission mode at session setup
+    /// - `session/request_permission` requests → auto-approved with `allow_once`
     /// - Any other messages → debug-logged and ignored; if they carry an `id`
     ///   (i.e. they are requests, not notifications), a JSON-RPC -32601 error is sent.
     ///
@@ -1608,7 +1685,9 @@ impl AcpClient {
                                                     "steer accepted as {STEER_OUTCOME_STARTED_NEW_TURN}: \
                                                      awaited turn had ended — hard deadline not renewed"
                                                 );
-                                                crate::pool::SteerAck::Success
+                                                crate::pool::SteerAck::Success {
+                                                    session_id: session_id.to_owned(),
+                                                }
                                             }
                                             Some(_) => {
                                                 let renew_now = Instant::now();
@@ -1620,7 +1699,9 @@ impl AcpClient {
                                                         "steer success: renewed hard deadline ({max_duration:?} from now)"
                                                     );
                                                 }
-                                                crate::pool::SteerAck::Success
+                                                crate::pool::SteerAck::Success {
+                                                    session_id: session_id.to_owned(),
+                                                }
                                             }
                                             None => {
                                                 // Report the raw string when
@@ -1746,6 +1827,14 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                // [lenny] Workstream A: detect subagent delegation tool calls
+                // (e.g. Hermes `delegate_task`) and emit parent-tagged
+                // subagent lifecycle events. Additive only — when no observer
+                // is attached or the tool isn't a delegation, this is a no-op
+                // and existing flows are untouched.
+                if let Some(event) = self.subagent_tracker.observe_update(update) {
+                    self.observe(crate::subagent::OBSERVER_KIND_SUBAGENT_LIFECYCLE, event);
+                }
                 true
             }
             "tool_call_update" => {
@@ -1755,6 +1844,12 @@ impl AcpClient {
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
                 tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
+                // [lenny] Workstream A: correlate tool-call status updates
+                // (in_progress → running; completed → complete; failed →
+                // failed) with the tracked delegation.
+                if let Some(event) = self.subagent_tracker.observe_update(update) {
+                    self.observe(crate::subagent::OBSERVER_KIND_SUBAGENT_LIFECYCLE, event);
+                }
                 false
             }
             "plan" => {
@@ -1818,12 +1913,40 @@ impl AcpClient {
                 }
                 false
             }
+            "usage_update" => {
+                self.handle_standard_usage_update(msg);
+                false
+            }
             "keepalive" => false,
             other => {
                 tracing::debug!(target: "acp::update", "session/update: {other}");
                 false
             }
         }
+    }
+
+    /// Record the standard ACP cumulative cost notification when emitted by
+    /// Claude. Unlike Goose's payload, `used`/`size` are context occupancy and
+    /// are intentionally not mapped to token accounting.
+    fn handle_standard_usage_update(&mut self, msg: &serde_json::Value) {
+        if self.standard_adapter != Some(StandardAdapterKind::Claude) {
+            return;
+        }
+        let session_id = match msg
+            .pointer("/params/sessionId")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(session_id) => session_id,
+            None => return,
+        };
+        let cost = match msg
+            .pointer("/params/update/cost/amount")
+            .and_then(serde_json::Value::as_f64)
+        {
+            Some(cost) => cost,
+            None => return,
+        };
+        self.standard_usage.record_cost(session_id, cost);
     }
 
     /// Parse a `_goose/unstable/session/update` notification and record the
@@ -1850,8 +1973,8 @@ impl AcpClient {
                     tracing::debug!(
                         target: "acp::usage",
                         session_id = %notif.session_id,
-                        input = payload.accumulated_input_tokens,
-                        output = payload.accumulated_output_tokens,
+                        input = ?payload.accumulated_input_tokens,
+                        output = ?payload.accumulated_output_tokens,
                         // A subset of `input`, logged so downstream accounting can
                         // price it at the provider's cached rate. Always emitted,
                         // including as 0, so a parser can tell "no cache hits"
@@ -1871,12 +1994,12 @@ impl AcpClient {
         }
     }
 
-    /// Reject a `session/request_permission` request from the agent.
+    /// Auto-approve a `session/request_permission` request from the agent.
     ///
-    /// Buzz has no human permission prompt in this harness, so selecting
-    /// `allow_once` would turn any admitted prompt into an implicit approval.
-    /// Find `reject_once` by kind when the adapter offers it; otherwise use the
-    /// protocol's cancelled outcome, which is also fail-closed.
+    /// Finds the option with `kind == "allow_once"` and responds with its `optionId`.
+    /// If no `allow_once` option exists, falls back to `reject_once`.
+    ///
+    /// **Critical:** Never hardcode `optionId` — always find it dynamically by `kind`.
     ///
     /// The request `id` is stored as `serde_json::Value` to support both numeric
     /// and string IDs per JSON-RPC 2.0.
@@ -1902,7 +2025,40 @@ impl AcpClient {
             options.len()
         );
 
-        let response = permission_denial_response(&id, options)?;
+        // Find allow_once by kind — NEVER hardcode optionId.
+        let allow_once = options
+            .iter()
+            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
+
+        let response = if let Some(opt) = allow_once {
+            let option_id = opt["optionId"]
+                .as_str()
+                .ok_or_else(|| AcpError::Protocol("allow_once option missing optionId".into()))?;
+            tracing::info!(
+                target: "acp::permission",
+                "auto-approving permission id={id} with allow_once optionId={option_id:?}"
+            );
+            permission_response_selected(&id, option_id)
+        } else {
+            // No allow_once — fall back to reject_once.
+            tracing::warn!(
+                target: "acp::permission",
+                "no allow_once option found in permission request id={id}, falling back to reject_once"
+            );
+            let reject = options
+                .iter()
+                .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
+
+            if let Some(opt) = reject {
+                let option_id = opt["optionId"].as_str().unwrap_or("reject");
+                permission_response_selected(&id, option_id)
+            } else {
+                return Err(AcpError::Protocol(
+                    "no suitable permission option found (neither allow_once nor reject_once)"
+                        .into(),
+                ));
+            }
+        };
 
         // Write the response first, then mark as responded.
         //
@@ -1922,6 +2078,28 @@ impl AcpClient {
         self.permission_responded = true;
         self.pending_permission_id = None;
         Ok(())
+    }
+
+    /// Parse a completed prompt response and retain its optional per-turn usage.
+    fn parse_prompt_response(
+        &mut self,
+        session_id: &str,
+        result: &serde_json::Value,
+    ) -> Result<StopReason, AcpError> {
+        let stop_reason = self.parse_stop_reason(result)?;
+        if let Some(adapter) = self.standard_adapter {
+            match serde_json::from_value::<PromptResponseUsage>(result["usage"].clone()) {
+                Ok(usage) => self
+                    .standard_usage
+                    .record_prompt_usage(session_id, usage, adapter),
+                Err(_) if result.get("usage").is_some() => tracing::debug!(
+                    target: "acp::usage",
+                    "session/prompt response contained malformed standard usage"
+                ),
+                Err(_) => {}
+            }
+        }
+        Ok(stop_reason)
     }
 
     /// Parse `stopReason` from a `session/prompt` result value.
@@ -2014,42 +2192,6 @@ fn permission_response_cancelled(id: &serde_json::Value) -> serde_json::Value {
     })
 }
 
-/// Choose the fail-closed response to a `session/request_permission` request.
-///
-/// Buzz has no human permission prompt in this harness, so selecting
-/// `allow_once` would turn any admitted prompt into an implicit approval.
-/// Prefer the adapter's `reject_once` option — matched by `kind`, never by a
-/// hardcoded `optionId` — and fall back to the protocol's cancelled outcome for
-/// adapters that do not offer one. Both answers deny.
-///
-/// Kept free of the client so the decision is testable without an agent
-/// subprocess: `AcpClient` owns a real `Child` and its stdio pipes.
-fn permission_denial_response(
-    id: &serde_json::Value,
-    options: &[serde_json::Value],
-) -> Result<serde_json::Value, AcpError> {
-    let reject_once = options
-        .iter()
-        .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
-
-    let Some(opt) = reject_once else {
-        tracing::warn!(
-            target: "acp::permission",
-            "no reject_once option found in permission request id={id}, cancelling"
-        );
-        return Ok(permission_response_cancelled(id));
-    };
-
-    let option_id = opt["optionId"]
-        .as_str()
-        .ok_or_else(|| AcpError::Protocol("reject_once option missing optionId".into()))?;
-    tracing::info!(
-        target: "acp::permission",
-        "rejecting permission id={id} with reject_once optionId={option_id:?}"
-    );
-    Ok(permission_response_selected(id, option_id))
-}
-
 /// Full `session/new` response — session ID plus the raw JSON result.
 ///
 /// Callers use the extractor helpers to pull model info from `raw`.
@@ -2061,9 +2203,9 @@ pub struct SessionNewResponse {
 
 /// How to deliver a system prompt on `session/new`.
 ///
-/// The two variants match the two mechanisms supported by current adapters:
-///
 /// - **`Field`** — bare `systemPrompt` field (ACP protocol v2, buzz-agent).
+/// - **`PiMeta`** — `_meta.systemPrompt: text`, used by the Buzz pi-acp fork
+///   to replace Pi's native system prompt.
 /// - **`ClaudeMeta`** — `_meta.systemPrompt: {"append": text}`, used by
 ///   `claude-agent-acp` to append to the adapter's own native system prompt
 ///   while keeping its tool-use preset intact.
@@ -2071,6 +2213,8 @@ pub struct SessionNewResponse {
 pub enum SystemPromptTransport<'a> {
     /// Deliver as a bare top-level `systemPrompt` field.
     Field(&'a str),
+    /// Deliver as `_meta.systemPrompt: text`.
+    PiMeta(&'a str),
     /// Deliver as `_meta.systemPrompt: {"append": text}`.
     ClaudeMeta(&'a str),
 }
@@ -2110,6 +2254,28 @@ pub fn extract_model_config_options(result: &serde_json::Value) -> Vec<serde_jso
 /// Returns the `models` object if present: `{ currentModelId, availableModels: [...] }`.
 pub fn extract_model_state(result: &serde_json::Value) -> Option<serde_json::Value> {
     result.get("models").cloned()
+}
+
+/// Extract the `configId` for the `thought_level` category option from a
+/// `session/new` result, if the adapter advertised one.
+///
+/// Claude Code's adapter uses `category: "thought_level"` in its `configOptions`.
+/// The configId is adapter-defined (e.g. `"effort"` on claude-agent-acp) and must
+/// not be hardcoded in the harness — this function discovers it at session time so
+/// the spawn-scoped effort application forwards the adapter's real id. Accepts both
+/// `configId` (ACP spec) and `id` (claude-agent-acp), matching the model-switch path.
+pub fn extract_thought_level_config_id(result: &serde_json::Value) -> Option<String> {
+    let arr = result["configOptions"].as_array()?;
+    for opt in arr {
+        if opt.get("category").and_then(|c| c.as_str()) == Some("thought_level") {
+            let config_id = opt
+                .get("configId")
+                .or_else(|| opt.get("id"))
+                .and_then(|v| v.as_str())?;
+            return Some(config_id.to_string());
+        }
+    }
+    None
 }
 
 /// Match a desired model ID against a fresh `session/new` response.
@@ -2304,96 +2470,63 @@ mod tests {
         assert_eq!(StopReason::from_str("Refusal"), Some(StopReason::Refusal));
     }
 
-    fn options(json: &str) -> Vec<serde_json::Value> {
-        serde_json::from_str(json).expect("option list")
-    }
-
-    fn outcome(response: &serde_json::Value) -> Option<&str> {
-        response["result"]["outcome"]["outcome"].as_str()
-    }
-
-    /// The offered `allow_once` and `allow_always` options must be ignored:
-    /// there is no human to click them, so choosing either would make every
-    /// admitted prompt an implicit approval. `optionId`s are deliberately
-    /// non-obvious to prove they are matched by `kind`, never hardcoded.
     #[test]
-    fn permission_requests_select_reject_once_not_allow_once() {
-        let options = options(
+    fn find_allow_once_by_kind_not_by_option_id() {
+        // optionId values are intentionally non-obvious to prove we don't hardcode them.
+        let options: Vec<serde_json::Value> = serde_json::from_str(
             r#"[
             {"optionId": "opt-reject-42",  "name": "Reject",       "kind": "reject_once"},
             {"optionId": "opt-allow-99",   "name": "Allow once",   "kind": "allow_once"},
             {"optionId": "opt-always-7",   "name": "Always allow", "kind": "allow_always"}
         ]"#,
-        );
+        )
+        .unwrap();
 
-        let response =
-            permission_denial_response(&serde_json::json!(7), &options).expect("denial response");
+        let allow_once = options
+            .iter()
+            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
 
-        assert_eq!(outcome(&response), Some("selected"));
-        assert_eq!(
-            response["result"]["outcome"]["optionId"].as_str(),
-            Some("opt-reject-42"),
-            "must select reject_once even when allow options are offered"
-        );
+        assert!(allow_once.is_some(), "should find allow_once option");
+        let opt = allow_once.unwrap();
+        // Found by kind, not by hardcoded optionId
+        assert_eq!(opt["kind"].as_str(), Some("allow_once"));
+        assert_eq!(opt["optionId"].as_str(), Some("opt-allow-99"));
     }
 
-    /// Fail-closed backstop: an adapter that offers no `reject_once` must still
-    /// be denied, via the protocol's cancelled outcome rather than an error or
-    /// an approval.
     #[test]
-    fn permission_request_without_reject_once_is_cancelled() {
-        let options = options(
+    fn find_allow_once_returns_none_when_absent() {
+        let options: Vec<serde_json::Value> = serde_json::from_str(
             r#"[
-            {"optionId": "opt-allow-99", "name": "Allow once",   "kind": "allow_once"},
-            {"optionId": "opt-always-7", "name": "Always allow", "kind": "allow_always"}
+            {"optionId": "reject-1",      "name": "Reject",        "kind": "reject_once"},
+            {"optionId": "reject-always", "name": "Always reject", "kind": "reject_always"}
         ]"#,
-        );
+        )
+        .unwrap();
 
-        let response = permission_denial_response(&serde_json::json!("req-1"), &options)
-            .expect("cancelled response");
+        let allow_once = options
+            .iter()
+            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
 
-        assert_eq!(outcome(&response), Some("cancelled"));
-        assert_eq!(
-            response["id"].as_str(),
-            Some("req-1"),
-            "string ids must round-trip per JSON-RPC 2.0"
-        );
-    }
-
-    /// An empty option list is the degenerate form of the same backstop.
-    #[test]
-    fn permission_request_with_no_options_is_cancelled() {
-        let response =
-            permission_denial_response(&serde_json::json!(1), &[]).expect("cancelled response");
-
-        assert_eq!(outcome(&response), Some("cancelled"));
-    }
-
-    /// A `reject_once` option missing its `optionId` is a protocol violation.
-    /// Erroring propagates to the caller, which tears the turn down — still no
-    /// approval is ever sent.
-    #[test]
-    fn reject_once_without_option_id_is_a_protocol_error() {
-        let options = options(r#"[{"name": "Reject", "kind": "reject_once"}]"#);
-
-        let err = permission_denial_response(&serde_json::json!(1), &options)
-            .expect_err("missing optionId must error");
-
-        assert!(matches!(err, AcpError::Protocol(_)), "got {err:?}");
+        assert!(allow_once.is_none());
     }
 
     #[test]
-    fn find_reject_once_by_kind() {
-        let options =
-            options(r#"[{"optionId": "rej-x", "name": "Reject", "kind": "reject_once"}]"#);
+    fn find_reject_once_fallback_when_no_allow_once() {
+        let options: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"optionId": "rej-x", "name": "Reject", "kind": "reject_once"}]"#,
+        )
+        .unwrap();
 
-        let response =
-            permission_denial_response(&serde_json::json!(1), &options).expect("denial response");
+        let allow_once = options
+            .iter()
+            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("allow_once"));
+        assert!(allow_once.is_none());
 
-        assert_eq!(
-            response["result"]["outcome"]["optionId"].as_str(),
-            Some("rej-x")
-        );
+        let reject_once = options
+            .iter()
+            .find(|opt| opt.get("kind").and_then(|k| k.as_str()) == Some("reject_once"));
+        assert!(reject_once.is_some());
+        assert_eq!(reject_once.unwrap()["optionId"].as_str(), Some("rej-x"));
     }
 
     #[test]
@@ -2715,6 +2848,54 @@ mod tests {
     }
 
     #[test]
+    fn extract_thought_level_config_id_finds_config_id() {
+        let result = serde_json::json!({
+            "sessionId": "sess-1",
+            "configOptions": [
+                { "configId": "model", "category": "model" },
+                {
+                    "configId": "effort",
+                    "category": "thought_level",
+                    "options": [{ "value": "high" }, { "value": "low" }]
+                }
+            ]
+        });
+        assert_eq!(
+            super::extract_thought_level_config_id(&result).as_deref(),
+            Some("effort")
+        );
+    }
+
+    #[test]
+    fn extract_thought_level_config_id_falls_back_to_id_key() {
+        let result = serde_json::json!({
+            "configOptions": [
+                { "id": "effort", "category": "thought_level" }
+            ]
+        });
+        assert_eq!(
+            super::extract_thought_level_config_id(&result).as_deref(),
+            Some("effort")
+        );
+    }
+
+    #[test]
+    fn extract_thought_level_config_id_none_without_category() {
+        let result = serde_json::json!({
+            "configOptions": [
+                { "configId": "model", "category": "model" }
+            ]
+        });
+        assert!(super::extract_thought_level_config_id(&result).is_none());
+    }
+
+    #[test]
+    fn extract_thought_level_config_id_none_without_config_options() {
+        let result = serde_json::json!({ "sessionId": "sess-1" });
+        assert!(super::extract_thought_level_config_id(&result).is_none());
+    }
+
+    #[test]
     fn resolve_prefers_stable_over_unstable() {
         let result = serde_json::json!({
             "configOptions": [{
@@ -2916,10 +3097,67 @@ mod tests {
         );
     }
 
+    /// Spawn a fake ACP agent that runs `script` under a resolved POSIX shell.
+    ///
+    /// Goes through [`crate::testshell::posix_shell_command`] rather than the
+    /// bare name `"bash"`: on Windows the bare name resolves to WSL's
+    /// `System32\bash.exe`, whose `read` builtin returns empty over a pipe.
+    /// See that module for the full failure mode.
     async fn spawn_script(script: &str) -> AcpClient {
-        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+        AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".into(), script.into()],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn test script")
+    }
+
+    /// [`spawn_script`], but blocks until the fixture has actually started.
+    ///
+    /// Deadline-sensitive tests must start their clock only once the shell is
+    /// provably executing. Process startup is near-free on Linux but costs
+    /// hundreds of milliseconds under MSYS fork emulation on Windows, so a
+    /// hard deadline measured from before the spawn is partly measuring host
+    /// startup rather than the behaviour under test — which is how these tests
+    /// came to depend on whichever interpreter happened to boot fastest.
+    ///
+    /// The sentinel is consumed here, so the JSON-RPC read loop never sees it.
+    async fn spawn_script_ready(script: &str) -> AcpClient {
+        let mut client = spawn_script(&format!("printf 'READY\\n'; {script}")).await;
+        let line = client
+            .reader
+            .next()
             .await
-            .expect("failed to spawn test script")
+            .expect("fixture must emit READY before running its body")
+            .expect("fixture stdout must be readable");
+        assert_eq!(line.trim(), "READY", "unexpected first line from fixture");
+        client
+    }
+
+    #[cfg(unix)]
+    async fn spawn_named_script(name: &str, script: &str) -> (AcpClient, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "buzz-acp-{name}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp adapter dir");
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/usr/bin/env bash\n{script}\n"))
+            .expect("write fake adapter");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("adapter metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("chmod fake adapter");
+        let client = AcpClient::spawn(path.to_str().expect("utf8 path"), &[], &[], false)
+            .await
+            .expect("spawn named fake adapter");
+        (client, dir)
     }
 
     /// Spawn a probe script whose file name carries a runtime identity (e.g.
@@ -3056,31 +3294,96 @@ mod tests {
         );
     }
 
+    /// Idle budget for the two "activity resets the idle timer" tests, and the
+    /// elapsed floor that proves a reset happened.
+    ///
+    /// INVARIANT: `RESET_FLOOR` must stay strictly greater than `RESET_IDLE` —
+    /// 2x here. A run in which no reset occurred returns elapsed ≈ `RESET_IDLE`,
+    /// so a floor at or below it would be satisfied by the bug these tests
+    /// exist to catch.
+    const RESET_IDLE: std::time::Duration = std::time::Duration::from_millis(600);
+    const RESET_FLOOR: std::time::Duration = std::time::Duration::from_millis(1200);
+
+    /// Drive `script` through the read loop and assert that incoming activity
+    /// kept the turn alive well past a single idle timeout.
+    ///
+    /// Retries an *inconclusive* run, and only that. The fixture's cadence
+    /// comes from a real subprocess — `sleep` is an external binary under MSYS,
+    /// so each tick costs a process spawn and the observed inter-line gap is
+    /// ~98ms (up to ~244ms idle, worse under parallel load) against a nominal
+    /// 50ms. When the host stalls longer than the idle budget, the read loop
+    /// times out *correctly* and the run tells us nothing about the behaviour
+    /// under test. Widening the constants cannot fix this: Linux finishes the
+    /// activity window in ~1s and Windows takes ~2s, so the floor is squeezed
+    /// from both sides.
+    ///
+    /// This does not weaken the assertion, because the two outcomes have
+    /// different shapes. A genuine failure to reset the idle timer is
+    /// deterministic — elapsed ≈ `RESET_IDLE` on every attempt, so every
+    /// attempt fails and so does the test. A host stall is intermittent, so a
+    /// healthy implementation clears the floor within a couple of tries.
+    /// Measured before this helper existed: 4 of 9 full-suite runs failed here.
+    async fn assert_activity_resets_idle(script: &str, what: &str) {
+        // Sized against how loaded the suite actually is, not by feel. Four was
+        // enough at 797 tests; at 811 — the count once the agent-lifecycle
+        // branch's process fixtures are also present — one run in three still
+        // exhausted it. Each extra attempt costs a fixture spawn only on a host
+        // that is already stalling, and never on a genuine regression: that
+        // fails on the first attempt, deterministically.
+        const ATTEMPTS: usize = 8;
+        let mut inconclusive = Vec::new();
+
+        for _ in 0..ATTEMPTS {
+            let mut client = spawn_script(script).await;
+            let max_dur = std::time::Duration::from_secs(30);
+            let hard_deadline = tokio::time::Instant::now() + max_dur;
+            let start = std::time::Instant::now();
+            let result = client
+                .read_until_response_with_idle_timeout(
+                    "test",
+                    999,
+                    RESET_IDLE,
+                    hard_deadline,
+                    max_dur,
+                )
+                .await;
+            let elapsed = start.elapsed();
+            client.shutdown().await;
+
+            // Always a true assertion: the turn must end by idling out, never
+            // by hitting the hard deadline or losing the child.
+            assert!(
+                matches!(result, Err(AcpError::IdleTimeout(_))),
+                "{what}: expected IdleTimeout, got {result:?}"
+            );
+            assert!(
+                elapsed < std::time::Duration::from_secs(20),
+                "{what}: read loop ran away; elapsed {elapsed:?}"
+            );
+
+            if elapsed >= RESET_FLOOR {
+                return;
+            }
+            inconclusive.push(elapsed);
+        }
+
+        panic!(
+            "{what}: idle fired before {RESET_FLOOR:?} on all {ATTEMPTS} attempts \
+             (elapsed {inconclusive:?}, idle budget {RESET_IDLE:?}). Activity is \
+             not resetting the idle timer. A merely-slow host would have cleared \
+             the floor on at least one attempt."
+        );
+    }
+
+    /// Valid JSON `session/update` notifications reset the idle timer; non-JSON
+    /// lines do not.
     #[tokio::test]
     async fn idle_resets_on_stdout_activity() {
-        // Send valid JSON (session/update notifications) to reset the idle timer.
-        // Non-JSON lines no longer reset idle — only valid JSON notifications do.
-        let mut client = spawn_script(
-            r#"for i in $(seq 1 10); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
+        assert_activity_resets_idle(
+            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 30"#,
+            "agent_thought_chunk activity",
         )
         .await;
-        let max_dur = std::time::Duration::from_secs(10);
-        let hard_deadline = tokio::time::Instant::now() + max_dur;
-        let start = std::time::Instant::now();
-        let result = client
-            .read_until_response_with_idle_timeout(
-                "test",
-                999,
-                std::time::Duration::from_millis(200),
-                hard_deadline,
-                max_dur,
-            )
-            .await;
-        let elapsed = start.elapsed();
-        // 10 messages × 50ms = ~500ms of activity, then idle timeout fires after 200ms more
-        assert!(elapsed >= std::time::Duration::from_millis(400));
-        assert!(elapsed < std::time::Duration::from_secs(3));
-        assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
     }
 
     #[tokio::test]
@@ -3253,35 +3556,18 @@ mod tests {
         assert_eq!(result.unwrap()["worked"], serde_json::json!(true));
     }
 
+    /// Keepalive `session/update` lines must keep resetting the idle timer, so
+    /// the turn survives far past a single idle deadline. This is the
+    /// regression test for the keepalive fix itself.
+    ///
+    /// See [`assert_activity_resets_idle`] for the budget and the retry rule.
     #[tokio::test]
     async fn keepalive_resets_idle_past_deadline() {
-        // Keepalive session/update lines every 50ms against a 100ms idle deadline.
-        // The turn should survive well past the 100ms deadline (proves the fix).
-        let mut client = spawn_script(
-            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 10"#,
+        assert_activity_resets_idle(
+            r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 30"#,
+            "keepalive",
         )
         .await;
-        let max_dur = std::time::Duration::from_secs(10);
-        let hard_deadline = tokio::time::Instant::now() + max_dur;
-        let start = std::time::Instant::now();
-        let result = client
-            .read_until_response_with_idle_timeout(
-                "test",
-                999,
-                std::time::Duration::from_millis(100),
-                hard_deadline,
-                max_dur,
-            )
-            .await;
-        let elapsed = start.elapsed();
-        // 20 keepalives × 50ms = ~1000ms of activity, then idle fires after 100ms more.
-        // Must survive well past the 100ms deadline.
-        assert!(
-            elapsed >= std::time::Duration::from_millis(500),
-            "keepalive should reset idle past the deadline; elapsed only {elapsed:?}"
-        );
-        assert!(elapsed < std::time::Duration::from_secs(5));
-        assert!(matches!(result, Err(AcpError::IdleTimeout(_))));
     }
 
     #[tokio::test]
@@ -3360,7 +3646,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn goose_system_prompt_request_uses_append_contract() {
+    async fn goose_system_prompt_request_uses_set_contract() {
         let script = r#"
             read -t 2 REQ
             echo '{"jsonrpc":"2.0","id":0,"result":{"_receivedRequest":'"$REQ"'}}'
@@ -3377,7 +3663,7 @@ mod tests {
             "_goose/unstable/session/system-prompt/set"
         );
         assert_eq!(received["params"]["sessionId"], "ses_goose");
-        assert_eq!(received["params"]["mode"], "append");
+        assert_eq!(received["params"]["mode"], "set");
         assert_eq!(received["params"]["key"], "buzz");
         assert_eq!(received["params"]["text"], "Be terse");
     }
@@ -3500,123 +3786,7 @@ mod tests {
 
     // ── claude-agent-acp _meta.systemPrompt transport ─────────────────────
 
-    #[tokio::test]
-    async fn session_new_full_sends_claude_meta_system_prompt_when_claude_meta_transport() {
-        // When ClaudeMeta transport is requested, the prompt must appear as
-        // _meta.systemPrompt: {"append": text} — never as a bare systemPrompt field.
-        let script = r#"
-            read -t 2 _init
-            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
-            read -t 2 REQ
-            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_claude","_receivedRequest":'"$REQ"'}}'
-            sleep 1
-        "#;
-        let mut client = spawn_script(script).await;
-        client
-            .initialize()
-            .await
-            .expect("initialize should succeed");
-
-        let resp = client
-            .session_new_full(
-                "/tmp",
-                vec![],
-                Some(SystemPromptTransport::ClaudeMeta("Be concise")),
-                None,
-            )
-            .await
-            .expect("session_new_full should succeed");
-
-        let received = &resp.raw["_receivedRequest"];
-        assert!(
-            received["params"].get("systemPrompt").is_none(),
-            "bare systemPrompt must not be present for ClaudeMeta transport"
-        );
-        assert_eq!(
-            received["params"]["_meta"]["systemPrompt"]["append"].as_str(),
-            Some("Be concise"),
-            "_meta.systemPrompt.append must carry the prompt text"
-        );
-    }
-
-    #[tokio::test]
-    async fn session_new_full_merges_claude_meta_and_session_title_into_single_meta_object() {
-        // Both ClaudeMeta prompt and session_title must coexist under _meta —
-        // the prompt must not clobber sessionTitle or vice versa.
-        let script = r#"
-            read -t 2 _init
-            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
-            read -t 2 REQ
-            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_merged","_receivedRequest":'"$REQ"'}}'
-            sleep 1
-        "#;
-        let mut client = spawn_script(script).await;
-        client
-            .initialize()
-            .await
-            .expect("initialize should succeed");
-
-        let resp = client
-            .session_new_full(
-                "/tmp",
-                vec![],
-                Some(SystemPromptTransport::ClaudeMeta("Be concise")),
-                Some("Fizz · #buzz-dev"),
-            )
-            .await
-            .expect("session_new_full should succeed");
-
-        let received = &resp.raw["_receivedRequest"];
-        assert_eq!(
-            received["params"]["_meta"]["systemPrompt"]["append"].as_str(),
-            Some("Be concise"),
-            "_meta.systemPrompt.append must be present"
-        );
-        assert_eq!(
-            received["params"]["_meta"]["sessionTitle"].as_str(),
-            Some("Fizz · #buzz-dev"),
-            "_meta.sessionTitle must be present alongside systemPrompt"
-        );
-    }
-
-    // ── Goose-native steer scaffold (PR follow-up to #1160) ──────────────
-
-    /// Helper: spawn an inert `cat` subprocess so we have a real AcpClient
-    /// to drive `handle_session_update` against. `cat` never writes back,
-    /// which is fine — these tests don't read from the agent, they just
-    /// feed JSON into the parser.
-    async fn spawn_inert_client() -> AcpClient {
-        AcpClient::spawn("cat", &[], &[], false)
-            .await
-            .expect("spawn cat as inert client")
-    }
-
-    /// Build a `session/update` JSON-RPC notification carrying a
-    /// `session_info_update` with the given `_meta.goose.activeRunId` value.
-    /// Pass `None` to omit the `activeRunId` field entirely.
-    ///
-    /// `_meta` is nested inside the `update` object (per the ACP
-    /// `SessionInfoUpdate` schema), matching what goose and buzz-agent
-    /// emit on the wire.
-    fn session_info_update_msg(active_run_id: Option<serde_json::Value>) -> serde_json::Value {
-        let mut goose = serde_json::Map::new();
-        if let Some(v) = active_run_id {
-            goose.insert("activeRunId".to_string(), v);
-        }
-        let mut meta = serde_json::Map::new();
-        meta.insert("goose".to_string(), serde_json::Value::Object(goose));
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "session/update",
-            "params": {
-                "sessionId": "test-session",
-                "update": {
-                    "sessionUpdate": "session_info_update",
-                    "_meta": serde_json::Value::Object(meta),
-                },
-            }
-        })
-    }
+    include!("acp/system_prompt_tests.rs");
 
     #[tokio::test]
     async fn active_run_id_sets_on_string() {
@@ -3826,7 +3996,7 @@ mod tests {
             .await
             .expect("ack oneshot must have received a SteerAck");
         match ack {
-            crate::pool::SteerAck::Success => {}
+            crate::pool::SteerAck::Success { .. } => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
     }
@@ -3836,21 +4006,31 @@ mod tests {
     /// fix (acp.rs:1440-1444): without renewal, the read loop returns
     /// `HardTimeout` before the prompt response arrives.
     ///
-    /// Timeline:
-    ///   t≈0:    read loop starts, `hard_deadline = now + 1s`
-    ///   t≈0.5s: script emits steer response (id=0) → Success renewal
-    ///           moves `hard_deadline` to `now + 3s` (≈3.5s from start)
-    ///   t≈1.5s: script emits prompt response (id=999) → `Ok`
+    /// Timeline (t=0 is *after* the fixture reports READY, so shell startup is
+    /// outside the measured window — see [`spawn_script_ready`]):
+    ///   t≈0:  read loop starts, `hard_deadline = now + 2s`
+    ///   t≈0:  `read` unblocks the moment the read loop writes the steer
+    ///         request, and the script answers (id=0) → Success renewal moves
+    ///         `hard_deadline` to `now + 10s`
+    ///   t≈3s: script emits prompt response (id=999) → `Ok`
     ///
-    /// Old code: `HardTimeout` at t≈1s (before prompt response).
-    /// New code: deadline renewed at t≈0.5s → prompt response at t≈1.5s → `Ok`.
+    /// Old code: `HardTimeout` at t≈2s (before the prompt response).
+    /// New code: deadline renewed at t≈0 → prompt response at t≈3s → `Ok`.
+    ///
+    /// The leading `read` is a *causal* barrier, not a timed one, and that is
+    /// load-bearing: the steer response must arrive before the deadline, and a
+    /// `sleep` cannot guarantee that when `sleep` is an external binary whose
+    /// spawn a loaded host can delay past the deadline itself. Blocking on the
+    /// request makes the ordering independent of wall-clock entirely. The
+    /// trailing `sleep 3` needs no such treatment: it only has to land *after*
+    /// the original deadline, and a stall pushes it further in that direction.
     #[tokio::test]
     async fn steer_success_renews_hard_deadline_and_survives_past_original() {
-        let script = "sleep 0.5; \
+        let script = "read -r _; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"stopReason\":\"end_turn\"}}'; \
-                      sleep 1; \
+                      sleep 3; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
-        let mut client = spawn_script(script).await;
+        let mut client = spawn_script_ready(script).await;
 
         let update = session_info_update_msg(Some(serde_json::json!("run-99")));
         let _ = client.handle_session_update(&update);
@@ -3870,8 +4050,8 @@ mod tests {
         });
 
         let idle = std::time::Duration::from_secs(10);
-        let max_dur = std::time::Duration::from_secs(3);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let result = client
             .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
             .await;
@@ -3887,7 +4067,7 @@ mod tests {
             .await
             .expect("ack oneshot must have received a SteerAck");
         match ack {
-            crate::pool::SteerAck::Success => {}
+            crate::pool::SteerAck::Success { .. } => {}
             other => panic!("expected SteerAck::Success, got {other:?}"),
         }
     }
@@ -3910,13 +4090,27 @@ mod tests {
         capture_path: &std::path::Path,
         response: &str,
     ) -> AcpClient {
+        // The redirect target MUST be single-quoted. `capture_path` is absolute,
+        // and on Windows that means `C:\Users\...\x.json`; interpolated bare,
+        // bash consumes every backslash as an escape and the redirect lands on a
+        // *relative* file named `C:UsersmfethAppData...json` in the crate source
+        // directory. The parent then reads the real path, finds nothing, and the
+        // test fails — while quietly littering the working tree. Quoting keeps
+        // the backslashes intact, which MSYS accepts as a Win32 path.
         let script = format!(
-            "read -r line; printf '%s' \"$line\" > {capture}; \
+            "read -r line; printf '%s' \"$line\" > '{capture}'; \
              printf '%s\\n' '{response}'; sleep 10",
-            capture = capture_path.display(),
+            capture = crate::testshell::quote_for_shell(capture_path),
             response = response,
         );
-        spawn_script(&script).await
+        // READY-gated, because `run_one_steer` gives the fixture an 800ms idle
+        // budget and `spawn_script` would leave MSYS shell startup inside it.
+        // Starting a real bash costs a large and load-dependent fraction of
+        // that budget, so under a loaded suite the read loop idled out before
+        // the fixture had answered at all — surfacing as whichever
+        // capture-based steer test happened to be running, which reads as four
+        // unrelated flakes rather than one shared cause.
+        spawn_script_ready(&script).await
     }
 
     /// Drive one steer through the read loop and return
@@ -3943,7 +4137,15 @@ mod tests {
                 .expect("steer_tx send should succeed");
         });
 
-        let idle = std::time::Duration::from_millis(800);
+        // The idle timeout is only how this loop *exits* once the fixture has
+        // answered — no assertion depends on its value, and the ack and the
+        // captured bytes are checked afterwards either way. At 800ms it was
+        // also, accidentally, a deadline the fixture had to beat: an MSYS
+        // `read` plus a file write can exceed it on a loaded host, and then
+        // the loop gave up before the response arrived. Three seconds is far
+        // outside that range while still bounding a fixture that never
+        // answers, which the 10s cap catches regardless.
+        let idle = std::time::Duration::from_secs(3);
         let max_dur = std::time::Duration::from_secs(10);
         let hard_deadline = tokio::time::Instant::now() + max_dur;
         let _ = client
@@ -3958,10 +4160,15 @@ mod tests {
     }
 
     /// Unique temp path for one test's captured request bytes.
+    ///
+    /// The uuid suffix is load-bearing: `%TEMP%` is shared across every
+    /// concurrent `cargo test -p buzz-acp` on the machine, so a fixed name
+    /// makes two runs — two git worktrees, or a rerun overlapping a previous
+    /// one — read each other's captures.
     fn capture_path(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join("buzz-acp-steer-capture");
         std::fs::create_dir_all(&dir).expect("create capture dir");
-        let path = dir.join(format!("{name}.json"));
+        let path = dir.join(format!("{name}-{}.json", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_file(&path);
         path
     }
@@ -4032,6 +4239,78 @@ mod tests {
         );
     }
 
+    async fn load_session_supported_after_initialize(init_result: &str) -> bool {
+        let script = format!(
+            "read -r _init; printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{result}}}'; \\
+             sleep 5",
+            result = init_result,
+        );
+        let mut client = spawn_script(&script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        client.load_session_supported()
+    }
+
+    #[tokio::test]
+    async fn initialize_records_load_session_supported_when_advertised() {
+        let supported = load_session_supported_after_initialize(
+            r#"{"protocolVersion":2,"agentCapabilities":{"loadSession":true}}"#,
+        )
+        .await;
+        assert!(
+            supported,
+            "agentCapabilities.loadSession: true must set load_session_supported"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_leaves_load_session_unsupported_when_absent() {
+        let supported = load_session_supported_after_initialize(
+            r#"{"protocolVersion":2,"agentCapabilities":{}}"#,
+        )
+        .await;
+        assert!(
+            !supported,
+            "absent loadSession must leave load_session_supported false"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_leaves_load_session_unsupported_when_explicitly_false() {
+        let supported = load_session_supported_after_initialize(
+            r#"{"protocolVersion":2,"agentCapabilities":{"loadSession":false}}"#,
+        )
+        .await;
+        assert!(
+            !supported,
+            "loadSession: false must leave load_session_supported false"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_load_wire_shape_and_replayed_update_does_not_wedge() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentCapabilities":{"loadSession":true}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_restored","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"replay"}}}}'
+            echo '{"jsonrpc":"2.0","id":1,"result":{"_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(client.load_session_supported());
+        client
+            .session_load("ses_restored", "/tmp", vec![])
+            .await
+            .expect("session_load should succeed after replayed update");
+    }
+
     /// Test 2: no `active_run_id` + capability advertised → the bytes on the
     /// wire are an `_session/steering` request carrying `sessionId` and
     /// `prompt`, and carrying **no** `expectedRunId` (the adapters reject
@@ -4071,7 +4350,7 @@ mod tests {
             "_session/steering must not carry expectedRunId; wrote: {written}"
         );
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "injected outcome must ack Success, got {ack:?}"
         );
     }
@@ -4103,7 +4382,7 @@ mod tests {
         // no `outcome`) — the OutcomeRejected guard applies only to
         // `_session/steering`.
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "goose success result must ack Success, got {ack:?}"
         );
     }
@@ -4169,15 +4448,19 @@ mod tests {
     /// `steer_success_renews_hard_deadline_and_survives_past_original` for
     /// the `_session/steering` transport.
     ///
-    /// Timeline: original hard deadline at t≈1s; steer response at t≈0.5s
-    /// renews it to t≈3.5s; prompt response at t≈1.5s lands inside it.
+    /// Timeline (t=0 is after READY): original hard deadline at t≈2s; the
+    /// leading `read` unblocks when the read loop writes the steer request, so
+    /// the steer response lands at t≈0 and renews the deadline to t≈10s;
+    /// prompt response at t≈3s lands inside it. See
+    /// `steer_success_renews_hard_deadline_and_survives_past_original` for why
+    /// the barrier is a `read` and not a `sleep`.
     #[tokio::test]
     async fn acp_steer_injected_renews_hard_deadline_and_survives_past_original() {
-        let script = "sleep 0.5; \
+        let script = "read -r _; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"outcome\":\"injected\"}}'; \
-                      sleep 1; \
+                      sleep 3; \
                       echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
-        let mut client = spawn_script(script).await;
+        let mut client = spawn_script_ready(script).await;
         set_steering_supported(&mut client);
 
         let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<crate::pool::SteerRequest>(1);
@@ -4194,8 +4477,8 @@ mod tests {
         });
 
         let idle = std::time::Duration::from_secs(10);
-        let max_dur = std::time::Duration::from_secs(3);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let result = client
             .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
             .await;
@@ -4208,7 +4491,7 @@ mod tests {
         assert_eq!(result.unwrap()["done"], serde_json::json!(true));
         let ack = ack_rx.await.expect("ack must be received");
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "injected must ack Success, got {ack:?}"
         );
     }
@@ -4220,17 +4503,21 @@ mod tests {
     /// deadline — that clock belongs to a turn which is already settled.
     ///
     /// Same timeline as the `injected` test, so the only difference is the
-    /// outcome string: original hard deadline at t≈1s, steer response at
-    /// t≈0.5s, prompt response at t≈1.5s. With renewal the prompt response
-    /// would land and this returns `Ok`; without renewal the original
-    /// deadline fires first and we get `HardTimeout`.
+    /// outcome string: original hard deadline at t≈2s, steer response at t≈0
+    /// (the leading `read` unblocks on the steer request), prompt response at
+    /// t≈3s. With renewal the prompt response would land and this returns
+    /// `Ok`; without renewal the original deadline fires first and we get
+    /// `HardTimeout`. The steer response must arrive *before* the deadline (so
+    /// the ack is still produced) and the prompt response *after* it — the
+    /// `read` barrier guarantees the first ordering causally rather than
+    /// betting on a `sleep`, and the trailing `sleep 3` only has to be late.
     #[tokio::test]
     async fn acp_steer_started_new_turn_acks_success_without_renewing_hard_deadline() {
-        let script = "sleep 0.5; \
+        let script = "read -r _; \
              echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"outcome\":\"startedNewTurn\"}}'; \
-             sleep 1; \
+             sleep 3; \
              echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
-        let mut client = spawn_script(script).await;
+        let mut client = spawn_script_ready(script).await;
         set_steering_supported(&mut client);
 
         let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<crate::pool::SteerRequest>(1);
@@ -4247,8 +4534,8 @@ mod tests {
         });
 
         let idle = std::time::Duration::from_secs(10);
-        let max_dur = std::time::Duration::from_secs(3);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let result = client
             .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
             .await;
@@ -4265,7 +4552,7 @@ mod tests {
         // rather than released — hence Success, not an Err.
         let ack = ack_rx.await.expect("ack must be received");
         assert!(
-            matches!(ack, crate::pool::SteerAck::Success),
+            matches!(ack, crate::pool::SteerAck::Success { .. }),
             "startedNewTurn is a delivery success, got {ack:?}"
         );
     }
@@ -4296,6 +4583,254 @@ mod tests {
             crate::pool::SteerAck::Err(crate::pool::SteerError::ExpectedRunIdMissing) => {}
             other => panic!("expected Err(ExpectedRunIdMissing), got {other:?}"),
         }
+    }
+
+    // ── Standard ACP prompt-response usage ─────────────────────────────────
+
+    fn prompt_response_usage(
+        input: u64,
+        output: u64,
+        total: u64,
+        cached_read: Option<u64>,
+        cached_write: Option<u64>,
+    ) -> serde_json::Value {
+        let mut usage = serde_json::json!({
+            "inputTokens": input,
+            "outputTokens": output,
+            "totalTokens": total,
+        });
+        if let Some(cached_read) = cached_read {
+            usage["cachedReadTokens"] = serde_json::json!(cached_read);
+        }
+        if let Some(cached_write) = cached_write {
+            usage["cachedWriteTokens"] = serde_json::json!(cached_write);
+        }
+        serde_json::json!({"stopReason": "end_turn", "usage": usage})
+    }
+
+    fn standard_cost_update(session_id: &str, cost: f64) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "usage_update",
+                    "cost": {"amount": cost, "currency": "USD"}
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn claude_prompt_response_usage_merges_with_cumulative_cost() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.notify_session_spawned("claude-session");
+        client.standard_usage.begin_turn("claude-session");
+        client.handle_session_update(&standard_cost_update("claude-session", 0.042));
+        assert_eq!(
+            client
+                .parse_prompt_response(
+                    "claude-session",
+                    &prompt_response_usage(100, 20, 175, Some(30), Some(25)),
+                )
+                .unwrap(),
+            StopReason::EndTurn
+        );
+
+        let usage = client.take_turn_usage().expect("prompt usage");
+        assert!(usage.delta_reliable, "response tokens need no baseline");
+        assert_eq!(usage.turn_input_tokens, Some(155));
+        assert_eq!(usage.turn_output_tokens, Some(20));
+        assert_eq!(
+            usage.turn_total_tokens, None,
+            "Claude total is adapter-derived"
+        );
+        assert_eq!(usage.turn_cache_read_tokens, Some(30));
+        assert_eq!(usage.turn_cache_write_tokens, Some(25));
+        assert_eq!(usage.turn_cost_usd, Some(0.042));
+        assert_eq!(usage.cumulative_cost_usd, Some(0.042));
+        assert_eq!(usage.cumulative_input_tokens, None);
+        assert_eq!(usage.cumulative_output_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn codex_prompt_response_usage_preserves_provider_total_without_cost() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Codex);
+        client.standard_usage.begin_turn("codex-session");
+        client.handle_session_update(&standard_cost_update("codex-session", 0.042));
+        client
+            .parse_prompt_response(
+                "codex-session",
+                &prompt_response_usage(90, 10, 140, Some(40), None),
+            )
+            .unwrap();
+
+        let usage = client.take_turn_usage().expect("prompt usage");
+        assert!(usage.delta_reliable);
+        assert_eq!(usage.turn_input_tokens, Some(130));
+        assert_eq!(usage.turn_output_tokens, Some(10));
+        assert_eq!(usage.turn_total_tokens, Some(140));
+        assert_eq!(usage.turn_cache_read_tokens, Some(40));
+        assert_eq!(usage.turn_cache_write_tokens, None);
+        assert_eq!(
+            usage.cumulative_cost_usd, None,
+            "Codex cost update is ignored"
+        );
+        assert_eq!(usage.cumulative_input_tokens, None);
+        assert_eq!(usage.cumulative_output_tokens, None);
+    }
+
+    #[tokio::test]
+    async fn standard_prompt_input_overflow_fails_closed() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.standard_usage.begin_turn("overflow-session");
+        client
+            .parse_prompt_response(
+                "overflow-session",
+                &prompt_response_usage(u64::MAX, 10, u64::MAX, Some(1), None),
+            )
+            .unwrap();
+
+        assert!(
+            client.take_turn_usage().is_none(),
+            "overflow without another valid signal must not emit all-null usage"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_named_adapter_wire_lifecycle_records_prompt_and_cost() {
+        let script = r#"
+            read -r REQ
+            ID=$(printf '%s' "$REQ" | sed -E 's/.*"id":([0-9]+).*/\1/')
+            echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"wire-session","update":{"sessionUpdate":"usage_update","cost":{"amount":0.5,"currency":"USD"}}}}'
+            echo '{"jsonrpc":"2.0","id":'"$ID"',"result":{"stopReason":"end_turn","usage":{"inputTokens":7,"outputTokens":3,"totalTokens":10,"cachedReadTokens":2}}}'
+            sleep 1
+        "#;
+        let (mut client, dir) = spawn_named_script("claude-code", script).await;
+        assert_eq!(client.standard_adapter, Some(StandardAdapterKind::Claude));
+        client.notify_session_spawned("wire-session");
+
+        let stop = client
+            .session_prompt_with_idle_timeout(
+                "wire-session",
+                "hello",
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect("wire prompt");
+        assert_eq!(stop, StopReason::EndTurn);
+
+        let usage = client.take_turn_usage().expect("wire usage");
+        assert_eq!(usage.turn_seq, 1);
+        assert_eq!(usage.turn_input_tokens, Some(9));
+        assert_eq!(usage.turn_output_tokens, Some(3));
+        assert_eq!(usage.turn_cost_usd, Some(0.5));
+        assert_eq!(usage.cumulative_cost_usd, Some(0.5));
+        drop(client);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn claude_cost_only_record_survives_missing_prompt_usage() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.notify_session_spawned("cost-only-session");
+        client.standard_usage.begin_turn("cost-only-session");
+        client.handle_session_update(&standard_cost_update("cost-only-session", 0.125));
+
+        let usage = client.take_turn_usage().expect("cost-only usage");
+        assert_eq!(usage.turn_seq, 1);
+        assert!(usage.delta_reliable);
+        assert_eq!(usage.turn_input_tokens, None);
+        assert_eq!(usage.turn_cost_usd, Some(0.125));
+        assert_eq!(usage.cumulative_cost_usd, Some(0.125));
+    }
+
+    #[tokio::test]
+    async fn attached_claude_session_does_not_invent_first_cost_delta() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.standard_usage.begin_turn("attached-session");
+        client.handle_session_update(&standard_cost_update("attached-session", 1.25));
+        client
+            .parse_prompt_response(
+                "attached-session",
+                &prompt_response_usage(10, 2, 12, None, None),
+            )
+            .unwrap();
+
+        let usage = client.take_turn_usage().expect("attached usage");
+        assert_eq!(usage.turn_cost_usd, None);
+        assert_eq!(usage.cumulative_cost_usd, Some(1.25));
+    }
+
+    #[tokio::test]
+    async fn standard_usage_two_prompts_preserve_both_monotonic_sequences() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.notify_session_spawned("two-prompt-session");
+
+        client.standard_usage.begin_turn("two-prompt-session");
+        client.handle_session_update(&standard_cost_update("two-prompt-session", 0.1));
+        client
+            .parse_prompt_response(
+                "two-prompt-session",
+                &prompt_response_usage(10, 2, 12, None, None),
+            )
+            .unwrap();
+        let initial = client.take_turn_usage().expect("initial prompt usage");
+
+        client.standard_usage.begin_turn("two-prompt-session");
+        client.handle_session_update(&standard_cost_update("two-prompt-session", 0.25));
+        client
+            .parse_prompt_response(
+                "two-prompt-session",
+                &prompt_response_usage(20, 3, 23, None, None),
+            )
+            .unwrap();
+        let user = client.take_turn_usage().expect("user prompt usage");
+
+        assert_eq!((initial.turn_seq, user.turn_seq), (1, 2));
+        assert_eq!(
+            (initial.turn_input_tokens, user.turn_input_tokens),
+            (Some(10), Some(20))
+        );
+        assert_eq!(
+            (initial.turn_cost_usd, user.turn_cost_usd),
+            (Some(0.1), Some(0.15))
+        );
+    }
+
+    #[tokio::test]
+    async fn goose_usage_stays_exclusive_and_drains_standard_usage() {
+        let mut client = spawn_inert_client().await;
+        client.standard_adapter = Some(StandardAdapterKind::Claude);
+        client.goose_usage.begin_turn("goose-session");
+        client.standard_usage.begin_turn("goose-session");
+        client.handle_goose_usage_update(&goose_usage_update_msg("goose-session", 1000, 200, None));
+        client
+            .parse_prompt_response(
+                "goose-session",
+                &prompt_response_usage(100, 20, 120, None, None),
+            )
+            .unwrap();
+
+        let usage = client.take_turn_usage().expect("goose usage");
+        assert_eq!(usage.cumulative_input_tokens, Some(1000));
+        assert_eq!(
+            usage.turn_input_tokens, None,
+            "goose first delta remains exclusive"
+        );
+        assert!(
+            client.take_turn_usage().is_none(),
+            "standard usage was drained"
+        );
     }
 
     // ── Goose usage notification integration ──────────────────────────────
@@ -4343,8 +4878,8 @@ mod tests {
         assert_eq!(usage.session_id, "s1");
         assert_eq!(usage.turn_seq, 1);
         assert!(!usage.delta_reliable, "first turn must be unreliable");
-        assert_eq!(usage.cumulative_input_tokens, 1000);
-        assert_eq!(usage.cumulative_output_tokens, 200);
+        assert_eq!(usage.cumulative_input_tokens, Some(1000));
+        assert_eq!(usage.cumulative_output_tokens, Some(200));
         assert_eq!(usage.cumulative_cost_usd, Some(0.01));
 
         // Second take must be None.
@@ -4646,6 +5181,43 @@ mod tests {
         assert!(
             msg.contains("sandbox_workspace_write"),
             "error must mention sandbox_workspace_write"
+        );
+    }
+
+    /// npm installs every JS CLI on Windows as a `.cmd` shim, so an agent
+    /// configured as `hermes-acp.cmd` is the ordinary case — and
+    /// `normalize_agent_command_identity` already strips `.cmd`/`.bat` when
+    /// deriving agent identity, so the rest of the harness assumes such a
+    /// command runs.
+    ///
+    /// It does: `std::process::Command` detects those extensions and routes
+    /// them through `cmd.exe` itself, with the argument escaping that was
+    /// hardened for CVE-2024-24576. This test exists to keep that assumption
+    /// checked rather than assumed, since nothing else in the suite spawns a
+    /// batch shim and the failure mode if it ever regressed — agents that
+    /// simply never start on Windows — is expensive to diagnose from the
+    /// symptom.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn acp_client_can_spawn_an_npm_style_cmd_shim() {
+        let shim = std::env::temp_dir().join(format!("buzz-agent-{}.cmd", uuid::Uuid::new_v4()));
+        // Stay alive long enough to be observed, without emitting ACP traffic.
+        // Kept short: `shutdown()` ends the shim but not the `ping` beneath it,
+        // and this suite should not leave a process behind for 20 seconds.
+        std::fs::write(&shim, "@echo off\r\nping -n 6 127.0.0.1 > nul\r\n")
+            .expect("shim must be writable");
+
+        let spawned = AcpClient::spawn(&shim.to_string_lossy(), &[], &[], false).await;
+        let ok = spawned.is_ok();
+        if let Ok(mut client) = spawned {
+            client.shutdown().await;
+        }
+        let _ = std::fs::remove_file(&shim);
+
+        assert!(
+            ok,
+            "an npm-style .cmd agent shim must be spawnable — this is the \
+             '%1 is not a valid Win32 application' failure"
         );
     }
 }

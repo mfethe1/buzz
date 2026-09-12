@@ -1,4 +1,29 @@
 //! NIP-01 client/relay message parsing and formatting.
+//!
+//! # Buzz extension frames
+//!
+//! Alongside the NIP-01 relay→client messages ([`RelayMessage`]), the relay
+//! emits one Buzz-specific extension frame:
+//!
+//! ## `BUZZ_SYNC_REQUIRED`
+//!
+//! ```text
+//! ["BUZZ_SYNC_REQUIRED","<reason>"]
+//! ```
+//!
+//! Machine-readable signal that the client's view has a gap and it should
+//! resynchronize (replay from its watermark). Emitted today with reason
+//! `backpressure` when an EVENT fan-out frame for this connection was dropped
+//! because the connection's outbound data channel was full. Delivery rules:
+//!
+//! - Sent on the connection's priority control channel, never on the data
+//!   channel it signals about, and never as a human-readable `NOTICE`.
+//! - Emitted only for live connections whose data channel is full. Closed or
+//!   already-gone connections get no signal — reconnect replay is their
+//!   fail-safe.
+//! - Clients that do not recognize the frame MUST ignore it (unknown
+//!   relay→client array heads are non-fatal per NIP-01 client convention);
+//!   the reconnect-replay machinery remains the backstop either way.
 
 use nostr::{Event, Filter};
 use serde_json::Value;
@@ -22,6 +47,8 @@ pub enum ClientMessage {
         sub_id: String,
         /// The filters that determine which events are delivered.
         filters: Vec<Filter>,
+        /// Optional per-filter composite cursor tiebreaks from raw extension fields.
+        before_ids: Vec<Option<Vec<u8>>>,
     },
     /// A CLOSE message cancelling an active subscription.
     Close(String),
@@ -103,7 +130,40 @@ impl ClientMessage {
                             .map_err(|e| RelayError::InvalidMessage(format!("invalid filter: {e}")))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                Ok(ClientMessage::Req { sub_id, filters })
+                let before_ids = filter_values
+                    .iter()
+                    .map(|value| {
+                        let Some(raw) = value.get("before_id") else {
+                            return Ok(None);
+                        };
+                        if value.get("until").is_none() {
+                            return Err(RelayError::InvalidMessage(
+                                "before_id requires until to be set".to_string(),
+                            ));
+                        }
+                        let Some(hex) = raw.as_str() else {
+                            return Err(RelayError::InvalidMessage(
+                                "before_id must be a 64-char hex event id".to_string(),
+                            ));
+                        };
+                        let bytes = hex::decode(hex).map_err(|_| {
+                            RelayError::InvalidMessage(
+                                "before_id must be a 64-char hex event id".to_string(),
+                            )
+                        })?;
+                        if bytes.len() != 32 {
+                            return Err(RelayError::InvalidMessage(
+                                "before_id must be a 64-char hex event id".to_string(),
+                            ));
+                        }
+                        Ok(Some(bytes))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(ClientMessage::Req {
+                    sub_id,
+                    filters,
+                    before_ids,
+                })
             }
             "COUNT" => {
                 if arr.len() < 2 {
@@ -214,6 +274,19 @@ impl RelayMessage {
     pub fn count(sub_id: &str, count: u64) -> String {
         serde_json::json!(["COUNT", sub_id, {"count": count}]).to_string()
     }
+
+    /// Format a `BUZZ_SYNC_REQUIRED` extension frame (see module docs).
+    ///
+    /// Machine-readable gap signal delivered on the connection's priority
+    /// control channel. `"backpressure"` — an EVENT fan-out frame was dropped
+    /// because the connection's data channel was full — is the only reason
+    /// the wire contract defines. The constructor is deliberately monomorphic
+    /// so the relay cannot emit a frame the contract does not define; if a
+    /// new reason ever appears, grow this into an enum and extend the
+    /// contract deliberately.
+    pub fn sync_required() -> String {
+        serde_json::json!(["BUZZ_SYNC_REQUIRED", "backpressure"]).to_string()
+    }
 }
 
 #[cfg(test)]
@@ -252,7 +325,9 @@ mod tests {
                 &serde_json::json!(["REQ", "sub1", serde_json::to_value(&filter).unwrap()])
                     .to_string(),
                 Box::new(|m| match m {
-                    ClientMessage::Req { sub_id, filters } => {
+                    ClientMessage::Req {
+                        sub_id, filters, ..
+                    } => {
                         assert_eq!(sub_id, "sub1");
                         assert_eq!(filters.len(), 1);
                     }
@@ -294,11 +369,56 @@ mod tests {
         ])
         .to_string();
         match ClientMessage::parse(&raw).unwrap() {
-            ClientMessage::Req { sub_id, filters } => {
+            ClientMessage::Req {
+                sub_id, filters, ..
+            } => {
                 assert_eq!(sub_id, "sub2");
                 assert_eq!(filters.len(), 2);
             }
             _ => panic!("expected Req"),
+        }
+    }
+
+    #[test]
+    fn parse_req_composite_cursor_preserves_filter_alignment() {
+        let raw = serde_json::json!([
+            "REQ",
+            "sub-cursor",
+            { "kinds": [9] },
+            {
+                "kinds": [48100],
+                "until": 1_000,
+                "before_id": "ab".repeat(32),
+            }
+        ])
+        .to_string();
+
+        match ClientMessage::parse(&raw).unwrap() {
+            ClientMessage::Req {
+                filters,
+                before_ids,
+                ..
+            } => {
+                assert_eq!(filters.len(), 2);
+                assert_eq!(before_ids, vec![None, Some(vec![0xab; 32])]);
+            }
+            _ => panic!("expected Req"),
+        }
+    }
+
+    #[test]
+    fn parse_req_composite_cursor_rejects_invalid_pairs() {
+        for raw in [
+            serde_json::json!(["REQ", "sub", { "before_id": "ab".repeat(32) }]),
+            serde_json::json!(["REQ", "sub", {
+                "until": 1_000,
+                "before_id": "short",
+            }]),
+        ] {
+            assert!(matches!(
+                ClientMessage::parse(&raw.to_string()),
+                Err(RelayError::InvalidMessage(_))
+            ));
         }
     }
 
@@ -446,6 +566,18 @@ mod tests {
                     assert_eq!(v[0], "CLOSED");
                     assert_eq!(v[1], "sub1");
                     assert_eq!(v[2], "auth-required: not authenticated");
+                }),
+            ),
+            (
+                "sync_required",
+                Box::new(|| {
+                    let msg = RelayMessage::sync_required();
+                    // Exact wire bytes: clients match on this precise shape,
+                    // and the constructor cannot produce any other reason.
+                    assert_eq!(msg, r#"["BUZZ_SYNC_REQUIRED","backpressure"]"#);
+                    let v: Value = serde_json::from_str(&msg).unwrap();
+                    assert_eq!(v[0], "BUZZ_SYNC_REQUIRED");
+                    assert_eq!(v[1], "backpressure");
                 }),
             ),
         ];

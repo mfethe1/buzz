@@ -1,5 +1,5 @@
 import * as React from "react";
-import { EllipsisVertical, OctagonX, Settings2 } from "lucide-react";
+import { Bot, EllipsisVertical, OctagonX, Settings2 } from "lucide-react";
 import {
   consumePendingSnapshotImport,
   subscribeSnapshotImport,
@@ -8,7 +8,8 @@ import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { AgentDialog } from "./AgentDialog";
-import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
+import { ConnectHermesProfilesDialog } from "./ConnectHermesProfilesDialog";
+import { CommunityCatalogDialog } from "./CommunityCatalogDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
 import { PersonaShareDialog } from "./PersonaShareDialog";
 import { AgentSnapshotExportDialog } from "./AgentSnapshotExportDialog";
@@ -16,7 +17,6 @@ import { AgentSnapshotImportDialog } from "./AgentSnapshotImportDialog";
 import { TeamSnapshotExportDialog } from "./TeamSnapshotExportDialog";
 import { TeamSnapshotImportDialog } from "./TeamSnapshotImportDialog";
 import { TeamShareDialog } from "./TeamShareDialog";
-import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
@@ -26,6 +26,7 @@ import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
+import { useSubagents } from "@/features/agents/useSubagents";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { Button } from "@/shared/ui/button";
@@ -45,19 +46,17 @@ export function AgentsView() {
   const inheritedDefaults = getInheritedAgentDefaults(globalConfig, bakedEnv);
   const agents = useManagedAgentActions();
   const personas = usePersonaActions();
+  const subagents = useSubagents();
   const teamImportInputRef = React.useRef<HTMLInputElement | null>(null);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const fullAiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const compactActionsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [isAiDefaultsOpen, setIsAiDefaultsOpen] = React.useState(false);
-  // Exclusivity: create never sets `personaDialogState` (edit/dup/import do),
-  // so the create-mode and definition-edit AgentDialog mounts never coexist.
-  const [isCreateDialogOpen, setIsCreateDialogOpen] = React.useState(false);
-
-  function openUnifiedCreate() {
-    personas.prepareCreate();
-    setIsCreateDialogOpen(true);
-  }
+  const [isHermesConnectOpen, setIsHermesConnectOpen] = React.useState(false);
+  const hermesAvailable = (personas.acpRuntimesQuery.data ?? []).some(
+    (runtime) =>
+      runtime.id === "hermes" && runtime.availability === "available",
+  );
 
   function openAiDefaults(trigger: HTMLButtonElement | null) {
     aiDefaultsTriggerRef.current = trigger;
@@ -84,6 +83,21 @@ export function AgentsView() {
       refetchRelayAgents: agents.refetchRelayAgents,
     },
   );
+
+  // Parent-owned unified catalog state per Thufir's corrective:
+  // - discriminated launch target so both sections refetch on open
+  // - one close owner via this boolean
+  const [catalogLaunchTarget, setCatalogLaunchTarget] = React.useState<
+    "agents" | "teams" | null
+  >(null);
+
+  function openCommunityCatalog(target: "agents" | "teams") {
+    personas.clearFeedback("catalog");
+    personas.prepareCreate();
+    void personas.catalogQuery.refetch();
+    void teamActions.catalogQuery.refetch();
+    setCatalogLaunchTarget(target);
+  }
 
   const isActionPending =
     agents.isPending ||
@@ -141,6 +155,17 @@ export function AgentsView() {
             action={
               <>
                 <div className="flex flex-wrap justify-end gap-2 [@container(max-width:40rem)]:hidden">
+                  {hermesAvailable ? (
+                    <Button
+                      data-testid="connect-hermes-profiles-button"
+                      onClick={() => setIsHermesConnectOpen(true)}
+                      size="sm"
+                      variant="outline"
+                    >
+                      <Bot />
+                      Connect Hermes profiles
+                    </Button>
+                  ) : null}
                   <Button
                     data-testid="agent-defaults-button"
                     ref={fullAiDefaultsTriggerRef}
@@ -183,6 +208,14 @@ export function AgentsView() {
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
+                    {hermesAvailable ? (
+                      <DropdownMenuItem
+                        onSelect={() => setIsHermesConnectOpen(true)}
+                      >
+                        <Bot />
+                        Connect Hermes profiles
+                      </DropdownMenuItem>
+                    ) : null}
                     <DropdownMenuItem
                       onSelect={() => {
                         openAiDefaults(compactActionsTriggerRef.current);
@@ -213,10 +246,12 @@ export function AgentsView() {
           />
           <div className="flex flex-col gap-8">
             <UnifiedAgentsSection
+              getAvailability={agents.getAvailability}
               defaultModel={inheritedDefaults.model.value}
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
               agents={agents.managedAgents}
+              subagents={subagents}
               agentsError={
                 agents.managedAgentsQuery.error instanceof Error
                   ? agents.managedAgentsQuery.error
@@ -261,8 +296,7 @@ export function AgentsView() {
               }
               isPersonasLoading={personas.personasQuery.isLoading}
               isPersonasPending={personas.isPending}
-              onCreatePersona={openUnifiedCreate}
-              onDiscoverPersonas={personas.openCatalog}
+              onOpenCatalog={() => openCommunityCatalog("agents")}
               onDuplicatePersona={personas.openDuplicate}
               onEditPersona={personas.openEdit}
               onSharePersona={personas.openShare}
@@ -270,9 +304,6 @@ export function AgentsView() {
                 void personas.handleSetActive(persona, false, "library");
               }}
               onDeletePersona={personas.openDelete}
-              onImportSnapshotFile={(fileBytes, fileName) => {
-                void personas.handleImportSnapshotFile(fileBytes, fileName);
-              }}
             />
 
             <TeamsSection
@@ -292,6 +323,7 @@ export function AgentsView() {
               onDuplicate={teamActions.openDuplicateDialog}
               onEdit={teamActions.openEditDialog}
               onAddToChannel={teamActions.setTeamToAddToChannel}
+              onDiscover={() => openCommunityCatalog("teams")}
               onShare={teamActions.openShare}
               onImport={() => {
                 teamImportInputRef.current?.click();
@@ -308,30 +340,11 @@ export function AgentsView() {
         open={isAiDefaultsOpen}
         returnFocusRef={aiDefaultsTriggerRef}
       />
+      <ConnectHermesProfilesDialog
+        onOpenChange={setIsHermesConnectOpen}
+        open={isHermesConnectOpen}
+      />
 
-      {isCreateDialogOpen ? (
-        <AgentDialog
-          definitionError={
-            personas.createPersonaMutation.error instanceof Error
-              ? personas.createPersonaMutation.error
-              : null
-          }
-          isDefinitionPending={personas.isPending}
-          mode="definition"
-          onOpenChange={(open) => {
-            if (!open) setIsCreateDialogOpen(false);
-          }}
-          onSubmitDefinition={personas.handleSubmit}
-          runtimes={personas.acpRuntimesQuery.data ?? []}
-          runtimeCatalogStatus={
-            personas.acpRuntimesQuery.isLoading
-              ? "loading"
-              : personas.acpRuntimesQuery.isError
-                ? "error"
-                : "ready"
-          }
-        />
-      ) : null}
       {agents.agentToAddToChannel ? (
         <AddAgentToChannelDialog
           agent={agents.agentToAddToChannel}
@@ -342,24 +355,6 @@ export function AgentsView() {
             }
           }}
           open={agents.agentToAddToChannel !== null}
-        />
-      ) : null}
-      {agents.createdAgent ? (
-        <SecretRevealDialog
-          created={agents.createdAgent}
-          onOpenChange={(open) => {
-            if (!open) {
-              agents.setCreatedAgent(null);
-            }
-          }}
-        />
-      ) : null}
-      {personas.createdAgent ? (
-        <SecretRevealDialog
-          created={personas.createdAgent}
-          onOpenChange={(open) => {
-            if (!open) personas.dismissCreatedAgent();
-          }}
         />
       ) : null}
       {personas.personaDialogState ? (
@@ -501,13 +496,57 @@ export function AgentsView() {
           }}
         />
       ) : null}
-      {personas.isCatalogDialogOpen ? (
-        <PersonaCatalogDialog
-          error={
+      {catalogLaunchTarget !== null ? (
+        <CommunityCatalogDialog
+          createContent={({ onDirtyChange, onRequestClose }) => (
+            <AgentDialog
+              definitionError={
+                personas.createPersonaMutation.error instanceof Error
+                  ? personas.createPersonaMutation.error
+                  : null
+              }
+              embedded
+              isDefinitionPending={personas.isPending}
+              mode="definition"
+              onDirtyChange={onDirtyChange}
+              onOpenChange={(open) => {
+                if (!open) onRequestClose();
+              }}
+              onSubmitDefinition={(
+                input,
+                intent,
+                backendIntent,
+                runtimeBinding,
+              ) =>
+                personas.handleSubmit(
+                  input,
+                  intent,
+                  backendIntent,
+                  null,
+                  undefined,
+                  runtimeBinding,
+                )
+              }
+              runtimes={personas.acpRuntimesQuery.data ?? []}
+              runtimeCatalogStatus={
+                personas.acpRuntimesQuery.isLoading
+                  ? "loading"
+                  : personas.acpRuntimesQuery.isError
+                    ? "error"
+                    : "ready"
+              }
+              submitLabel="Add agent"
+            />
+          )}
+          // Persona side
+          personas={personas.catalogPersonas}
+          personasError={
             personas.catalogQuery.error instanceof Error
               ? personas.catalogQuery.error
               : null
           }
+          personasLoading={personas.catalogQuery.isLoading}
+          personasPending={personas.isPending}
           feedbackErrorMessage={
             personas.personaFeedbackSurface === "catalog"
               ? personas.personaErrorMessage
@@ -518,17 +557,43 @@ export function AgentsView() {
               ? personas.personaNoticeMessage
               : null
           }
-          isLoading={personas.catalogQuery.isLoading}
-          isPending={personas.isPending}
           onClearFeedback={() => {
             personas.clearFeedback("catalog");
           }}
-          onOpenChange={personas.setIsCatalogDialogOpen}
-          onSelectPersona={(persona, active) => {
-            void personas.handleSetActive(persona, active, "catalog");
+          onImportFile={(fileBytes, fileName) => {
+            void personas.handleImportSnapshotFile(fileBytes, fileName);
           }}
-          open={personas.isCatalogDialogOpen}
-          personas={personas.catalogPersonas}
+          onSelectPersona={async (persona, active) => {
+            const addedPersona = await personas.handleSetActive(
+              persona,
+              active,
+              "catalog",
+            );
+            if (!active || !addedPersona) return;
+
+            setCatalogLaunchTarget(null);
+            openPersonaProfilePanel?.(addedPersona);
+          }}
+          // Team side
+          teams={teamActions.catalogTeams}
+          teamsError={
+            teamActions.catalogQuery.error instanceof Error
+              ? teamActions.catalogQuery.error
+              : null
+          }
+          teamsLoading={teamActions.catalogQuery.isLoading}
+          teamsAdding={teamActions.isAddingFromCatalog}
+          onAddTeam={(team) => {
+            void teamActions.handleAddTeamFromCatalog(team, () =>
+              setCatalogLaunchTarget(null),
+            );
+          }}
+          // Dialog
+          open={catalogLaunchTarget !== null}
+          preferSection={catalogLaunchTarget}
+          onOpenChange={(open) => {
+            if (!open) setCatalogLaunchTarget(null);
+          }}
         />
       ) : null}
       {teamActions.teamDialogState ? (
@@ -588,11 +653,23 @@ export function AgentsView() {
       ) : null}
       {teamActions.teamToShare ? (
         <TeamShareDialog
+          catalogShareLevel={teamActions.getTeamCatalogShareLevel(
+            teamActions.teamToShare,
+          )}
           isPending={
             teamActions.createTeamMutation.isPending ||
             teamActions.updateTeamMutation.isPending ||
-            teamActions.deleteTeamMutation.isPending
+            teamActions.deleteTeamMutation.isPending ||
+            teamActions.isCatalogSharePending
           }
+          onCatalogShareLevelChange={(shareLevel) => {
+            if (teamActions.teamToShare) {
+              void teamActions.setTeamCatalogShareLevel(
+                teamActions.teamToShare,
+                shareLevel,
+              );
+            }
+          }}
           onExport={() => {
             if (teamActions.teamToShare) {
               const team = teamActions.teamToShare;

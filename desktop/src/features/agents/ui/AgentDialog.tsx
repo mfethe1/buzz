@@ -11,7 +11,10 @@ import {
   runLocationForRunOn,
 } from "../lib/agentAccessWarning";
 import { AgentRunLocationProvider } from "./AgentRunLocationContext";
-import type { BackendIntent } from "../lib/instanceInputForDefinition";
+import type {
+  BackendIntent,
+  RuntimeBindingIntent,
+} from "../lib/instanceInputForDefinition";
 import type { AgentCreateIntent } from "./agentCreateIntent";
 import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
 import { AgentInstanceEditDialog } from "./AgentInstanceEditDialog";
@@ -29,7 +32,10 @@ import {
 
 type AgentDialogCreateProps = {
   mode: "definition";
+  embedded?: boolean;
+  submitLabel?: string;
   initialValues?: CreatePersonaInput | null;
+  onDirtyChange?: (dirty: boolean) => void;
   onOpenChange: (open: boolean) => void;
   definitionError: Error | null;
   isDefinitionPending: boolean;
@@ -39,6 +45,7 @@ type AgentDialogCreateProps = {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent: AgentCreateIntent,
     backendIntent: BackendIntent | null,
+    runtimeBindingIntent?: RuntimeBindingIntent,
   ) => Promise<boolean>;
 };
 
@@ -120,12 +127,15 @@ export function AgentDialog(props: AgentDialogProps) {
 }
 
 function AgentCreateDialogRouter({
+  embedded,
   initialValues: providedInitialValues,
   onOpenChange,
   definitionError,
   isDefinitionPending,
   runtimes,
   runtimeCatalogStatus,
+  submitLabel,
+  onDirtyChange,
   onSubmitDefinition,
 }: AgentDialogCreateProps) {
   const [runDraft, setRunDraft] = React.useState(emptyWhereToRunDraft);
@@ -145,29 +155,43 @@ function AgentCreateDialogRouter({
           <WhereToRunSection
             draft={runDraft}
             isPending={isDefinitionPending}
-            onDraftChange={setRunDraft}
+            onDraftChange={(nextDraft) => {
+              setRunDraft(nextDraft);
+              onDirtyChange?.(true);
+            }}
           />
         }
+        createRunOnLocal={runDraft.runOn === "local"}
         createSubmitBlocked={!canSubmitWhereToRun(runDraft)}
         description={copy.description}
+        embedded={embedded}
         error={definitionError}
         initialValues={initialValues}
         isPending={isDefinitionPending}
+        onDirtyChange={onDirtyChange}
         onOpenChange={onOpenChange}
-        onSubmit={async (input) => {
+        onSubmit={async (input, options) => {
+          const runtimeBindingIntent = options.hermesProfile
+            ? ({
+                type: "hermes_profile",
+                profileName: options.hermesProfile,
+              } satisfies RuntimeBindingIntent)
+            : undefined;
           const submitted = await onSubmitDefinition(
             input,
             "definition_start",
             resolveBackendIntent(runDraft),
+            runtimeBindingIntent,
           );
           if (submitted) {
+            onDirtyChange?.(false);
             onOpenChange(false);
           }
         }}
         open
         runtimes={runtimes}
         runtimeCatalogStatus={runtimeCatalogStatus}
-        submitLabel={copy.submitLabel}
+        submitLabel={submitLabel ?? copy.submitLabel}
         title={copy.title}
       />
     </AgentRunLocationProvider>

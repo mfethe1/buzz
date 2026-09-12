@@ -22,7 +22,10 @@ import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastE
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { PubKey } from "@/shared/ui/PubKey";
 import { SubsectionLabel } from "@/shared/ui/PageHeader";
+import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import { RestartDiffBadge } from "./RestartDiffBadge";
+import { SubagentTree } from "./SubagentTree";
+import type { SubagentStatus } from "@/features/agents/lib/subagents";
 
 export function ManagedAgentRow({
   agent,
@@ -35,6 +38,7 @@ export function ManagedAgentRow({
   personaLabelsById,
   presenceLoaded,
   presenceLookup,
+  subagents = [],
   onOpenProfile,
   onSelectLogAgent,
 }: {
@@ -48,6 +52,12 @@ export function ManagedAgentRow({
   personaLabelsById: Record<string, string>;
   presenceLoaded: boolean;
   presenceLookup: PresenceLookup;
+  /**
+   * Live subagent records for the whole library (SPEC-nested-subagents).
+   * Optional; the row filters to its own agent's children via the pure
+   * selector and renders nothing when this agent has no subagents.
+   */
+  subagents?: readonly SubagentStatus[];
   onOpenProfile: (pubkey: string) => void;
   onSelectLogAgent: (pubkey: string | null) => void;
 }) {
@@ -195,6 +205,11 @@ export function ManagedAgentRow({
           </div>
         </div>
       ) : null}
+
+      {/* SPEC-nested-subagents B2: nested tree under this parent row,
+          default-collapsed, live "(N active)" badge. Renders nothing while
+          this agent has no subagent records. */}
+      <SubagentTree parentPubkeys={[agent.pubkey]} subagents={subagents} />
     </div>
   );
 }
@@ -410,7 +425,9 @@ function RuntimeBlock({
       {runtimeSource || agent.model ? (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
           {runtimeSource ? <span>{runtimeSource}</span> : null}
-          {agent.model ? <span>{agent.model}</span> : null}
+          {agent.model ? (
+            <span>{resolveModelLabel(agent.model, null, agent.provider)}</span>
+          ) : null}
         </div>
       ) : null}
     </div>

@@ -13,6 +13,7 @@ import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptConte
 import type { TranscriptItem } from "../agentSessionTypes";
 import { MessageLinkHoverCue } from "./MessageLinkHoverCue";
 import { useTranscriptBubbleOverflow } from "./useTranscriptBubbleOverflow";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export function UserMessageBubble({
   bubbleClassName,
@@ -42,7 +43,7 @@ export function UserMessageBubble({
       ? { channelId: item.channelId, messageId: item.messageId }
       : null;
   const authorProfile = item.authorPubkey
-    ? profiles?.[item.authorPubkey.toLowerCase()]
+    ? profiles?.[normalizePubkey(item.authorPubkey)]
     : null;
   const authorLabel = item.authorPubkey
     ? resolveUserLabel({
@@ -101,7 +102,10 @@ export function UserMessageBubble({
       {isCompactPreview ? null : item.authorPubkey && openProfilePanel ? (
         <button
           aria-label={`Open ${authorLabel} profile`}
-          className="pointer-events-auto order-last ml-2 mt-1 size-7 shrink-0 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className={cn(
+            "pointer-events-auto order-last ml-2 mt-1 size-7 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            authorProfile?.isAgent ? "rounded-[30%]" : "rounded-full",
+          )}
           onClick={(event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -115,6 +119,7 @@ export function UserMessageBubble({
             avatarUrl={authorProfile?.avatarUrl ?? null}
             className="size-full text-xs"
             displayName={authorLabel}
+            shape={authorProfile?.isAgent ? "squircle" : "circle"}
             size="sm"
           />
         </button>
@@ -123,6 +128,7 @@ export function UserMessageBubble({
           avatarUrl={authorProfile?.avatarUrl ?? null}
           className="order-last ml-2 mt-1 size-7 shrink-0 text-xs"
           displayName={authorLabel}
+          shape={authorProfile?.isAgent ? "squircle" : "circle"}
           size="sm"
         />
       )}

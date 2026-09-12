@@ -11,6 +11,7 @@ import 'transcript_builder.dart';
 
 /// Maximum observer events to keep per agent.
 const _maxObserverEvents = 800;
+const _observerBatchKind = 'batch';
 
 /// Key for channel-scoped transcript reads.
 typedef ObserverKey = ({String channelId, String agentPubkey});
@@ -106,6 +107,26 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
     return _startFuture!;
   }
 
+  /// Re-attempts the observer subscription after a terminal error.
+  ///
+  /// The `build()` method only re-runs when the relay config or session
+  /// changes, so an error emitted by the `onClosed` relay callback (where the
+  /// session itself stays connected) previously dead-ended the UI with no
+  /// re-entry point. This method is the user-driven re-entry: it invalidates
+  /// any in-flight subscribe via the epoch guard, clears the stale error, and
+  /// re-enters the existing [_ensureSubscribed] seam with the same filter
+  /// shape. Safe to call repeatedly; a no-op when already subscribed.
+  Future<void> retry() {
+    if (_disposed) return Future.value();
+    if (_unsubscribe != null) return Future.value();
+
+    _subscriptionEpoch += 1;
+    _startFuture = null;
+    _errorMessage = null;
+    _emit(connection: ObserverConnectionState.connecting);
+    return _ensureSubscribed();
+  }
+
   Future<void> _subscribe(int epoch) async {
     try {
       if (_disposed || epoch != _subscriptionEpoch) {
@@ -189,16 +210,30 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
       return;
     }
 
-    final frame = _decryptFrame(event, normalizedAgent, privHex);
-    if (frame == null) return;
+    final frames = _decryptFrames(event, normalizedAgent, privHex);
+    if (frames == null) return;
 
+    var storageChanged = false;
+    for (final frame in frames) {
+      if (_storeFrame(normalizedAgent, frame)) {
+        storageChanged = true;
+      }
+    }
+
+    if (storageChanged) {
+      _errorMessage = null;
+      _emit(connection: ObserverConnectionState.open);
+    }
+  }
+
+  bool _storeFrame(String normalizedAgent, ObserverFrame frame) {
     final dedupeKey = '${frame.seq}:${frame.timestamp}';
     final dedupeKeys = _dedupeKeysByAgent.putIfAbsent(
       normalizedAgent,
       () => <String>{},
     );
     if (!dedupeKeys.add(dedupeKey)) {
-      return;
+      return false;
     }
 
     final frames = _framesByAgent.putIfAbsent(
@@ -216,11 +251,10 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
       frames.removeRange(0, removeCount);
     }
 
-    _errorMessage = null;
-    _emit(connection: ObserverConnectionState.open);
+    return true;
   }
 
-  ObserverFrame? _decryptFrame(
+  List<ObserverFrame>? _decryptFrames(
     NostrEvent event,
     String normalizedAgent,
     String privHex,
@@ -232,7 +266,23 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
       );
       final plaintext = nip44Decrypt(conversationKey, event.content);
       final json = jsonDecode(plaintext) as Map<String, dynamic>;
-      return ObserverFrame.fromJson(json);
+      final frame = ObserverFrame.fromJson(json);
+      if (frame.kind != _observerBatchKind) {
+        return [frame];
+      }
+
+      final payload = frame.payload;
+      final events = payload is Map<String, dynamic> ? payload['events'] : null;
+      // Preserve malformed envelopes so publisher defects are not silently
+      // discarded, matching the desktop observer consumer.
+      if (events is! List || events.isEmpty) {
+        return [frame];
+      }
+
+      return [
+        for (final inner in events)
+          ObserverFrame.fromJson(inner as Map<String, dynamic>),
+      ];
     } catch (error) {
       _errorMessage = 'Observer event decrypt failed: $error';
       _emit(connection: ObserverConnectionState.error);

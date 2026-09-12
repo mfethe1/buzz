@@ -62,7 +62,9 @@ import { resolveManagedAgentAvatarUrl } from "./managedAgentAvatar";
 import {
   buildInstanceInputForDefinition,
   type BackendIntent,
+  type RuntimeBindingIntent,
 } from "../lib/instanceInputForDefinition";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type PersonaFeedbackSurface = "catalog" | "library";
 
@@ -115,7 +117,6 @@ export function usePersonaActions() {
     React.useState<AgentSnapshotImportResult | null>(null);
   const [snapshotImportConfirmError, setSnapshotImportConfirmError] =
     React.useState<string | null>(null);
-  const [isCatalogDialogOpen, setIsCatalogDialogOpen] = React.useState(false);
   const [personaNoticeMessage, setPersonaNoticeMessage] = React.useState<
     string | null
   >(null);
@@ -131,7 +132,10 @@ export function usePersonaActions() {
   const personas = personasQuery.data ?? [];
   const publications = catalogQuery.data ?? [];
   const sharedCatalogPersonaIdSet = React.useMemo(() => {
-    const currentPubkey = identityQuery.data?.pubkey.toLowerCase();
+    const identityPubkey = identityQuery.data?.pubkey;
+    const currentPubkey = identityPubkey
+      ? normalizePubkey(identityPubkey)
+      : undefined;
     return new Set(
       publications
         .filter((publication) => publication.ownerPubkey === currentPubkey)
@@ -178,6 +182,7 @@ export function usePersonaActions() {
     backendIntent?: BackendIntent | null,
     targetChannel?: Pick<Channel, "id" | "name"> | null,
     options?: { publishCatalogUpdates?: boolean },
+    runtimeBindingIntent?: RuntimeBindingIntent,
   ): Promise<boolean> {
     if (isPersonaSubmitPending) {
       return false;
@@ -242,6 +247,7 @@ export function usePersonaActions() {
           runtime,
           undefined,
           startIntent ?? undefined,
+          runtimeBindingIntent,
         );
 
         try {
@@ -253,10 +259,6 @@ export function usePersonaActions() {
           if (created.spawnError) {
             setPersonaErrorMessage(
               `${persona.displayName} was created, but it did not start: ${created.spawnError}`,
-            );
-          } else {
-            setPersonaNoticeMessage(
-              `Created and started ${created.agent.name}.`,
             );
           }
           if (created.profileSyncError) {
@@ -301,9 +303,10 @@ export function usePersonaActions() {
     persona: AgentPersona,
     active: boolean,
     surface: PersonaFeedbackSurface,
-  ) {
+  ): Promise<AgentPersona | null> {
     clearFeedback(surface);
     try {
+      let updatedPersona: AgentPersona;
       if (active && isCatalogPersona(persona)) {
         const localPersona = findLocalPersonaForCatalogEntry(
           personas,
@@ -312,15 +315,18 @@ export function usePersonaActions() {
 
         if (localPersona) {
           if (!localPersona.isActive) {
-            await setPersonaActiveMutation.mutateAsync({
+            updatedPersona = await setPersonaActiveMutation.mutateAsync({
               id: localPersona.id,
               active: true,
             });
+          } else {
+            updatedPersona = localPersona;
           }
         } else {
-          await createPersonaMutation.mutateAsync({
+          updatedPersona = await createPersonaMutation.mutateAsync({
             displayName: persona.displayName,
             avatarUrl: persona.avatarUrl ?? undefined,
+            description: persona.description ?? undefined,
             systemPrompt: persona.systemPrompt,
             runtime: persona.runtime ?? undefined,
             model: persona.model ?? undefined,
@@ -342,13 +348,17 @@ export function usePersonaActions() {
           });
         }
       } else {
-        await setPersonaActiveMutation.mutateAsync({ id: persona.id, active });
+        updatedPersona = await setPersonaActiveMutation.mutateAsync({
+          id: persona.id,
+          active,
+        });
       }
       setPersonaNoticeMessage(
         active
           ? `Selected ${persona.displayName} for My Agents.`
           : `Deselected ${persona.displayName} from My Agents.`,
       );
+      return updatedPersona;
     } catch (error) {
       setPersonaErrorMessage(
         error instanceof Error
@@ -357,6 +367,7 @@ export function usePersonaActions() {
             ? "Failed to select agent for My Agents."
             : "Failed to deselect agent from My Agents.",
       );
+      return null;
     }
   }
 
@@ -396,7 +407,7 @@ export function usePersonaActions() {
       void queryClient.invalidateQueries({ queryKey: personasQueryKey });
       void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
       void queryClient.invalidateQueries({
-        queryKey: ["user-profile", result.newPubkey.toLowerCase()],
+        queryKey: ["user-profile", normalizePubkey(result.newPubkey)],
       });
       if (result.memoryErrors.length > 0) {
         setPersonaErrorMessage(
@@ -433,12 +444,6 @@ export function usePersonaActions() {
     clearFeedback("library");
     setShouldLoadAcpRuntimes(true);
     setPersonaDialogState(duplicatePersonaDialogState(persona));
-  }
-
-  function openCatalog() {
-    clearFeedback("catalog");
-    void catalogQuery.refetch();
-    setIsCatalogDialogOpen(true);
   }
 
   function openDelete(persona: AgentPersona) {
@@ -581,8 +586,6 @@ export function usePersonaActions() {
     setPersonaToDelete,
     personaToShare,
     setPersonaToShare,
-    isCatalogDialogOpen,
-    setIsCatalogDialogOpen,
     personaNoticeMessage,
     personaErrorMessage,
     personaFeedbackSurface,
@@ -593,7 +596,6 @@ export function usePersonaActions() {
     prepareCreate,
     openEdit,
     openDuplicate,
-    openCatalog,
     openDelete,
     openShare,
     personaToExportSnapshot,

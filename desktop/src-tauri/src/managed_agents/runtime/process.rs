@@ -24,11 +24,19 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     "buzz_dev_mcp",
 ];
 
-/// Script interpreters that may host managed agent wrappers (e.g. npm shims).
-/// A process whose name matches here is NOT immediately claimed — it must also
-/// carry `BUZZ_MANAGED_AGENT` in its environment (checked by the caller via
-/// `process_has_buzz_marker()`). This avoids sweeping unrelated node processes.
-pub(crate) const KNOWN_SCRIPT_INTERPRETERS: &[&str] = &["node"];
+/// Script interpreters that may host managed-agent wrappers. Hermes' shell
+/// launchers `exec` their profile-scoped Python interpreter; Node hosts npm ACP
+/// adapters. A name match is never sufficient on its own — every caller also
+/// requires the exact `BUZZ_MANAGED_AGENT=<desktop-instance>` environment marker.
+pub(crate) const KNOWN_SCRIPT_INTERPRETERS: &[&str] = &[
+    "node",
+    "python",
+    "python3",
+    "Python",
+    "Python3",
+    "python.exe",
+    "python3.exe",
+];
 
 /// Check if a process name matches any of our known agent binaries.
 /// Uses exact match or prefix-with-separator to avoid false positives
@@ -131,7 +139,7 @@ pub(crate) fn process_belongs_to_us(_pid: u32) -> bool {
 /// while never matching another instance's (e.g. a dev build never reaps a DMG
 /// build's agents, and vice versa). This is what lets two Buzzs coexist on
 /// one machine without one's cleanup nuking the other's agents.
-pub(crate) fn current_instance_id(app: &AppHandle) -> String {
+pub(crate) fn current_instance_id<R: tauri::Runtime>(app: &AppHandle<R>) -> String {
     app.config().identifier.clone()
 }
 

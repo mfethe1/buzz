@@ -5,220 +5,24 @@
 //!   - cancellation leaves history valid for the next prompt
 //!   - empty-content assistant turn doesn't poison OpenAI history
 
-use std::collections::VecDeque;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 
-struct CapturingLlm {
-    url: String,
-    captured: Arc<Mutex<Vec<Value>>>,
+/// A `cwd` value that `Path::is_absolute()` accepts on every platform this
+/// suite runs on. `/tmp` is absolute on Unix but not on Windows (it lacks a
+/// drive prefix), so `session/new` rejects it there with "cwd must be an
+/// absolute path" before the test ever reaches the behavior under test.
+fn test_cwd() -> String {
+    std::env::temp_dir().to_string_lossy().into_owned()
 }
 
-async fn spawn_capturing_llm(responses: Vec<Value>) -> CapturingLlm {
-    spawn_capturing_llm_with_status(responses.into_iter().map(|v| (200u16, v)).collect()).await
-}
-
-/// Like `spawn_capturing_llm` but each canned response carries its own HTTP
-/// status, so a test can serve a real provider rejection (e.g. a context-window
-/// 400) instead of only success bodies.
-async fn spawn_capturing_llm_with_status(responses: Vec<(u16, Value)>) -> CapturingLlm {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let queue = Arc::new(Mutex::new(VecDeque::from(responses)));
-    let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
-    let cap2 = captured.clone();
-    tokio::spawn(async move {
-        loop {
-            let (mut sock, _) = match listener.accept().await {
-                Ok(p) => p,
-                Err(_) => return,
-            };
-            let queue = queue.clone();
-            let captured = cap2.clone();
-            tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let mut tmp = [0u8; 8192];
-                // Read until headers complete.
-                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    match sock.read(&mut tmp).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                    }
-                    if buf.len() > 4_000_000 {
-                        return;
-                    }
-                }
-                // Parse Content-Length and read body.
-                let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-                let headers = &buf[..header_end];
-                let mut body_len = 0usize;
-                for line in headers.split(|b| *b == b'\n') {
-                    let line = std::str::from_utf8(line).unwrap_or("");
-                    if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                        body_len = rest.trim().trim_end_matches('\r').parse().unwrap_or(0);
-                    }
-                }
-                while buf.len() < header_end + body_len {
-                    match sock.read(&mut tmp).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                    }
-                }
-                if let Ok(req) = serde_json::from_slice::<Value>(&buf[header_end..]) {
-                    captured.lock().await.push(req);
-                }
-                let (status, body) = queue
-                    .lock()
-                    .await
-                    .pop_front()
-                    .unwrap_or_else(|| (200, json!({ "error": "no canned response" })));
-                let body_s = serde_json::to_string(&body).unwrap();
-                let reason = match status {
-                    200 => "OK",
-                    400 => "Bad Request",
-                    _ => "Error",
-                };
-                let resp = format!(
-                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body_s.len(), body_s,
-                );
-                let _ = sock.write_all(resp.as_bytes()).await;
-                let _ = sock.shutdown().await;
-            });
-        }
-    });
-    CapturingLlm { url, captured }
-}
-
-struct Harness {
-    child: tokio::process::Child,
-    stdin: tokio::process::ChildStdin,
-    stdout: BufReader<tokio::process::ChildStdout>,
-    stderr: Arc<StdMutex<String>>,
-    next_id: i64,
-}
-
-impl Harness {
-    async fn spawn_with_env(base_url: &str, extra: &[(&str, &str)]) -> Self {
-        let bin = env!("CARGO_BIN_EXE_buzz-agent");
-        let mut cmd = tokio::process::Command::new(bin);
-        cmd.env("BUZZ_AGENT_PROVIDER", "openai")
-            .env("OPENAI_COMPAT_API_KEY", "test")
-            .env("OPENAI_COMPAT_MODEL", "fake-model")
-            .env("OPENAI_COMPAT_BASE_URL", base_url)
-            .env("BUZZ_AGENT_LLM_TIMEOUT_SECS", "5")
-            .env("BUZZ_AGENT_TOOL_TIMEOUT_SECS", "5")
-            .env("BUZZ_AGENT_MAX_ROUNDS", "8")
-            .env("BUZZ_AGENT_MCP_INIT_TIMEOUT_SECS", "2");
-        for (k, v) in extra {
-            cmd.env(k, v);
-        }
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let mut child = cmd.spawn().expect("spawn buzz-agent");
-        let stdin = child.stdin.take().unwrap();
-        let stdout = BufReader::new(child.stdout.take().unwrap());
-        let stderr = child.stderr.take().unwrap();
-        let stderr_buf = Arc::new(StdMutex::new(String::new()));
-        let stderr_out = Arc::clone(&stderr_buf);
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                let n = match reader.read_line(&mut line).await {
-                    Ok(n) => n,
-                    Err(_) => break,
-                };
-                if n == 0 {
-                    break;
-                }
-                if let Ok(mut out) = stderr_out.lock() {
-                    out.push_str(&line);
-                }
-            }
-        });
-        Self {
-            child,
-            stdin,
-            stdout,
-            stderr: stderr_buf,
-            next_id: 1,
-        }
-    }
-
-    async fn spawn(base_url: &str) -> Self {
-        Self::spawn_with_env(base_url, &[]).await
-    }
-
-    async fn send(&mut self, method: &str, params: Value) -> i64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.write(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
-            .await;
-        id
-    }
-
-    async fn notify(&mut self, method: &str, params: Value) {
-        self.write(json!({ "jsonrpc": "2.0", "method": method, "params": params }))
-            .await;
-    }
-
-    async fn write(&mut self, msg: Value) {
-        let mut s = serde_json::to_string(&msg).unwrap();
-        s.push('\n');
-        self.stdin.write_all(s.as_bytes()).await.unwrap();
-        self.stdin.flush().await.unwrap();
-    }
-
-    async fn recv(&mut self) -> Value {
-        let mut line = String::new();
-        let n = tokio::time::timeout(Duration::from_secs(15), self.stdout.read_line(&mut line))
-            .await
-            .expect("recv timeout")
-            .expect("read line");
-        assert!(n > 0, "agent EOF");
-        serde_json::from_str(&line).expect("non-JSON line")
-    }
-
-    async fn recv_until<F: FnMut(&Value) -> bool>(&mut self, mut pred: F) -> Value {
-        loop {
-            let v = self.recv().await;
-            if pred(&v) {
-                return v;
-            }
-        }
-    }
-
-    async fn shutdown(mut self) {
-        drop(self.stdin);
-        let _ = tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await;
-        let _ = self.child.start_kill();
-    }
-
-    fn stderr_text(&self) -> String {
-        self.stderr.lock().map(|s| s.clone()).unwrap_or_default()
-    }
-}
-
-fn openai_text(content: &str) -> Value {
-    json!({
-        "id": "cc-1", "object": "chat.completion", "model": "fake-model",
-        "choices": [{
-            "index": 0,
-            "message": { "role": "assistant", "content": content },
-            "finish_reason": "stop",
-        }],
-    })
-}
+mod common;
+use common::{
+    approve_permission, openai_text, openai_tool_call, spawn_capturing_llm,
+    spawn_capturing_llm_with_status, Harness,
+};
 
 /// Like [`openai_text`] but attaches a `usage` block so tests can drive the
 /// token-based handoff gate. `prompt_tokens` is the input-token count the
@@ -233,20 +37,23 @@ fn openai_text_with_usage(content: &str, prompt_tokens: u64) -> Value {
     v
 }
 
-fn openai_tool_call(id: &str, name: &str, args: Value) -> Value {
+fn openai_max_tokens(content: &str, tool_calls: Value) -> Value {
     json!({
-        "id": "cc-2", "object": "chat.completion", "model": "fake-model",
+        "id": "cc-max", "object": "chat.completion", "model": "fake-model",
         "choices": [{
             "index": 0,
             "message": {
-                "role": "assistant", "content": null,
-                "tool_calls": [{
-                    "id": id, "type": "function",
-                    "function": { "name": name, "arguments": args.to_string() },
-                }],
+                "role": "assistant",
+                "content": content,
+                "tool_calls": tool_calls,
             },
-            "finish_reason": "tool_calls",
+            "finish_reason": "length",
         }],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 100,
+            "total_tokens": 110,
+        },
     })
 }
 
@@ -259,7 +66,7 @@ async fn init_session(h: &mut Harness, mcp_servers: Value) -> String {
     let _ = h.recv().await;
     h.send(
         "session/new",
-        json!({"cwd":"/tmp","mcpServers": mcp_servers}),
+        json!({"cwd": test_cwd(), "mcpServers": mcp_servers}),
     )
     .await;
     let r = h
@@ -332,7 +139,7 @@ async fn mcp_init_timeout_kills_child() {
     h.send(
         "session/new",
         json!({
-            "cwd": "/tmp",
+            "cwd": test_cwd(),
             "mcpServers": [{
                 "name": "stuck",
                 "command": fake_mcp,
@@ -377,7 +184,7 @@ async fn tool_metadata_caps_enforced() {
     h.send(
         "session/new",
         json!({
-            "cwd": "/tmp",
+            "cwd": test_cwd(),
             "mcpServers": [{
                 "name": "many",
                 "command": fake_mcp,
@@ -450,8 +257,11 @@ async fn mcp_server_count_cap() {
             })
         })
         .collect();
-    h.send("session/new", json!({"cwd":"/tmp","mcpServers": servers}))
-        .await;
+    h.send(
+        "session/new",
+        json!({"cwd": test_cwd(), "mcpServers": servers}),
+    )
+    .await;
     let r = h
         .recv_until(|v| v.get("result").is_some() || v.get("error").is_some())
         .await;
@@ -629,7 +439,7 @@ async fn per_turn_tool_call_cap_enforced() {
     h.send(
         "session/new",
         json!({
-            "cwd": "/tmp",
+            "cwd": test_cwd(),
             "mcpServers": [{
                 "name": "many",
                 "command": fake_mcp,
@@ -656,13 +466,7 @@ async fn per_turn_tool_call_cap_enforced() {
     loop {
         let v = h.recv().await;
         if v.get("method") == Some(&json!("session/request_permission")) {
-            let id = v["id"].clone();
-            h.write(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
-            }))
-            .await;
+            h.write(approve_permission(&v)).await;
             continue;
         }
         if v.get("method") == Some(&json!("session/update"))
@@ -704,7 +508,7 @@ async fn description_clamping_enforced() {
     h.send(
         "session/new",
         json!({
-            "cwd": "/tmp",
+            "cwd": test_cwd(),
             "mcpServers": [{
                 "name": "big",
                 "command": fake_mcp,
@@ -770,7 +574,7 @@ async fn init_session_with_fake_mcp(h: &mut Harness, extra_mcp_env: &[(&str, &st
     h.send(
         "session/new",
         json!({
-            "cwd": "/tmp",
+            "cwd": test_cwd(),
             "mcpServers": [{
                 "name": "fake",
                 "command": fake_mcp,
@@ -838,7 +642,7 @@ async fn hook_stop_blocks_premature_end() {
             json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
         )
         .await;
-    let r = h.recv_until(|v| v["id"] == json!(p)).await;
+    let r = h.recv_until_approving(|v| v["id"] == json!(p)).await;
     assert!(r.get("result").is_some(), "errored: {r}");
     assert_eq!(r["result"]["stopReason"], "end_turn");
 
@@ -916,7 +720,7 @@ async fn hook_stop_budget_exhausted() {
             json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
         )
         .await;
-    let r = h.recv_until(|v| v["id"] == json!(p)).await;
+    let r = h.recv_until_approving(|v| v["id"] == json!(p)).await;
     assert!(r.get("result").is_some(), "errored: {r}");
     assert_eq!(r["result"]["stopReason"], "end_turn");
 
@@ -1497,7 +1301,7 @@ async fn stale_usage_plus_history_growth_triggers_handoff() {
             json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
         )
         .await;
-    let _ = h.recv_until(|v| v["id"] == json!(p)).await;
+    let _ = h.recv_until_approving(|v| v["id"] == json!(p)).await;
     // req1 (tool_call) + summarize (handoff) + req2 (done) = 3. Without the
     // growth estimate we'd see only 2 (stale 8500 < 9000, no handoff).
     let captured = llm.captured.lock().await.len();
@@ -1768,7 +1572,7 @@ async fn cancel_sends_notifications_cancelled_to_any_mcp_server() {
         .await;
 
     // Wait for tool call to be in-progress.
-    h.recv_until(|v| {
+    h.recv_until_approving(|v| {
         v.get("params")
             .and_then(|p| p.get("update"))
             .and_then(|u| u.get("status"))
@@ -1883,13 +1687,7 @@ async fn prompt_to_completion(h: &mut Harness, sid: &str) -> Value {
     loop {
         let v = h.recv().await;
         if v.get("method") == Some(&json!("session/request_permission")) {
-            let id = v["id"].clone();
-            h.write(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
-            }))
-            .await;
+            h.write(approve_permission(&v)).await;
             continue;
         }
         if v["id"] == json!(p) {
@@ -1898,23 +1696,34 @@ async fn prompt_to_completion(h: &mut Harness, sid: &str) -> Value {
     }
 }
 
-/// Default off: a silent turn ends on the first end_turn with no extra round.
-/// This is the invariant that keeps the feature free for everyone who hasn't
-/// opted in.
+/// Default ON: a turn that ends without publishing is reminded once before it
+/// is allowed to end. This is the inverse of the invariant this test asserted
+/// while the guard was opt-in, and it is the contract that makes the guard
+/// reach runs Desktop's mesh launcher never touches — manual runs, dev runs,
+/// and non-Desktop harnesses.
+///
+/// The reminder is bounded (`MAX_REPLY_NAGS`) and explicitly licenses silence,
+/// so this costs a silent turn one extra round, not a forced reply.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn reply_guard_off_by_default() {
-    let llm = spawn_capturing_llm(vec![openai_text("done"), openai_text("unexpected")]).await;
-    let mut h = Harness::spawn(&llm.url).await;
+async fn reply_guard_on_by_default() {
+    let llm = spawn_capturing_llm(vec![
+        openai_text("done"),
+        openai_text("still done"),
+        openai_text("truly done"),
+    ])
+    .await;
+    // Not `spawn`/`spawn_with_env` — both pin the guard off for the rest of
+    // this suite. This test exists to prove the *unset* compiled-in default.
+    let mut h = Harness::spawn_with_true_env_defaults(&llm.url, &[]).await;
     let sid = init_session(&mut h, json!([])).await;
 
     let r = prompt_to_completion(&mut h, &sid).await;
     assert_eq!(r["result"]["stopReason"], "end_turn");
 
     let captured = llm.captured.lock().await;
-    assert_eq!(
-        captured.len(),
-        1,
-        "guard must be inert when unset, got {} LLM calls",
+    assert!(
+        captured.len() > 1,
+        "guard must nag an unpublished turn when unset, got {} LLM call(s)",
         captured.len()
     );
     h.shutdown().await;
@@ -2294,6 +2103,27 @@ fn reply_guard_rejects_unparseable_toggle() {
     );
 }
 
+#[test]
+fn max_token_recoveries_rejects_unparseable_value() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_buzz-agent"))
+        .env("BUZZ_AGENT_PROVIDER", "openai")
+        .env("OPENAI_COMPAT_API_KEY", "test")
+        .env("OPENAI_COMPAT_MODEL", "fake-model")
+        .env("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", "unbounded")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run buzz-agent");
+    assert!(
+        !out.status.success(),
+        "invalid recovery budget was accepted"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("BUZZ_AGENT_MAX_TOKEN_RECOVERIES"),
+        "expected offending key in config error: {stderr}"
+    );
+}
+
 /// A prompt large enough that the recovery ladder's halving stays above
 /// `HANDOFF_MIN_PROMPT_BUDGET_BYTES` (4 KiB) for all three rungs.
 ///
@@ -2434,6 +2264,208 @@ async fn context_window_400_recovers_instead_of_sticking() {
         stderr.contains("provider reported context overflow; forcing handoff"),
         "expected the forced-handoff log line, got: {stderr}"
     );
+    h.shutdown().await;
+}
+
+/// A provider output-token stop is an interrupted round, not completion. The
+/// agent must preserve any text, discard a possibly partial tool call, provide
+/// actionable feedback, and let the same prompt finish normally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn max_tokens_recovers_in_turn_without_running_partial_tool_call() {
+    const PARTIAL: &str = "partial-before-limit";
+    let partial_call = json!([{
+        "id": "partial-call", "type": "function",
+        "function": { "name": "dev__shell", "arguments": "{\"command\":\"echo" },
+    }]);
+    let llm = spawn_capturing_llm(vec![
+        openai_max_tokens(PARTIAL, partial_call),
+        openai_text("done after truncation"),
+    ])
+    .await;
+    let mut h = Harness::spawn(&llm.url).await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"do the task"}]}),
+        )
+        .await;
+    let reply = h.recv_until(|v| v["id"] == json!(prompt_id)).await;
+    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+
+    let requests = llm.captured.lock().await;
+    assert_eq!(requests.len(), 2, "truncation should trigger one retry");
+    let retry = &requests[1]["messages"];
+    let serialized = retry.to_string();
+    assert!(
+        serialized.contains(PARTIAL),
+        "partial text was lost: {retry}"
+    );
+    assert!(
+        serialized.contains("output token limit")
+            && serialized.contains("Stop prolonged internal reasoning")
+            && serialized.contains("Use the available tools immediately")
+            && serialized.contains("write a script or artifact")
+            && serialized.contains("small, verifiable steps"),
+        "retry lacks the tool-first truncation directive: {retry}"
+    );
+    assert!(
+        !serialized.contains("partial-call") && !serialized.contains("tool_call_id"),
+        "partial tool call must not be replayed or executed: {retry}"
+    );
+    drop(requests);
+    h.shutdown().await;
+}
+
+/// `max_rounds` counts max-token responses because they are successful, billed
+/// provider requests. Recovery must not grant them the refund reserved for a
+/// rejected context-overflow request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn max_tokens_recovery_respects_finite_round_cap() {
+    let llm = spawn_capturing_llm(vec![
+        openai_max_tokens("cut off", json!([])),
+        openai_text("must not be requested"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(&llm.url, &[("BUZZ_AGENT_MAX_ROUNDS", "1")]).await;
+    let sid = init_session(&mut h, json!([])).await;
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let reply = h.recv_until(|v| v["id"] == json!(prompt_id)).await;
+    assert_eq!(
+        reply["result"]["stopReason"], "max_turn_requests",
+        "{reply}"
+    );
+    assert_eq!(llm.captured.lock().await.len(), 1);
+    h.shutdown().await;
+}
+
+/// With the production-unbounded round setting, a model that always fills its
+/// output allowance still has to return. Two recovery prompts are allowed; the
+/// third truncation surfaces the original stop reason.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_max_tokens_is_bounded() {
+    let responses = (0..4)
+        .map(|_| openai_max_tokens("still truncated", json!([])))
+        .collect();
+    let llm = spawn_capturing_llm(responses).await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_ROUNDS", "0"),
+            ("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", "2"),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let reply = tokio::time::timeout(
+        Duration::from_secs(10),
+        h.recv_until(|v| v["id"] == json!(prompt_id)),
+    )
+    .await
+    .expect("max-token recovery must be bounded");
+    assert_eq!(reply["result"]["stopReason"], "max_tokens", "{reply}");
+    assert_eq!(llm.captured.lock().await.len(), 3);
+    h.shutdown().await;
+}
+
+/// The default value is the exact number of retries: three recoveries produce
+/// four truncating requests, then surface `max_tokens` without another call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn default_max_tokens_recovery_budget_is_exact() {
+    let responses = (0..5)
+        .map(|_| openai_max_tokens("truncated", json!([])))
+        .collect();
+    let llm = spawn_capturing_llm(responses).await;
+    let mut h = Harness::spawn(&llm.url).await;
+    let sid = init_session(&mut h, json!([])).await;
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let reply = h.recv_until(|v| v["id"] == json!(prompt_id)).await;
+    assert_eq!(reply["result"]["stopReason"], "max_tokens", "{reply}");
+    let requests = llm.captured.lock().await;
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests[0]["max_completion_tokens"], 65_536,
+        "default output ceiling must be carried on the actual request path"
+    );
+    drop(requests);
+    h.shutdown().await;
+}
+
+/// Zero means disabled, not unlimited: the first truncated response is terminal
+/// and no recovery directive is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_max_token_recoveries_disables_retry() {
+    let llm = spawn_capturing_llm(vec![
+        openai_max_tokens("truncated", json!([])),
+        openai_text("must not be requested"),
+    ])
+    .await;
+    let mut h =
+        Harness::spawn_with_env(&llm.url, &[("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", "0")]).await;
+    let sid = init_session(&mut h, json!([])).await;
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let reply = h.recv_until(|v| v["id"] == json!(prompt_id)).await;
+    assert_eq!(reply["result"]["stopReason"], "max_tokens", "{reply}");
+    assert_eq!(llm.captured.lock().await.len(), 1);
+    h.shutdown().await;
+}
+
+/// A successful recovery may proceed directly to a real tool call. This pins
+/// that only tool calls from the truncated response are discarded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn max_tokens_recovery_can_proceed_to_tool_call() {
+    let llm = spawn_capturing_llm(vec![
+        openai_max_tokens(
+            "partial",
+            json!([{"id":"discard-me","type":"function","function":{"name":"dev__shell","arguments":"{\"command\":\"false\"}"}}]),
+        ),
+        openai_tool_call("kept-call", "fake__tool_0", json!({})),
+        openai_text("done"),
+    ])
+    .await;
+    let mut h = Harness::spawn(&llm.url).await;
+    let sid = init_session_with_fake_mcp(&mut h, &[("FAKE_MCP_TOOL_COUNT", "1")]).await;
+    let prompt_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let reply = h
+        .recv_until_approving(|v| v["id"] == json!(prompt_id))
+        .await;
+    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+    let requests = llm.captured.lock().await;
+    assert_eq!(requests.len(), 3);
+    let wire = requests[1].to_string();
+    assert!(
+        !wire.contains("discard-me"),
+        "discarded call leaked: {wire}"
+    );
+    assert!(requests[2].to_string().contains("kept-call"));
+    drop(requests);
     h.shutdown().await;
 }
 
@@ -2696,6 +2728,30 @@ async fn ordinary_400_stays_terminal_and_triggers_no_recovery() {
 /// part of the assertion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn context_recovery_budget_exhaustion_surfaces_the_error() {
+    assert_context_recovery_budget_exhaustion(false).await;
+}
+
+/// The same real provider/ACP scenario with stderr collection held until after
+/// the stdout response. The old immediate snapshot cannot observe the budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_recovery_budget_exhaustion_waits_for_delayed_stderr() {
+    assert_context_recovery_budget_exhaustion(true).await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "timed out waiting for stderr diagnostic")]
+async fn stderr_diagnostic_wait_is_bounded_when_absent() {
+    let llm = spawn_capturing_llm(vec![]).await;
+    let h = Harness::spawn(&llm.url).await;
+    h.wait_for_stderr(
+        "diagnostic that is never emitted",
+        Duration::from_millis(20),
+    )
+    .await;
+}
+
+async fn assert_context_recovery_budget_exhaustion(delay_stderr: bool) {
+    let (release_stderr, stderr_gate) = tokio::sync::oneshot::channel();
     // Enough canned 400s that the queue is never the thing that stops the loop;
     // the fallback response is also a 400-shaped body under this helper only if
     // queued, so keep the queue generously long.
@@ -2703,7 +2759,7 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
         .map(|_| (400, openai_context_length_error()))
         .collect();
     let llm = spawn_capturing_llm_with_status(responses).await;
-    let mut h = Harness::spawn_with_env(
+    let mut h = Harness::spawn_with_stderr_gate(
         &llm.url,
         &[
             ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "200000"),
@@ -2713,6 +2769,7 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
             ),
             ("BUZZ_AGENT_MAX_HANDOFFS", "0"),
         ],
+        delay_stderr.then_some(stderr_gate),
     )
     .await;
     let sid = init_session(&mut h, json!([])).await;
@@ -2741,8 +2798,27 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
     // floor produce a surfaced error, so the assertion above passes either way
     // — and the floor can fire on the first rung without the budget ever being
     // consumed, which would make this test silently exercise a different
-    // mechanism than its name claims. Pin the budget explicitly.
-    let stderr = h.stderr_text();
+    // mechanism than its name claims. Pin the budget explicitly. Stdout is not
+    // a barrier for the independent stderr collector.
+    let stderr = {
+        let wait = h.wait_for_stderr("context recovery budget spent", Duration::from_secs(5));
+        tokio::pin!(wait);
+        if delay_stderr {
+            assert!(
+                !h.stderr_text().contains("context recovery budget spent"),
+                "the old immediate snapshot must miss the held diagnostic"
+            );
+            // Prove the actual wait stays pending before releasing the collector,
+            // without a sleep or depending on how quickly either task runs.
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(wait.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            release_stderr.send(()).expect("release stderr collection");
+        }
+        wait.await
+    };
     assert!(
         stderr.contains("context recovery budget spent"),
         "the per-run recovery BUDGET must be what stops the loop here, not the prompt floor; \
@@ -2756,6 +2832,15 @@ async fn context_recovery_budget_exhaustion_surfaces_the_error() {
         rungs, 3,
         "expected all 3 recovery rungs to be attempted before giving up, saw {rungs} — \
          stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("context recovery would shrink"),
+        "the prompt floor must not stop this fixture: {stderr}"
+    );
+    assert_eq!(
+        llm.captured.lock().await.len(),
+        4,
+        "expected the rejected completion plus exactly three failed summaries"
     );
     h.shutdown().await;
 }
@@ -2806,7 +2891,9 @@ async fn small_history_context_400_refuses_rescue_at_the_prompt_floor() {
         r0.get("error").is_some(),
         "a context 400 with no shrinkable history must surface the error, got: {r0}"
     );
-    let stderr = h.stderr_text();
+    let stderr = h
+        .wait_for_stderr("context recovery would shrink", Duration::from_secs(5))
+        .await;
     assert!(
         stderr.contains("below the") && stderr.contains("floor"),
         "the prompt-budget FLOOR must be what stops this, not the recovery budget; got: {stderr}"
@@ -3322,7 +3409,7 @@ async fn handoff_cap_binds_within_a_single_turn() {
     h.send(
         "session/new",
         json!({
-            "cwd": "/tmp",
+            "cwd": test_cwd(),
             "mcpServers": [{
                 "name": "cap_test",
                 "command": fake_mcp,
@@ -3401,13 +3488,7 @@ async fn handoff_cap_binds_within_a_single_turn() {
         }
 
         if v.get("method") == Some(&json!("session/request_permission")) {
-            let id = v["id"].clone();
-            h.write(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
-            }))
-            .await;
+            h.write(approve_permission(&v)).await;
             continue;
         }
         if v["id"] == json!(p2) {
@@ -3518,7 +3599,7 @@ async fn failed_summarize_burns_handoff_attempt_budget() {
     h.send(
         "session/new",
         json!({
-            "cwd": "/tmp",
+            "cwd": test_cwd(),
             "mcpServers": [{
                 "name": "budget_test",
                 "command": fake_mcp,
@@ -3554,13 +3635,7 @@ async fn failed_summarize_burns_handoff_attempt_budget() {
     loop {
         let v = h.recv().await;
         if v.get("method") == Some(&json!("session/request_permission")) {
-            let id = v["id"].clone();
-            h.write(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": { "outcome": { "outcome": "selected", "optionId": "allow" } },
-            }))
-            .await;
+            h.write(approve_permission(&v)).await;
             continue;
         }
         if v["id"] == json!(p2) {

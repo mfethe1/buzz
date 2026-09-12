@@ -6,10 +6,18 @@ import 'package:flutter/foundation.dart';
 ///
 /// Keep in sync with `desktop/src/shared/constants/kinds.ts`.
 abstract final class EventKind {
+  /// Kind:0 user profile metadata.
+  static const profile = 0;
   static const note = 1;
   static const contactList = 3;
   static const deletion = 5;
   static const reaction = 7;
+
+  /// Kind:9030 event requesting that the relay add a community member.
+  static const relayAdminAddMember = 9030;
+
+  /// Kind:13534 event containing the current relay-community membership.
+  static const relayMembership = 13534;
   static const streamMessage = 9;
   static const nip29DeleteEvent = 9005;
   static const presenceUpdate = 20001;
@@ -35,6 +43,13 @@ abstract final class EventKind {
   static const jobError = 43006;
   static const forumPost = 45001;
   static const forumComment = 45003;
+
+  /// NIP-MR agent mention acknowledgement. An agent publishes this to report
+  /// that it accepted or declined a mention. Overlay only — it must never
+  /// render as a timeline row. Mirrors `KIND_AGENT_MENTION_ACK` in
+  /// `crates/buzz-core/src/kind.rs` and desktop's `KIND_AGENT_MENTION_ACK`.
+  static const agentMentionAck = 44102;
+
   static const huddleStarted = 48100;
   static const huddleParticipantJoined = 48101;
   static const huddleParticipantLeft = 48102;
@@ -63,6 +78,7 @@ abstract final class EventKind {
     huddleParticipantJoined, // 48101 — huddle lifecycle metadata
     huddleParticipantLeft, // 48102 — huddle lifecycle metadata
     huddleEnded, // 48103 — visible huddle ended row
+    agentMentionAck, // 44102 — NIP-MR ack overlay, never a timeline row
   ];
 
   /// Auxiliary timeline kinds that overlay or hide existing rows.
@@ -71,6 +87,7 @@ abstract final class EventKind {
     reaction,
     nip29DeleteEvent,
     streamMessageEdit,
+    agentMentionAck,
   ];
 
   /// Visible content kinds requested by the NIP-CW channel-window path.
@@ -86,6 +103,7 @@ abstract final class EventKind {
     jobCancel,
     jobError,
     huddleStarted,
+    huddleEnded,
   ];
 }
 

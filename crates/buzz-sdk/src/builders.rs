@@ -1,9 +1,11 @@
-//! Typed event builder functions (38 builders).
+//! Typed event builder functions (39 builders).
 //!
 //! All functions return `Result<nostr::EventBuilder, SdkError>`.
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
 
 use buzz_core::{
+    cml::{CmlStatus, CmlTask},
+    cml_event::{CmlRole, CmlTransition},
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
         KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
@@ -19,7 +21,7 @@ use buzz_core::{
         OBSERVER_FRAME_TELEMETRY,
     },
 };
-use nostr::{EventBuilder, Kind, Tag};
+use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
 use crate::{
@@ -213,6 +215,21 @@ fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), Sdk
     Ok(())
 }
 
+/// Attach NIP-30 `["emoji", shortcode, url]` tags.
+///
+/// Each element of `emoji_tags` must be a three-element vector whose first
+/// entry is `"emoji"`.  Entries that don't match this shape are silently
+/// skipped so an unknown future shape never blocks a message send.
+fn nip30_emoji_tags(emoji_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), SdkError> {
+    for et in emoji_tags {
+        if et.len() == 3 && et[0] == "emoji" {
+            let parts: Vec<&str> = et.iter().map(String::as_str).collect();
+            tags.push(Tag::parse(parts).map_err(|e| SdkError::InvalidTag(e.to_string()))?);
+        }
+    }
+    Ok(())
+}
+
 /// Build a stream message (kind 9).
 ///
 /// - `channel_id`: target channel UUID
@@ -221,6 +238,7 @@ fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), Sdk
 /// - `mentions`: pubkey hex strings to p-tag (deduped, max 50)
 /// - `broadcast`: if true, adds `["broadcast", "1"]` tag
 /// - `media_tags`: raw imeta tag vectors
+/// - `emoji_tags`: NIP-30 `["emoji", shortcode, url]` tag vectors
 pub fn build_message(
     channel_id: Uuid,
     content: &str,
@@ -228,6 +246,7 @@ pub fn build_message(
     mentions: &[&str],
     broadcast: bool,
     media_tags: &[Vec<String>],
+    emoji_tags: &[Vec<String>],
 ) -> Result<EventBuilder, SdkError> {
     check_content(content, 64 * 1024)?;
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
@@ -239,7 +258,10 @@ pub fn build_message(
         tags.push(tag(&["broadcast", "1"])?);
     }
     imeta_tags(media_tags, &mut tags)?;
-    Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
+    nip30_emoji_tags(emoji_tags, &mut tags)?;
+    Ok(EventBuilder::new(Kind::Custom(9), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build an encrypted agent observer frame (kind 24200).
@@ -290,7 +312,9 @@ pub fn build_forum_post(
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     mention_tags(mentions, &mut tags)?;
     imeta_tags(media_tags, &mut tags)?;
-    Ok(EventBuilder::new(Kind::Custom(45001), content).tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(45001), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a forum comment reply (kind 45003).
@@ -306,7 +330,9 @@ pub fn build_forum_comment(
     thread_tags(thread_ref, &mut tags)?;
     mention_tags(mentions, &mut tags)?;
     imeta_tags(media_tags, &mut tags)?;
-    Ok(EventBuilder::new(Kind::Custom(45003), content).tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(45003), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a diff/patch message (kind 40008).
@@ -531,9 +557,194 @@ pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, Sd
 }
 
 /// Build a canvas update event (kind 40100).
-pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder, SdkError> {
-    let tags = vec![tag(&["h", &channel_id.to_string()])?];
+///
+/// When `expected_revision` is set, an `["expected-revision", …]` tag is
+/// attached documenting the head the write was composed against: a 64-hex
+/// event ID names the head it expects, and the literal `none` asserts no head
+/// exists yet. Concurrency enforcement is **client-side** (the CLI/Desktop
+/// compare against a freshly read head before publishing); the relay does not
+/// interpret this tag today, so it is advisory/documentary and preserves the
+/// option to add relay enforcement later with zero client change. Omit it for
+/// an unconditional append (backward compatible).
+pub fn build_set_canvas(
+    channel_id: Uuid,
+    content: &str,
+    expected_revision: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
+    if let Some(expected_revision) = expected_revision {
+        if expected_revision != "none"
+            && (expected_revision.len() != 64
+                || !expected_revision.chars().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err(SdkError::InvalidInput(format!(
+                "expected_revision must be the literal \"none\" or a 64-character hex event id (got {expected_revision:?})"
+            )));
+        }
+        tags.push(tag(&["expected-revision", expected_revision])?);
+    }
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
+}
+
+/// Build a canvas write (kind 40100) that edits or restores against a known
+/// head, applying writer discipline in one place.
+///
+/// Sets the `expected-revision` precondition to `head_id` and stamps
+/// `created_at = max(now, head_created_at + 1)` so the event sorts strictly
+/// ahead of the head it asserts under `created_at DESC, id ASC`. This keeps a
+/// legitimate first-party restore/edit whose local clock lags the head from
+/// landing behind that head in read order (which would "succeed" without
+/// changing the visible canvas). First-party signers (CLI `set`/restore,
+/// Desktop save/restore) MUST route disciplined canvas writes through this
+/// helper rather than re-deriving the timestamp.
+///
+/// Ordering note: the `+ 1` bump guarantees a strictly greater `created_at`, so
+/// the write never ties the head. Writes that *do* share a second resolve by
+/// `id ASC` under `created_at DESC, id ASC` — the smallest event id wins the
+/// visible head, not the last write. This helper sidesteps that tie by stamping
+/// ahead; unconditional appends that omit the bump remain subject to it.
+pub fn build_set_canvas_after_head(
+    channel_id: Uuid,
+    content: &str,
+    head_id: &str,
+    head_created_at: u64,
+) -> Result<EventBuilder, SdkError> {
+    if head_created_at == u64::MAX {
+        return Err(SdkError::InvalidInput(
+            "head_created_at must be below u64::MAX so the write can stamp strictly ahead of it"
+                .into(),
+        ));
+    }
+    let created_at = canvas_write_created_at(head_created_at);
+    Ok(build_set_canvas(channel_id, content, Some(head_id))?
+        .custom_created_at(nostr::Timestamp::from(created_at)))
+}
+
+/// Contract-v3 writer-discipline timestamp for a canvas write asserting a head
+/// at `head_created_at`: `max(now, head_created_at + 1)` (Unix seconds).
+///
+/// The single home for canvas timestamp discipline. `build_set_canvas_after_head`
+/// stamps CLI restore/`set` writes with this, and Desktop's `set_canvas` calls
+/// it directly for the same reason, so the `max(now, head + 1)` rule is never
+/// re-derived per surface.
+pub fn canvas_write_created_at(head_created_at: u64) -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    now.max(head_created_at.saturating_add(1))
+}
+
+/// Build a canonical signed-CML lifecycle event using the existing job kinds.
+///
+/// The builder pins `created_at` to `task.updated_at`. Plan roots omit
+/// `previous`; every other v1 transition requires it. Fork resolution uses
+/// [`build_cml_fork_resolution`].
+pub fn build_cml_transition(
+    channel_id: Uuid,
+    task: &CmlTask,
+    transition: CmlTransition,
+    role: CmlRole,
+    previous: Option<EventId>,
+) -> Result<EventBuilder, SdkError> {
+    task.validate()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    if !transition.allows_role(role) {
+        return Err(SdkError::InvalidInput(
+            "role is not authorized for transition".into(),
+        ));
+    }
+    if transition == CmlTransition::Plan && previous.is_some() {
+        return Err(SdkError::InvalidInput(
+            "plan root must not have a predecessor".into(),
+        ));
+    }
+    if transition != CmlTransition::Plan
+        && transition != CmlTransition::OwnerResolve
+        && previous.is_none()
+    {
+        return Err(SdkError::InvalidInput(
+            "non-root transition requires a predecessor".into(),
+        ));
+    }
+    if transition == CmlTransition::OwnerResolve {
+        return Err(SdkError::InvalidInput(
+            "owner.resolve requires explicit fork markers".into(),
+        ));
+    }
+    let mut tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["d", &task.id.to_string()])?,
+        tag(&["protocol", "buzz-cml", "1"])?,
+        tag(&["transition", transition.as_str()])?,
+        tag(&["status", cml_status_wire(task.status)])?,
+        tag(&["role", role.as_str()])?,
+    ];
+    if let Some(previous) = previous {
+        tags.push(tag(&["e", &previous.to_hex(), "prev"])?);
+    }
+    let content = task
+        .to_canonical_json()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    Ok(
+        EventBuilder::new(Kind::Custom(transition.event_kind() as u16), content)
+            .tags(tags)
+            .custom_created_at(nostr::Timestamp::from(task.updated_at)),
+    )
+}
+
+/// Build an owner-authorized resolution that selects one of two fork heads.
+pub fn build_cml_fork_resolution(
+    channel_id: Uuid,
+    task: &CmlTask,
+    fork_a: EventId,
+    fork_b: EventId,
+    selected: EventId,
+) -> Result<EventBuilder, SdkError> {
+    task.validate()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    if fork_a == fork_b || (selected != fork_a && selected != fork_b) {
+        return Err(SdkError::InvalidInput(
+            "resolution must select one of two distinct fork heads".into(),
+        ));
+    }
+    let tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["d", &task.id.to_string()])?,
+        tag(&["protocol", "buzz-cml", "1"])?,
+        tag(&["transition", CmlTransition::OwnerResolve.as_str()])?,
+        tag(&["status", cml_status_wire(task.status)])?,
+        tag(&["role", CmlRole::Planner.as_str()])?,
+        tag(&["e", &fork_a.to_hex(), "fork_a"])?,
+        tag(&["e", &fork_b.to_hex(), "fork_b"])?,
+        tag(&["e", &selected.to_hex(), "selected"])?,
+    ];
+    let content = task
+        .to_canonical_json()
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    Ok(EventBuilder::new(
+        Kind::Custom(CmlTransition::OwnerResolve.event_kind() as u16),
+        content,
+    )
+    .tags(tags)
+    .custom_created_at(nostr::Timestamp::from(task.updated_at)))
+}
+
+fn cml_status_wire(status: CmlStatus) -> &'static str {
+    match status {
+        CmlStatus::Proposed => "proposed",
+        CmlStatus::Planned => "planned",
+        CmlStatus::Claimed => "claimed",
+        CmlStatus::Working => "working",
+        CmlStatus::Blocked => "blocked",
+        CmlStatus::Review => "review",
+        CmlStatus::Fixing => "fixing",
+        CmlStatus::Verified => "verified",
+        CmlStatus::Integrated => "integrated",
+        CmlStatus::Shipped => "shipped",
+        CmlStatus::Cancelled => "cancelled",
+        CmlStatus::Conflicted => "conflicted",
+    }
 }
 
 /// Build a NIP-01 profile metadata event (kind 0).
@@ -1115,6 +1326,131 @@ pub fn build_git_issue(
     Ok(EventBuilder::new(Kind::Custom(KIND_GIT_ISSUE as u16), content).tags(tags))
 }
 
+/// Build an issue assignment note (kind:1) — a labeled comment whose `p`
+/// tags are the assignees, mirroring the Desktop app's assignment events.
+///
+/// Tag layout: `["e", <issue>, "", "root"]`, `["a", <repo>]`, one `["p", ..]`
+/// per assignee, and `["t", "assignment"]`.
+///
+/// Clients only trust assignments signed by the issue author or the repo
+/// owner (who may assign anyone), or a self-assignment whose sole assignee
+/// is the signer. Assignments from other signers are ignored on read.
+pub fn build_git_issue_assignment(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_assignment_with_prior(repo, issue_id, assignees, content, None)
+}
+
+/// Build an issue assignment note with an optional causal assignment-operation
+/// event ID in a `["prior", <event-id>]` tag.
+///
+/// `prior`, when present, must be a 64-character hexadecimal event ID.
+pub fn build_git_issue_assignment_with_prior(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+    prior: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_assignee_operation(
+        repo,
+        issue_id,
+        assignees,
+        content,
+        GitIssueAssigneeOperation::Assign,
+        prior,
+    )
+}
+
+/// Build an issue unassignment note (kind:1) whose `p` tags name the people
+/// being removed and whose operation label is `t: unassignment`.
+///
+/// Clients trust unassignments signed by the issue author or repository owner,
+/// or a self-unassignment whose sole `p` tag is the signer.
+pub fn build_git_issue_unassignment(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_unassignment_with_prior(repo, issue_id, assignees, content, None)
+}
+
+/// Build an issue unassignment note with an optional causal
+/// assignment-operation event ID in a `["prior", <event-id>]` tag.
+///
+/// `prior`, when present, must be a 64-character hexadecimal event ID.
+pub fn build_git_issue_unassignment_with_prior(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+    prior: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    build_git_issue_assignee_operation(
+        repo,
+        issue_id,
+        assignees,
+        content,
+        GitIssueAssigneeOperation::Unassign,
+        prior,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum GitIssueAssigneeOperation {
+    Assign,
+    Unassign,
+}
+
+impl GitIssueAssigneeOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Assign => "assignment",
+            Self::Unassign => "unassignment",
+        }
+    }
+}
+
+fn build_git_issue_assignee_operation(
+    repo: &GitRepoCoord,
+    issue_id: &str,
+    assignees: &[String],
+    content: &str,
+    operation: GitIssueAssigneeOperation,
+    prior: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    check_content(content, 64 * 1024)?;
+    let issue = check_hex_exact(issue_id, 64, "issue")?;
+    let a_value = repo.to_a_tag_value()?;
+    if assignees.is_empty() || assignees.len() > 50 {
+        return Err(SdkError::InvalidInput(
+            "between 1 and 50 assignees are required".into(),
+        ));
+    }
+    let mut normalized = assignees
+        .iter()
+        .map(|assignee| check_pubkey_hex(assignee, "assignee"))
+        .collect::<Result<Vec<_>, _>>()?;
+    normalized.sort();
+    normalized.dedup();
+
+    let mut tags = vec![tag(&["e", &issue, "", "root"])?, tag(&["a", &a_value])?];
+    for assignee in &normalized {
+        tags.push(tag(&["p", assignee])?);
+    }
+    tags.push(tag(&["t", operation.label()])?);
+    if let Some(prior) = prior {
+        let prior = check_hex_exact(prior, 64, "prior assignment operation")?;
+        tags.push(tag(&["prior", &prior])?);
+    }
+
+    Ok(EventBuilder::new(Kind::Custom(1), content).tags(tags))
+}
+
 /// Status to apply to a patch or issue root (kind:1630/1631/1632/1633, NIP-34).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitStatus {
@@ -1487,11 +1823,13 @@ pub fn build_workflow_update(
     channel_id: Uuid,
     workflow_id: Uuid,
     yaml: &str,
+    expected_revision: &str,
 ) -> Result<EventBuilder, SdkError> {
     check_content(yaml, 64 * 1024)?;
     let tags = vec![
         tag(&["d", &workflow_id.to_string()])?,
         tag(&["h", &channel_id.to_string()])?,
+        tag(&["expected-revision", expected_revision])?,
     ];
     Ok(EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF as u16), yaml).tags(tags))
 }
@@ -2247,10 +2585,58 @@ mod tests {
     #[test]
     fn message_happy_path() {
         let cid = uuid();
-        let ev = sign(build_message(cid, "hello", None, &[], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "hello", None, &[], false, &[], &[]).unwrap());
         assert_eq!(ev.kind.as_u16(), 9);
         assert_eq!(ev.content, "hello");
         assert!(has_tag(&ev, "h", &cid.to_string()));
+    }
+
+    #[test]
+    fn message_preserves_self_mention_p_tag() {
+        // nostr 0.44 strips p tags matching the signer by default.
+        // build_message must opt in via allow_self_tagging() so that
+        // explicit self-mentions survive signing. See #4906.
+        let cid = uuid();
+        let sender = keys();
+        let self_pk = sender.public_key().to_hex();
+        let builder =
+            build_message(cid, "self-canary", None, &[&self_pk], false, &[], &[]).unwrap();
+        let ev = builder.sign_with_keys(&sender).expect("sign");
+        assert!(
+            has_tag(&ev, "p", &self_pk),
+            "self-mention p tag must survive signing"
+        );
+    }
+
+    #[test]
+    fn forum_post_preserves_self_mention_p_tag() {
+        let cid = uuid();
+        let sender = keys();
+        let self_pk = sender.public_key().to_hex();
+        let builder = build_forum_post(cid, "self-canary", &[&self_pk], &[]).unwrap();
+        let ev = builder.sign_with_keys(&sender).expect("sign");
+        assert!(
+            has_tag(&ev, "p", &self_pk),
+            "self-mention p tag must survive signing"
+        );
+    }
+
+    #[test]
+    fn forum_comment_preserves_self_mention_p_tag() {
+        let cid = uuid();
+        let sender = keys();
+        let self_pk = sender.public_key().to_hex();
+        let root = event_id();
+        let tr = ThreadRef {
+            root_event_id: root,
+            parent_event_id: root,
+        };
+        let builder = build_forum_comment(cid, "self-canary", &tr, &[&self_pk], &[]).unwrap();
+        let ev = builder.sign_with_keys(&sender).expect("sign");
+        assert!(
+            has_tag(&ev, "p", &self_pk),
+            "self-mention p tag must survive signing"
+        );
     }
 
     #[test]
@@ -2305,7 +2691,7 @@ mod tests {
             root_event_id: eid,
             parent_event_id: eid,
         };
-        let ev = sign(build_message(cid, "reply", Some(&tr), &[], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "reply", Some(&tr), &[], false, &[], &[]).unwrap());
         // Direct reply: only one e-tag with "reply" marker
         let e_tags: Vec<_> = ev
             .tags
@@ -2328,7 +2714,7 @@ mod tests {
             root_event_id: root,
             parent_event_id: parent,
         };
-        let ev = sign(build_message(cid, "nested", Some(&tr), &[], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "nested", Some(&tr), &[], false, &[], &[]).unwrap());
         let e_tags: Vec<_> = ev
             .tags
             .iter()
@@ -2346,7 +2732,7 @@ mod tests {
     #[test]
     fn message_broadcast_flag() {
         let cid = uuid();
-        let ev = sign(build_message(cid, "hi", None, &[], true, &[]).unwrap());
+        let ev = sign(build_message(cid, "hi", None, &[], true, &[], &[]).unwrap());
         assert!(has_tag(&ev, "broadcast", "1"));
     }
 
@@ -2354,7 +2740,7 @@ mod tests {
     fn message_mentions_deduped() {
         let cid = uuid();
         let hex = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
-        let ev = sign(build_message(cid, "hi", None, &[hex, hex], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "hi", None, &[hex, hex], false, &[], &[]).unwrap());
         let p_tags = tag_values(&ev, "p");
         assert_eq!(p_tags.len(), 1);
     }
@@ -2375,7 +2761,7 @@ mod tests {
             })
             .collect();
         let refs: Vec<&str> = hexes.iter().map(|s| s.as_str()).collect();
-        let result = build_message(cid, "hi", None, &refs, false, &[]);
+        let result = build_message(cid, "hi", None, &refs, false, &[], &[]);
         assert!(matches!(result, Err(SdkError::TooManyMentions)));
     }
 
@@ -2383,7 +2769,7 @@ mod tests {
     fn message_content_too_large() {
         let cid = uuid();
         let big = "x".repeat(64 * 1024 + 1);
-        let result = build_message(cid, &big, None, &[], false, &[]);
+        let result = build_message(cid, &big, None, &[], false, &[], &[]);
         assert!(matches!(result, Err(SdkError::ContentTooLarge { .. })));
     }
 
@@ -2391,7 +2777,91 @@ mod tests {
     fn message_max_content_ok() {
         let cid = uuid();
         let max = "x".repeat(64 * 1024);
-        assert!(build_message(cid, &max, None, &[], false, &[]).is_ok());
+        assert!(build_message(cid, &max, None, &[], false, &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn message_emoji_tags_attached() {
+        let cid = uuid();
+        let emoji_tags = vec![
+            vec![
+                "emoji".to_string(),
+                "wave".to_string(),
+                "https://example.com/wave.gif".to_string(),
+            ],
+            vec![
+                "emoji".to_string(),
+                "party".to_string(),
+                "https://example.com/party.gif".to_string(),
+            ],
+        ];
+        let ev = sign(
+            build_message(
+                cid,
+                ":wave: hey :party:",
+                None,
+                &[],
+                false,
+                &[],
+                &emoji_tags,
+            )
+            .unwrap(),
+        );
+        // Both emoji tags present
+        assert!(ev
+            .tags
+            .iter()
+            .any(|t| t.as_slice() == ["emoji", "wave", "https://example.com/wave.gif"]));
+        assert!(ev
+            .tags
+            .iter()
+            .any(|t| t.as_slice() == ["emoji", "party", "https://example.com/party.gif"]));
+        // kind 9
+        assert_eq!(ev.kind.as_u16(), 9);
+    }
+
+    #[test]
+    fn message_malformed_emoji_tag_silently_skipped() {
+        let cid = uuid();
+        let emoji_tags = vec![
+            // only 2 elements — invalid, must be skipped
+            vec!["emoji".to_string(), "wave".to_string()],
+            // wrong kind — must be skipped
+            vec![
+                "imeta".to_string(),
+                "wave".to_string(),
+                "https://example.com/wave.gif".to_string(),
+            ],
+            // valid
+            vec![
+                "emoji".to_string(),
+                "ok".to_string(),
+                "https://example.com/ok.gif".to_string(),
+            ],
+        ];
+        let ev = sign(build_message(cid, "hi", None, &[], false, &[], &emoji_tags).unwrap());
+        let emoji_count = ev
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(String::as_str) == Some("emoji"))
+            .count();
+        assert_eq!(emoji_count, 1);
+        assert!(ev
+            .tags
+            .iter()
+            .any(|t| t.as_slice() == ["emoji", "ok", "https://example.com/ok.gif"]));
+    }
+
+    #[test]
+    fn message_empty_emoji_tags_slice_ok() {
+        let cid = uuid();
+        let ev = sign(build_message(cid, "hello", None, &[], false, &[], &[]).unwrap());
+        let emoji_count = ev
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(String::as_str) == Some("emoji"))
+            .count();
+        assert_eq!(emoji_count, 0);
     }
 
     #[test]
@@ -2708,10 +3178,77 @@ mod tests {
     #[test]
     fn set_canvas_happy_path() {
         let cid = uuid();
-        let ev = sign(build_set_canvas(cid, "# Canvas\nHello").unwrap());
+        let ev = sign(build_set_canvas(cid, "# Canvas\nHello", None).unwrap());
         assert_eq!(ev.kind.as_u16(), 40100);
         assert!(has_tag(&ev, "h", &cid.to_string()));
         assert_eq!(ev.content, "# Canvas\nHello");
+        assert!(!ev.tags.iter().any(|t| t
+            .as_slice()
+            .first()
+            .is_some_and(|k| k == "expected-revision")));
+    }
+
+    #[test]
+    fn set_canvas_pins_expected_revision() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+        let ev = sign(build_set_canvas(cid, "# Canvas\nHi", Some(&head)).unwrap());
+        assert!(has_tag(&ev, "expected-revision", &head));
+
+        let create = sign(build_set_canvas(cid, "# New", Some("none")).unwrap());
+        assert!(has_tag(&create, "expected-revision", "none"));
+    }
+
+    #[test]
+    fn set_canvas_after_head_pins_revision_and_bumps_timestamp() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+
+        // Head created far in the future relative to the signer's clock: the
+        // discipline must still stamp strictly ahead of the asserted head.
+        let future_head = 4_000_000_000_u64;
+        let ev = sign(build_set_canvas_after_head(cid, "# Restored", &head, future_head).unwrap());
+        assert!(has_tag(&ev, "expected-revision", &head));
+        assert!(
+            ev.created_at.as_secs() > future_head,
+            "created_at {} must be strictly ahead of future head {future_head}",
+            ev.created_at.as_secs()
+        );
+
+        // Head in the past: the signer's `now` wins and is still ahead.
+        let past_head = 1_000_u64;
+        let ev = sign(build_set_canvas_after_head(cid, "# Restored", &head, past_head).unwrap());
+        assert!(ev.created_at.as_secs() > past_head);
+    }
+
+    #[test]
+    fn set_canvas_rejects_malformed_expected_revision() {
+        let cid = uuid();
+        // Wrong length (63 hex chars).
+        assert!(matches!(
+            build_set_canvas(cid, "x", Some(&"a".repeat(63))),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // Correct length but non-hex.
+        assert!(matches!(
+            build_set_canvas(cid, "x", Some(&"z".repeat(64))),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // Literal "none" and a valid 64-hex id are accepted.
+        assert!(build_set_canvas(cid, "x", Some("none")).is_ok());
+        assert!(build_set_canvas(cid, "x", Some(&"a".repeat(64))).is_ok());
+    }
+
+    #[test]
+    fn set_canvas_after_head_rejects_max_head_created_at() {
+        let cid = uuid();
+        let head = event_id().to_hex();
+        // u64::MAX cannot be stamped strictly ahead of: reject instead of
+        // silently saturating and breaking the head-advancement guarantee.
+        assert!(matches!(
+            build_set_canvas_after_head(cid, "# Restored", &head, u64::MAX),
+            Err(SdkError::InvalidInput(_))
+        ));
     }
 
     #[test]
@@ -3429,6 +3966,149 @@ mod tests {
     }
 
     #[test]
+    fn git_issue_assignment_happy_path() {
+        let owner = "a".repeat(64);
+        let repo = GitRepoCoord {
+            owner: owner.clone(),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        // Duplicates (case-insensitive) collapse to a single p tag.
+        let assignees = vec!["C".repeat(64), "c".repeat(64), "d".repeat(64)];
+        let ev = sign(
+            build_git_issue_assignment(&repo, &issue, &assignees, "Assigned this issue to Thomas")
+                .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 1);
+        assert_eq!(ev.content, "Assigned this issue to Thomas");
+        assert!(has_tag(&ev, "e", &issue));
+        assert!(has_tag(&ev, "a", &format!("30617:{owner}:repo")));
+        assert!(has_tag(&ev, "p", &"c".repeat(64)));
+        assert!(has_tag(&ev, "p", &"d".repeat(64)));
+        assert!(has_tag(&ev, "t", "assignment"));
+        let p_count = ev
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("p"))
+            .count();
+        assert_eq!(p_count, 2);
+    }
+
+    #[test]
+    fn git_issue_assignment_rejects_bad_input() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        // No assignees.
+        let err = build_git_issue_assignment(&repo, &issue, &[], "x").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        // Malformed assignee pubkey.
+        let err =
+            build_git_issue_assignment(&repo, &issue, &["nope".to_string()], "x").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        // Malformed issue id.
+        let err = build_git_issue_assignment(&repo, "short", &["c".repeat(64)], "x").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_issue_assignment_with_prior_emits_valid_causal_tag() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        let assignee = "c".repeat(64);
+        let prior = "d".repeat(64);
+        let ev = sign(
+            build_git_issue_assignment_with_prior(
+                &repo,
+                &issue,
+                &[assignee],
+                "Assigned this issue",
+                Some(&prior),
+            )
+            .unwrap(),
+        );
+
+        assert!(has_tag(&ev, "prior", &prior));
+        let unassignment = sign(
+            build_git_issue_unassignment_with_prior(
+                &repo,
+                &issue,
+                &["c".repeat(64)],
+                "Unassigned this issue",
+                Some(&prior),
+            )
+            .unwrap(),
+        );
+        assert!(has_tag(&unassignment, "prior", &prior));
+        assert!(build_git_issue_assignment_with_prior(
+            &repo,
+            &issue,
+            &["c".repeat(64)],
+            "Assigned this issue",
+            Some("invalid"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn git_issue_unassignment_happy_path() {
+        let owner = "a".repeat(64);
+        let repo = GitRepoCoord {
+            owner: owner.clone(),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        let assignee = "c".repeat(64);
+        let ev = sign(
+            build_git_issue_unassignment(
+                &repo,
+                &issue,
+                std::slice::from_ref(&assignee),
+                "Unassigned Thomas from this issue",
+            )
+            .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 1);
+        assert_eq!(ev.content, "Unassigned Thomas from this issue");
+        assert!(has_tag(&ev, "e", &issue));
+        assert!(has_tag(&ev, "a", &format!("30617:{owner}:repo")));
+        assert!(has_tag(&ev, "p", &assignee));
+        assert!(has_tag(&ev, "t", "unassignment"));
+        assert!(!has_tag(&ev, "t", "assignment"));
+    }
+
+    #[test]
+    fn legacy_issue_assignment_builders_omit_prior() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let issue = "b".repeat(64);
+        let assignees = vec!["c".repeat(64)];
+        let assignment = sign(
+            build_git_issue_assignment(&repo, &issue, &assignees, "Assigned this issue").unwrap(),
+        );
+        let unassignment = sign(
+            build_git_issue_unassignment(&repo, &issue, &assignees, "Unassigned this issue")
+                .unwrap(),
+        );
+
+        assert!(!assignment
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice().first().map(String::as_str) == Some("prior") }));
+        assert!(!unassignment
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice().first().map(String::as_str) == Some("prior") }));
+    }
+
+    #[test]
     fn git_status_open_happy_path() {
         let root = event_id().to_hex();
         let meta = GitStatusMeta {
@@ -3651,16 +4331,18 @@ mod tests {
     fn workflow_update_includes_h_tag() {
         let cid = uuid();
         let wid = uuid();
-        let ev = sign(build_workflow_update(cid, wid, "name: updated").unwrap());
+        let revision = "a".repeat(64);
+        let ev = sign(build_workflow_update(cid, wid, "name: updated", &revision).unwrap());
         assert_eq!(ev.kind.as_u16(), 30620);
         assert!(has_tag(&ev, "d", &wid.to_string()));
         assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert!(has_tag(&ev, "expected-revision", &revision));
     }
 
     #[test]
     fn workflow_update_rejects_oversized_yaml() {
         let big = "x".repeat(65 * 1024);
-        let err = build_workflow_update(uuid(), uuid(), &big).unwrap_err();
+        let err = build_workflow_update(uuid(), uuid(), &big, &"a".repeat(64)).unwrap_err();
         assert!(matches!(err, SdkError::ContentTooLarge { .. }));
     }
 

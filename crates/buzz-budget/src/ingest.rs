@@ -161,6 +161,7 @@ mod tests {
             cumulative: None,
             delta_reliable: true,
             stop_reason: None,
+            pricing_identity: None,
         }
     }
 
