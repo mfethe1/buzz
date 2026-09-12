@@ -303,8 +303,9 @@ jobs:
               exit 0
             fi
 
-            matching=$(jq --arg source_sha "$SOURCE_SHA" '[.workflow_runs[] | select(.head_sha == $source_sha) | select(.event == "push") | select(.head_branch == "main" or .head_branch == "release")] | length' <<<"$payload")
-            pending=$(jq --arg source_sha "$SOURCE_SHA" '[.workflow_runs[] | select(.head_sha == $source_sha) | select(.event == "push") | select(.head_branch == "main" or .head_branch == "release") | select(.status != "completed")] | length' <<<"$payload")
+            # fork: also accept push runs from product/main (our integration trunk)
+            matching=$(jq --arg source_sha "$SOURCE_SHA" '[.workflow_runs[] | select(.head_sha == $source_sha) | select(.event == "push") | select(.head_branch == "main" or .head_branch == "release" or .head_branch == "product/main")] | length' <<<"$payload")
+            pending=$(jq --arg source_sha "$SOURCE_SHA" '[.workflow_runs[] | select(.head_sha == $source_sha) | select(.event == "push") | select(.head_branch == "main" or .head_branch == "release" or .head_branch == "product/main") | select(.status != "completed")] | length' <<<"$payload")
             if (( matching > 0 && pending == 0 )); then
               echo "::error::No successful CI run exists for source $SOURCE_SHA"
               jq -r --arg source_sha "$SOURCE_SHA" '.workflow_runs[] | select(.head_sha == $source_sha) | "run=\(.id) attempt=\(.run_attempt) status=\(.status) conclusion=\(.conclusion)"' <<<"$payload"
@@ -553,7 +554,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
         with:
-          images: ghcr.io/block/buzz-push-gateway
+          images: ghcr.io/${{ github.repository_owner }}/buzz-push-gateway
           labels: |
             org.opencontainers.image.title=Buzz Push Gateway
             org.opencontainers.image.description=Capability-gated APNs last hop for Buzz
@@ -566,7 +567,7 @@ jobs:
           file: ./Dockerfile.push-gateway
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=ghcr.io/block/buzz-push-gateway,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/buzz-push-gateway,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           cache-from: type=registry,ref=${{ steps.cache.outputs.repository }}-push-gateway-buildcache:${{ matrix.arch }}
           cache-to: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref_protected && format('type=registry,ref={0}-push-gateway-buildcache:{1},mode=max,compression=zstd', steps.cache.outputs.repository, matrix.arch) || '' }}
       - name: Export digest
@@ -613,7 +614,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
         with:
-          images: ghcr.io/block/buzz-push-gateway
+          images: ghcr.io/${{ github.repository_owner }}/buzz-push-gateway
           tags: |
             type=ref,event=branch,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
             type=sha,prefix=sha-,format=short,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
@@ -627,7 +628,7 @@ jobs:
         run: |
           set -euo pipefail
           tags=(); while IFS= read -r tag; do [ -n "$tag" ] && tags+=("-t" "$tag"); done <<< "$META_TAGS"
-          digests=(); for digest in *; do digests+=("ghcr.io/block/buzz-push-gateway@sha256:${digest}"); done
+          digests=(); for digest in *; do digests+=("ghcr.io/${{ github.repository_owner }}/buzz-push-gateway@sha256:${digest}"); done
           docker buildx imagetools create "${tags[@]}" "${digests[@]}"
           first_tag=$(echo "$META_TAGS" | head -n1)
           digest=$(docker buildx imagetools inspect "$first_tag" --format '{{json .Manifest}}' | jq -r '.digest')
@@ -635,7 +636,7 @@ jobs:
       - name: Attest gateway image provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
         with:
-          subject-name: ghcr.io/block/buzz-push-gateway
+          subject-name: ghcr.io/${{ github.repository_owner }}/buzz-push-gateway
           subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
       - name: Gateway publication summary
