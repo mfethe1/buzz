@@ -360,6 +360,129 @@ async fn set_agent_owner_with_operation(
     Ok(true)
 }
 
+/// The machine an agent calls home: stable host id, human label, and runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineHome {
+    /// Stable host identity (the desktop's device id).
+    pub machine_id: String,
+    /// Human-facing, renameable label.
+    pub machine_label: Option<String>,
+    /// Runtime serving this home (`"hermes"`, `"openclaw"`, `"claude-code"`, ...).
+    pub machine_runtime: Option<String>,
+}
+
+/// Register (or re-register) `agent_pubkey` as the home agent for a machine.
+///
+/// One home per machine per community is a database invariant
+/// (`idx_users_one_home_per_machine`), not a check performed here: a
+/// read-then-write would race two concurrent registrations onto the same host.
+/// A conflicting claim therefore surfaces as a unique violation, which is
+/// translated to [`DbError::AccessDenied`] so callers get an actionable
+/// message instead of a raw SQLSTATE.
+///
+/// Returns `Err(DbError::NotFound)` if the agent pubkey has no `users` row.
+pub async fn set_machine_home(
+    pool: &PgPool,
+    community_id: CommunityId,
+    agent_pubkey: &[u8],
+    home: &MachineHome,
+) -> Result<()> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let result = sqlx::query(
+        r#"UPDATE users SET machine_id = $1, machine_label = $2, machine_runtime = $3, updated_at = NOW() WHERE community_id = $4 AND pubkey = $5"#,
+    )
+    .bind(&home.machine_id)
+    .bind(home.machine_label.as_deref())
+    .bind(home.machine_runtime.as_deref())
+    .bind(community_id.as_uuid())
+    .bind(agent_pubkey)
+    .execute(&mut *connection)
+    .await;
+
+    match result {
+        Ok(done) if done.rows_affected() == 0 => Err(crate::error::DbError::NotFound(
+            "agent pubkey not found in users table".into(),
+        )),
+        Ok(_) => Ok(()),
+        // 23505 = unique_violation: another agent already homes this machine.
+        Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some("23505") => {
+            Err(crate::error::DbError::AccessDenied(format!(
+                "machine {} already has a home agent in this community",
+                home.machine_id
+            )))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Clear an agent's machine home, freeing the machine for another agent.
+///
+/// Returns `true` if a home was cleared, `false` if the row exists but had no
+/// home. All three columns drop together: the migration's
+/// `chk_users_machine_fields_require_machine_id` makes a label or runtime
+/// without a `machine_id` unrepresentable.
+pub async fn clear_machine_home(
+    pool: &PgPool,
+    community_id: CommunityId,
+    agent_pubkey: &[u8],
+) -> Result<bool> {
+    let mut connection = crate::observability::acquire_writer(
+        pool,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
+    let result = sqlx::query(
+        r#"UPDATE users SET machine_id = NULL, machine_label = NULL, machine_runtime = NULL, updated_at = NOW() WHERE community_id = $1 AND pubkey = $2 AND machine_id IS NOT NULL"#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(agent_pubkey)
+    .execute(&mut *connection)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Look up an agent's machine home. `None` when the user is absent or unhomed.
+pub async fn get_machine_home(
+    pool: &PgPool,
+    community_id: CommunityId,
+    agent_pubkey: &[u8],
+) -> Result<Option<MachineHome>> {
+    let row = sqlx::query(
+        r#"SELECT machine_id, machine_label, machine_runtime FROM users WHERE community_id = $1 AND pubkey = $2 AND machine_id IS NOT NULL"#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(agent_pubkey)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| MachineHome {
+        machine_id: r.get("machine_id"),
+        machine_label: r.get("machine_label"),
+        machine_runtime: r.get("machine_runtime"),
+    }))
+}
+
+/// Resolve the agent that homes `machine_id`, if any.
+///
+/// This is the lookup that makes a machine home addressable: given a host, find
+/// the pubkey that answers for it.
+pub async fn get_agent_for_machine(
+    pool: &PgPool,
+    community_id: CommunityId,
+    machine_id: &str,
+) -> Result<Option<Vec<u8>>> {
+    let row =
+        sqlx::query(r#"SELECT pubkey FROM users WHERE community_id = $1 AND machine_id = $2"#)
+            .bind(community_id.as_uuid())
+            .bind(machine_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|r| r.get::<Vec<u8>, _>("pubkey")))
+}
+
 /// Get the channel_add_policy and agent_owner_pubkey for a user.
 /// Returns None if the pubkey is not in the users table.
 /// Returns Some((policy_str, owner_bytes_or_none)) if found.
@@ -860,5 +983,197 @@ mod postgres_tests {
 
         assert_eq!(result.0, "owner_only");
         assert!(result.1.is_none(), "owner should be None when never set");
+    }
+
+    /// A registered machine home round-trips, and the machine resolves back to
+    /// the agent that homes it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_machine_home_round_trip() {
+        let db = setup_db().await;
+        let community = make_community(&db.pool).await;
+        let agent = random_pubkey();
+        ensure_user(&db.pool, community, &agent)
+            .await
+            .expect("ensure agent");
+
+        let home = MachineHome {
+            machine_id: format!("machine-{}", uuid::Uuid::new_v4()),
+            machine_label: Some("Winnie".to_owned()),
+            machine_runtime: Some("openclaw".to_owned()),
+        };
+        set_machine_home(&db.pool, community, &agent, &home)
+            .await
+            .expect("set home");
+
+        let got = get_machine_home(&db.pool, community, &agent)
+            .await
+            .expect("get home")
+            .expect("home should be Some");
+        assert_eq!(got, home);
+
+        let resolved = get_agent_for_machine(&db.pool, community, &home.machine_id)
+            .await
+            .expect("resolve machine")
+            .expect("machine should resolve");
+        assert_eq!(resolved, agent, "machine must resolve to its home agent");
+    }
+
+    /// The core PR-3 invariant: one home agent per machine, per community. The
+    /// second claim must be rejected rather than silently stealing the host.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_second_agent_cannot_claim_same_machine() {
+        let db = setup_db().await;
+        let community = make_community(&db.pool).await;
+        let first = random_pubkey();
+        let second = random_pubkey();
+        ensure_user(&db.pool, community, &first).await.expect("a");
+        ensure_user(&db.pool, community, &second).await.expect("b");
+
+        let machine_id = format!("machine-{}", uuid::Uuid::new_v4());
+        let home = MachineHome {
+            machine_id: machine_id.clone(),
+            machine_label: None,
+            machine_runtime: None,
+        };
+        set_machine_home(&db.pool, community, &first, &home)
+            .await
+            .expect("first claim wins");
+
+        let conflict = set_machine_home(&db.pool, community, &second, &home).await;
+        assert!(
+            matches!(conflict, Err(crate::error::DbError::AccessDenied(_))),
+            "second claim on the same machine must be denied, got {conflict:?}"
+        );
+
+        // The original home is untouched by the failed claim.
+        let still = get_agent_for_machine(&db.pool, community, &machine_id)
+            .await
+            .expect("resolve")
+            .expect("still homed");
+        assert_eq!(still, first);
+    }
+
+    /// Admission confinement: the same machine id in a different community is a
+    /// different machine, so the unique index must not collide across tenants.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_same_machine_id_allowed_in_other_community() {
+        let db = setup_db().await;
+        let community_a = make_community(&db.pool).await;
+        let community_b = make_community(&db.pool).await;
+        let agent_a = random_pubkey();
+        let agent_b = random_pubkey();
+        ensure_user(&db.pool, community_a, &agent_a)
+            .await
+            .expect("a");
+        ensure_user(&db.pool, community_b, &agent_b)
+            .await
+            .expect("b");
+
+        let home = MachineHome {
+            machine_id: format!("machine-{}", uuid::Uuid::new_v4()),
+            machine_label: None,
+            machine_runtime: None,
+        };
+        set_machine_home(&db.pool, community_a, &agent_a, &home)
+            .await
+            .expect("community A claim");
+        set_machine_home(&db.pool, community_b, &agent_b, &home)
+            .await
+            .expect("community B must be independent of A");
+    }
+
+    /// Clearing a home frees the machine for another agent to claim.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_clear_machine_home_frees_the_machine() {
+        let db = setup_db().await;
+        let community = make_community(&db.pool).await;
+        let first = random_pubkey();
+        let second = random_pubkey();
+        ensure_user(&db.pool, community, &first).await.expect("a");
+        ensure_user(&db.pool, community, &second).await.expect("b");
+
+        let home = MachineHome {
+            machine_id: format!("machine-{}", uuid::Uuid::new_v4()),
+            machine_label: None,
+            machine_runtime: None,
+        };
+        set_machine_home(&db.pool, community, &first, &home)
+            .await
+            .expect("first claim");
+
+        assert!(
+            clear_machine_home(&db.pool, community, &first)
+                .await
+                .expect("clear"),
+            "clearing an existing home reports true"
+        );
+        assert!(
+            get_machine_home(&db.pool, community, &first)
+                .await
+                .expect("get")
+                .is_none(),
+            "home is gone after clear"
+        );
+        assert!(
+            !clear_machine_home(&db.pool, community, &first)
+                .await
+                .expect("clear again"),
+            "clearing an unhomed agent reports false"
+        );
+
+        set_machine_home(&db.pool, community, &second, &home)
+            .await
+            .expect("machine is free for the next agent");
+    }
+
+    /// Registering a home for a pubkey with no users row is an error, not a
+    /// silent no-op that would leave the machine unhomed.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_set_machine_home_nonexistent_agent() {
+        let db = setup_db().await;
+        let community = make_community(&db.pool).await;
+        let ghost = random_pubkey();
+
+        let home = MachineHome {
+            machine_id: format!("machine-{}", uuid::Uuid::new_v4()),
+            machine_label: None,
+            machine_runtime: None,
+        };
+        let result = set_machine_home(&db.pool, community, &ghost, &home).await;
+        assert!(
+            matches!(result, Err(crate::error::DbError::NotFound(_))),
+            "unknown agent must not be homed, got {result:?}"
+        );
+    }
+
+    /// A label or runtime with no machine_id is unaddressable, and the database
+    /// must reject it rather than storing a half-registered home.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_label_without_machine_id_is_rejected() {
+        let db = setup_db().await;
+        let community = make_community(&db.pool).await;
+        let agent = random_pubkey();
+        ensure_user(&db.pool, community, &agent)
+            .await
+            .expect("ensure agent");
+
+        let result = sqlx::query(
+            "UPDATE users SET machine_label = $1 WHERE community_id = $2 AND pubkey = $3",
+        )
+        .bind("orphan-label")
+        .bind(community.as_uuid())
+        .bind(&agent)
+        .execute(&db.pool)
+        .await;
+        assert!(
+            result.is_err(),
+            "a label with no machine_id must violate chk_users_machine_fields_require_machine_id"
+        );
     }
 }

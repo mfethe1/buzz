@@ -21,6 +21,7 @@ import {
   rememberSelectedAgentPubkeys,
   uniqueAutocompleteLabels,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
+import { useAgentAvailabilityLookup } from "@/features/agents/lib/useAgentAvailability";
 import {
   useInfiniteUserSearchQuery,
   useUsersBatchQuery,
@@ -173,9 +174,23 @@ export function useMentions(
       ),
     [relayAgentsQuery.data],
   );
+  const relayAgentDirectoryPubkeys = React.useMemo(
+    () =>
+      (relayAgentsQuery.data ?? []).map((agent) =>
+        normalizePubkey(agent.pubkey),
+      ),
+    [relayAgentsQuery.data],
+  );
+  // Presence is queried over the relay-agent DIRECTORY, not the per-keystroke
+  // candidate set, so presenceQueryKey stays stable while typing and #5830's
+  // subscription reconciler sees no churn. An empty directory self-disables the
+  // query, leaving availability undefined and behaviour byte-identical.
+  const { getAvailability: getRelayAgentAvailability } =
+    useAgentAvailabilityLookup(relayAgentDirectoryPubkeys);
   const activeAgentPubkeys = useActiveAgentPubkeys(
     managedAgentsQuery.data,
     relayAgentsQuery.data,
+    getRelayAgentAvailability,
   );
   const sharedChannelIds = React.useMemo(
     () => getSharedChannelIds(channelsQuery.data),
