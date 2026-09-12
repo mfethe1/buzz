@@ -48,10 +48,10 @@ import { ImageLightboxZoomControls } from "./markdown/ImageLightboxZoomControls"
 import {
   CODE_BLOCK_CLASS,
   extractLanguage,
-  MarkdownCodeBlock,
   SyntaxHighlightedCode,
 } from "./markdown/CodeBlock";
 import { EntityLinkAnchor, useOpenEntityLink } from "./markdown/entityLinks";
+import { MarkdownFence } from "./markdown/widgets/MarkdownFence";
 import { ExternalLinkAnchor } from "./markdown/ExternalLinkAnchor";
 import { FileCard } from "./markdown/FileCard";
 import {
@@ -1554,9 +1554,7 @@ export function createMarkdownComponents(
           language = extractLanguage(child.props.className);
         }
       });
-      return (
-        <MarkdownCodeBlock language={language}>{children}</MarkdownCodeBlock>
-      );
+      return <MarkdownFence language={language}>{children}</MarkdownFence>;
     },
     strong: ({ children }) => (
       <strong className="font-semibold">{children}</strong>
