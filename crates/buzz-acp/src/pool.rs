@@ -32,7 +32,7 @@ use uuid::Uuid;
 use crate::acp::{
     extract_model_config_options, extract_model_state, extract_thought_level_config_id,
     model_in_catalog, resolve_model_switch_method, AcpClient, AcpError, EnvVar, McpServer,
-    ModelSwitchMethod, StopReason, SystemPromptTransport,
+    ModelSwitchMethod, StopReason, SystemPromptTransport, BUZZ_PI_ACP_NAME,
 };
 use crate::config::{compose_scoped_session_title, DedupMode, PermissionMode};
 use crate::observer;
@@ -299,7 +299,7 @@ fn has_system_prompt_support(
 ) -> bool {
     if agent_name == "goose" {
         goose_system_prompt_supported == Some(true)
-    } else if agent_name == CLAUDE_AGENT_ACP_NAME {
+    } else if agent_name == BUZZ_PI_ACP_NAME || agent_name == CLAUDE_AGENT_ACP_NAME {
         true
     } else {
         protocol_version >= 2
@@ -312,7 +312,11 @@ fn session_new_system_prompt<'a>(
     agent_name: &str,
     prompt: Option<&'a str>,
 ) -> Option<SystemPromptTransport<'a>> {
-    if is_goose || (protocol_version < 2 && agent_name != CLAUDE_AGENT_ACP_NAME) {
+    if is_goose {
+        None
+    } else if agent_name == BUZZ_PI_ACP_NAME {
+        prompt.map(SystemPromptTransport::PiMeta)
+    } else if protocol_version < 2 && agent_name != CLAUDE_AGENT_ACP_NAME {
         None
     } else if agent_name == CLAUDE_AGENT_ACP_NAME {
         prompt.map(SystemPromptTransport::ClaudeMeta)
@@ -5936,56 +5940,7 @@ mod tests {
         assert_eq!(composed, "<base>\nbe helpful\n</base>\n\ntick");
     }
 
-    #[test]
-    fn goose_uses_system_prompt_only_after_custom_method_succeeds() {
-        assert!(!has_system_prompt_support(2, "goose", None));
-        assert!(!has_system_prompt_support(2, "goose", Some(false)));
-        assert!(has_system_prompt_support(2, "goose", Some(true)));
-        assert!(has_system_prompt_support(1, "goose", Some(true)));
-        assert!(has_system_prompt_support(2, "buzz-agent", None));
-        // Goose never receives system prompt via session/new (uses post-hoc method).
-        assert_eq!(
-            session_new_system_prompt(true, 2, "goose", Some("instructions")),
-            None
-        );
-        // Protocol-v2 non-goose gets Field transport.
-        assert_eq!(
-            session_new_system_prompt(false, 2, "buzz-agent", Some("instructions")),
-            Some(SystemPromptTransport::Field("instructions"))
-        );
-        // Protocol-v1 non-goose, non-claude gets None (legacy user-message framing).
-        assert_eq!(
-            session_new_system_prompt(false, 1, "codex", Some("instructions")),
-            None
-        );
-        // claude-agent-acp gets ClaudeMeta transport regardless of protocol version.
-        assert_eq!(
-            session_new_system_prompt(false, 1, CLAUDE_AGENT_ACP_NAME, Some("instructions")),
-            Some(SystemPromptTransport::ClaudeMeta("instructions"))
-        );
-        assert_eq!(
-            session_new_system_prompt(true, 1, CLAUDE_AGENT_ACP_NAME, Some("instructions")),
-            None,
-            "goose path must never produce a transport even when agent_name matches"
-        );
-    }
-
-    #[test]
-    fn claude_agent_acp_has_system_prompt_support_regardless_of_protocol_version() {
-        // claude-agent-acp declares protocolVersion:1 but supports _meta.systemPrompt;
-        // has_system_prompt_support must return true so user-message framing is suppressed.
-        assert!(has_system_prompt_support(1, CLAUDE_AGENT_ACP_NAME, None));
-        assert!(has_system_prompt_support(2, CLAUDE_AGENT_ACP_NAME, None));
-    }
-
-    #[test]
-    fn old_zed_adapter_name_falls_through_to_protocol_version_gate() {
-        // The renamed @zed-industries package predates the _meta.systemPrompt support,
-        // so it must not be treated as capable and stays on legacy user-message framing.
-        let old_name = "@zed-industries/claude-code-acp";
-        assert!(!has_system_prompt_support(1, old_name, None));
-        assert!(has_system_prompt_support(2, old_name, None));
-    }
+    include!("pool/system_prompt_tests.rs");
 
     #[test]
     fn test_initial_message_legacy_agent_without_base_is_unchanged() {
@@ -8069,9 +8024,14 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let ch = Uuid::new_v4();
         let ta = thread_scope(ch, &"a".repeat(64));
         let tb = thread_scope(ch, &"b".repeat(64));
-        let acp = AcpClient::spawn("bash", &["-c".into(), "sleep 10".into()], &[], false)
-            .await
-            .expect("spawn dummy ACP");
+        let acp = AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".into(), "sleep 10".into()],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn dummy ACP");
         let mut agent = OwnedAgent {
             index: 0,
             acp,
@@ -8151,9 +8111,14 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     /// An idle agent (slot 0) holding a provider session for `scope`, so
     /// `has_session_for(scope)` is true.
     async fn idle_agent_with_session(index: usize, scope: SessionScope) -> OwnedAgent {
-        let acp = AcpClient::spawn("bash", &["-c".into(), "sleep 10".into()], &[], false)
-            .await
-            .expect("spawn dummy ACP");
+        let acp = AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".into(), "sleep 10".into()],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn dummy ACP");
         let mut agent = OwnedAgent {
             index,
             acp,
@@ -9203,7 +9168,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     #[tokio::test]
     async fn test_send_prompt_result_clears_steer_rx_on_early_return() {
         let acp = AcpClient::spawn(
-            "bash",
+            &crate::testshell::posix_shell_command(),
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
             false,
@@ -9264,7 +9229,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     #[tokio::test]
     async fn test_send_prompt_result_is_noop_when_steer_rx_already_consumed() {
         let acp = AcpClient::spawn(
-            "bash",
+            &crate::testshell::posix_shell_command(),
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
             false,
@@ -9846,9 +9811,14 @@ done"#,
             quoted = quoted,
             body = script,
         );
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), wrapped], &[], false)
-            .await
-            .expect("spawn capture agent");
+        let acp = AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".to_string(), wrapped],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn capture agent");
         (acp, capture)
     }
 
@@ -10968,9 +10938,14 @@ done"#,
   printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
-            .await
-            .expect("spawn wire-capture ACP");
+        let acp = AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".into(), script],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn wire-capture ACP");
         let agent = OwnedAgent {
             index: 0,
             acp,
@@ -11400,9 +11375,14 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
-            .await
-            .expect("spawn effort ACP script")
+        AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".to_string(), script],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn effort ACP script")
     }
 
     fn captured_config_options(obs: &observer::ObserverHandle) -> serde_json::Value {
@@ -11571,9 +11551,14 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"sessionId":"sess-1","configO
 IFS= read -r _effort
 exit 0"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
-            .await
-            .expect("spawn transport-exit ACP script");
+        let acp = AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".to_string(), script],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn transport-exit ACP script");
         let mut agent = effort_agent(acp, Some("high"));
 
         let ctx = make_prompt_context_no_owner();
@@ -11660,9 +11645,14 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
-            .await
-            .expect("spawn switch ACP script")
+        AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".to_string(), script],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn switch ACP script")
     }
 
     fn capture(obs: &observer::ObserverHandle) -> serde_json::Value {
@@ -12110,9 +12100,14 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
-            .await
-            .expect("spawn switch ACP script")
+        AcpClient::spawn(
+            &crate::testshell::posix_shell_command(),
+            &["-c".to_string(), script],
+            &[],
+            false,
+        )
+        .await
+        .expect("spawn switch ACP script")
     }
 
     /// F3: an applied switch must cache `models` from the POST-switch snapshot,
@@ -12310,3 +12305,7 @@ done"#
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "pool/pi_prompt_tests.rs"]
+mod pi_prompt_tests;

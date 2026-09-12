@@ -7,6 +7,7 @@ import {
   TimelineAnnouncementRegion,
   advanceTimelineAnnouncementPolicy,
   createTimelineAnnouncementBatcher,
+  redactSpoilers,
 } from "./TimelineAnnouncementRegion.tsx";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -217,4 +218,96 @@ test("persistent status region announces without moving focus", async () => {
   await act(async () => scheduler.runAll());
   assert.equal(region.textContent, "Bob: New arrival");
   assert.equal(document.activeElement, input);
+});
+
+test("redactSpoilers hides spoiler contents from announcements", () => {
+  // A masked link inside a spoiler must not leak its destination.
+  assert.equal(
+    redactSpoilers("||[secret](https://private.example/leak-path)||"),
+    "spoiler hidden",
+  );
+  // Surrounding text is preserved; only the spoiler span is replaced.
+  assert.equal(
+    redactSpoilers("before ||hidden|| after"),
+    "before spoiler hidden after",
+  );
+  // Multiple spoilers are each redacted independently (non-greedy).
+  assert.equal(
+    redactSpoilers("||one|| middle ||two||"),
+    "spoiler hidden middle spoiler hidden",
+  );
+  // Text with no spoiler is untouched.
+  assert.equal(redactSpoilers("plain body"), "plain body");
+  // An unpaired delimiter is not a spoiler and must not be swallowed.
+  assert.equal(redactSpoilers("just || dangling"), "just || dangling");
+});
+
+test("announcements redact spoilers before they reach the live region", async () => {
+  const scheduler = manualScheduler();
+  const view = render(
+    createElement(TimelineAnnouncementRegion, {
+      channelId: "alpha",
+      isHydrated: true,
+      messages: [message("old", "Alice", "Earlier")],
+      scheduler,
+    }),
+  );
+  const region = view.getByTestId("message-timeline-announcements");
+
+  await act(async () => {
+    view.rerender(
+      createElement(TimelineAnnouncementRegion, {
+        channelId: "alpha",
+        isHydrated: true,
+        messages: [
+          message("old", "Alice", "Earlier"),
+          message(
+            "new",
+            "Bob",
+            "||[secret](https://private.example/leak-path)||",
+          ),
+        ],
+        scheduler,
+      }),
+    );
+  });
+  await act(async () => scheduler.runAll());
+
+  assert.equal(region.textContent, "Bob: spoiler hidden");
+  assert.ok(!region.textContent.includes("private.example"));
+});
+
+test("the live region clears after its retention window", async () => {
+  const scheduler = manualScheduler();
+  const view = render(
+    createElement(TimelineAnnouncementRegion, {
+      channelId: "alpha",
+      isHydrated: true,
+      messages: [message("old", "Alice", "Earlier")],
+      scheduler,
+    }),
+  );
+  const region = view.getByTestId("message-timeline-announcements");
+
+  await act(async () => {
+    view.rerender(
+      createElement(TimelineAnnouncementRegion, {
+        channelId: "alpha",
+        isHydrated: true,
+        messages: [
+          message("old", "Alice", "Earlier"),
+          message("new", "Bob", "Toggle me"),
+        ],
+        scheduler,
+      }),
+    );
+  });
+  // Coalesce window fires: the announcement is published.
+  await act(async () => scheduler.runAll());
+  assert.equal(region.textContent, "Bob: Toggle me");
+
+  // Retention window fires: the text must not linger as a permanent duplicate
+  // of the timeline node, which would make getByText(body) ambiguous.
+  await act(async () => scheduler.runAll());
+  assert.equal(region.textContent, "");
 });

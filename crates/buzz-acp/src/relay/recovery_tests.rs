@@ -340,6 +340,14 @@ async fn advance_clock(duration: Duration) {
     tokio::time::resume();
 }
 
+// Windows loopback absorbs multi-MB writes through a fast path that ignores
+// SO_SNDBUF/SO_RCVBUF, so the write this test needs to block completes instead:
+// recovery then succeeds and clears the loss marker. The behaviour under test
+// is unreachable there, not broken -- exercise it where backpressure is real.
+#[cfg_attr(
+    windows,
+    ignore = "loopback fast path never applies write backpressure"
+)]
 #[tokio::test]
 async fn blocked_recovery_write_is_bounded_and_retains_loss() {
     let (mut client, _stalled_server) = test_ws_pair().await;

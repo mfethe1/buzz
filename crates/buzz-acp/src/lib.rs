@@ -5,7 +5,6 @@ mod config;
 mod engram_fetch;
 mod filter;
 mod observer;
-mod pi_launcher;
 mod pool;
 mod pool_lifecycle;
 mod prompt_framing;
@@ -2705,9 +2704,8 @@ async fn tokio_main() -> Result<()> {
         None
     } else {
         // Build standing context once under the configured policy, before any
-        // agent process starts. Pi consumes this through its native
-        // `--system-prompt`; other ACP agents consume the same bytes through
-        // session/new or legacy first-turn framing.
+        // session/new. The Pi adapter fork now consumes it through the normal
+        // ACP path (upstream #7552), as do all other ACP agents.
         Some(
             config.session_policy.append_session_model(
                 base_prompt_content
@@ -2716,31 +2714,6 @@ async fn tokio_main() -> Result<()> {
             ),
         )
     };
-    // PI_ACP_PI_COMMAND is Buzz-owned. Strip stale/user-provided copies from
-    // every adapter before optionally installing Buzz's generated Pi launcher.
-    config
-        .persona_env_vars
-        .retain(|(key, _)| !key.eq_ignore_ascii_case(pi_launcher::PI_ACP_PI_COMMAND_ENV));
-    let managed_skills_dir = std::path::Path::new(&cwd).join(".agents/skills");
-    let inherited_pi_command_is_set =
-        std::env::var_os(pi_launcher::PI_ACP_PI_COMMAND_ENV).is_some();
-    let (pi_launch_override, base_prompt) = pi_launcher::PiLaunchOverride::prepare(
-        &config.agent_command,
-        base_prompt,
-        &managed_skills_dir,
-        inherited_pi_command_is_set,
-    )
-    .context("failed to prepare Pi launch overrides")?;
-    if let Some(prepared) = pi_launch_override.as_ref() {
-        config.persona_env_vars.push((
-            pi_launcher::PI_ACP_PI_COMMAND_ENV.to_string(),
-            prepared.launcher_path().to_string_lossy().into_owned(),
-        ));
-        tracing::info!(
-            skills_dir = %managed_skills_dir.display(),
-            "configured Pi to consume Buzz standing context and managed skills through native CLI flags"
-        );
-    }
 
     let observer = config
         .relay_observer
@@ -3014,6 +2987,7 @@ async fn tokio_main() -> Result<()> {
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
         team_instructions: config.team_instructions.clone(),
+        // Built above so the Pi launcher consumes the same assembled bytes.
         base_prompt,
         heartbeat_prompt: config.heartbeat_prompt.clone(),
         cwd,
@@ -4429,10 +4403,6 @@ async fn tokio_main() -> Result<()> {
     // Graceful relay shutdown — sends WebSocket close frame and waits up to 5s
     // for the background task to finish, rather than aborting immediately (#40).
     relay.shutdown().await;
-
-    // Pi may restore subprocesses throughout the pool lifetime. Remove its
-    // private prompt and launcher only after every adapter has shut down.
-    drop(pi_launch_override);
 
     tracing::info!("buzz-acp stopped");
     Ok(())
