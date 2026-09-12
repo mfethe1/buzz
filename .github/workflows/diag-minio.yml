@@ -10,6 +10,9 @@ jobs:
       - name: Probe
         run: |
           sleep 15
-          echo "=== ls /bin"; docker exec buzz-minio ls /bin /usr/bin 2>&1 | head -40
-          echo "=== minio help"; docker exec buzz-minio minio --help 2>&1 | head -40
-          echo "=== minio ready"; docker exec buzz-minio minio ready local 2>&1; echo "minio ready exit: $?"
+          echo "=== bash /dev/tcp healthcheck"
+          docker exec buzz-minio bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000 && printf "GET /minio/health/live HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n" >&3 && head -n1 <&3 | grep -q "200"'; echo "devtcp exit: $?"
+          echo "=== minio-init smoke (full lifecycle)"
+          docker compose up -d minio-init || true
+          sleep 5
+          docker logs buzz-minio-init 2>&1 | tail -8
