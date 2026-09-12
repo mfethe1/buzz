@@ -21,7 +21,7 @@ name: Docker image
 #   - push tags relay-v*.*.* → :{version} + :{major}.{minor} + :{major}
 #                              + matching :debug-* tags
 #                              (+ :latest/:debug-latest for stable releases)
-#   - pull_request           → build only (no push), cache stays warm
+#   - pull_request           → build only, read-only cache access
 #   - workflow_dispatch      → manual relay-tag rescue at the tag itself
 #
 # Why workflow_dispatch carries a version input:
@@ -49,6 +49,7 @@ on:
       - "Dockerfile.push-gateway"
       - ".dockerignore"
       - ".github/workflows/docker.yml"
+      - ".github/scripts/docker-cache.test.mjs"
       - "deploy/charts/buzz/Chart.yaml"
       - "scripts/create-deployment-eligibility-predicate.jq"
       - "scripts/select-qualified-ci-run.jq"
@@ -129,13 +130,19 @@ jobs:
               max-parallelism = 2
 
       - name: Log in to GHCR
-        # Skip on pull_request from forks — no GHCR creds, build-only.
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        # Skip registry login on pull requests; PR builds only read cache.
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve repository cache
+        id: cache
+        run: |
+          repository=$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          printf 'repository=ghcr.io/%s\n' "$repository" >> "$GITHUB_OUTPUT"
 
       - name: Extract metadata
         id: meta
@@ -185,9 +192,11 @@ jobs:
           # matrix possible.
           outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           cache-from: |
-            type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }}
+            type=registry,ref=${{ steps.cache.outputs.repository }}-buildcache:${{ matrix.arch }}
+          # Cache ownership follows this repository, never the release image
+          # override. Only protected non-PR refs may write a shared build cache.
           cache-to: |
-            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref={0}-buildcache:{1},mode=max,compression=zstd', env.IMAGE_NAME, matrix.arch) || '' }}
+            ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref_protected && format('type=registry,ref={0}-buildcache:{1},mode=max,compression=zstd', steps.cache.outputs.repository, matrix.arch) || '' }}
 
       - name: Build and push debug image by digest
         id: build-debug
@@ -204,7 +213,7 @@ jobs:
             BUZZ_BUILD_URL=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
           outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           cache-from: |
-            type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }}
+            type=registry,ref=${{ steps.cache.outputs.repository }}-buildcache:${{ matrix.arch }}
 
       - name: Export release and debug digests
         if: github.event_name != 'pull_request'
@@ -530,12 +539,17 @@ jobs:
             [worker.oci]
               max-parallelism = 2
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve repository cache
+        id: cache
+        run: |
+          repository=$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          printf 'repository=ghcr.io/%s\n' "$repository" >> "$GITHUB_OUTPUT"
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
@@ -554,8 +568,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/buzz-push-gateway,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/buzz-push-gateway-buildcache:${{ matrix.arch }}
-          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref=ghcr.io/{0}/buzz-push-gateway-buildcache:{1},mode=max,compression=zstd', github.repository_owner, matrix.arch) || '' }}
+          cache-from: type=registry,ref=${{ steps.cache.outputs.repository }}-push-gateway-buildcache:${{ matrix.arch }}
+          cache-to: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref_protected && format('type=registry,ref={0}-push-gateway-buildcache:{1},mode=max,compression=zstd', steps.cache.outputs.repository, matrix.arch) || '' }}
       - name: Export digest
         if: github.event_name != 'pull_request'
         env:

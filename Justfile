@@ -93,7 +93,12 @@ build-release:
     cargo build --workspace --release
 
 # Run repo lint, formatting, and repository policy checks
-check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check security-review-check file-size-check
+check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check security-review-check docker-cache-check file-size-check
+
+# Evaluate the production Docker workflow's registry cache expressions.
+docker-cache-check:
+    pnpm install --filter buzz-workspace --frozen-lockfile --ignore-scripts
+    node --test .github/scripts/docker-cache.test.mjs
 
 # Validate the trusted security-review workflow support and renderer contract.
 security-review-check:
