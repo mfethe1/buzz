@@ -205,6 +205,47 @@ ALTER TABLE replica_heartbeat SET (vacuum_truncate = false);
 INSERT INTO replica_heartbeat (id) VALUES (1)
 ON CONFLICT (id) DO NOTHING;
 
+-- pgschema does not reproduce multi-column CHECK constraints, so it drops
+-- chk_users_machine_fields_require_machine_id (it keeps the three
+-- single-column machine CHECKs and the partial unique index). Without this,
+-- a pgschema-bootstrapped database accepts a machine_label/machine_runtime
+-- with no machine_id -- an unaddressable agent home -- while a
+-- migration-managed database rejects it.
+ALTER TABLE users DROP CONSTRAINT IF EXISTS chk_users_machine_fields_require_machine_id;
+ALTER TABLE users
+    ADD CONSTRAINT chk_users_machine_fields_require_machine_id
+    CHECK (machine_id IS NOT NULL
+           OR (machine_label IS NULL AND machine_runtime IS NULL));
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'users'::regclass
+          AND conname = 'chk_users_machine_fields_require_machine_id'
+    ) THEN
+        RAISE EXCEPTION 'users must enforce machine-home field coherence after pgschema apply';
+    END IF;
+END $$;
+
+-- Same pgschema multi-column CHECK gap on the task system (0046): a task could
+-- be marked done with no done_at, or carry a done_at while not done.
+ALTER TABLE tasks DROP CONSTRAINT IF EXISTS chk_tasks_done_at_matches_status;
+ALTER TABLE tasks
+    ADD CONSTRAINT chk_tasks_done_at_matches_status
+    CHECK ((status = 'done') = (done_at IS NOT NULL));
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'tasks'::regclass
+          AND conname = 'chk_tasks_done_at_matches_status'
+    ) THEN
+        RAISE EXCEPTION 'tasks must enforce done_at/status coherence after pgschema apply';
+    END IF;
+END $$;
+
 DO $$
 BEGIN
     IF NOT EXISTS (
