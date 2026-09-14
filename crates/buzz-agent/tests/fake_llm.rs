@@ -985,7 +985,17 @@ async fn steer_rejected_on_run_id_mismatch() {
             json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
         )
         .await;
-    let _live_run = recv_active_run_id(&mut h).await;
+
+    // Single ordered log from the prompt onward — nothing is discarded between
+    // the prompt send and the assertions (the activeRunId advert is read
+    // through the same log, so even pre-advert frames would be kept).
+    let mut log = FrameLog::new();
+    let _live_run = log
+        .wait_until(&mut h, |v| {
+            v.get("method") == Some(&json!("session/update"))
+                && v["params"]["update"]["_meta"]["goose"]["activeRunId"].is_string()
+        })
+        .await;
 
     let s_id = h
         .send(
@@ -998,21 +1008,66 @@ async fn steer_rejected_on_run_id_mismatch() {
         )
         .await;
 
-    let mut saw_reject = false;
-    for _ in 0..40 {
-        let v = h.recv().await;
-        if v["id"] == json!(s_id) {
-            assert_eq!(
-                v["error"]["code"], -32602,
-                "mismatched runId must be rejected"
-            );
-            saw_reject = true;
-        } else if v["id"] == json!(p_id) {
-            // Turn finishes normally regardless of the rejected steer.
-            break;
-        }
-    }
-    assert!(saw_reject, "run-id mismatch was not rejected");
+    // Wait for the steer response itself. The turn may finish before the
+    // rejection — its prompt response lands in the log and is matched there
+    // first, so the follow-up wait below can never hang on a second copy.
+    let v = log.wait_until(&mut h, |v| v["id"] == json!(s_id)).await;
+    assert_eq!(
+        v["error"]["code"], -32602,
+        "mismatched runId must be rejected"
+    );
+    // Turn finishes normally regardless of the rejected steer. Its response
+    // may already be in the log — found, not re-read.
+    let response = log.wait_until(&mut h, |v| v["id"] == json!(p_id)).await;
+    assert_eq!(
+        response["result"]["stopReason"], "end_turn",
+        "turn must finish normally despite the rejected steer"
+    );
+    h.shutdown().await;
+}
+
+/// Deterministic regression (prompt-before-rejection): the turn's prompt
+/// response is fully collected BEFORE the steer is even sent, so the steer
+/// rejection necessarily arrives after it. The rejection must still be
+/// invalid_params (no active run), and the prompt-response wait must be
+/// satisfied from the existing log rather than blocking on another read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steer_rejection_after_prompt_response_uses_existing_frames() {
+    let url = spawn_fake_llm(vec![openai_text("all done")]).await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    let p_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let mut log = FrameLog::new();
+    let response = log.wait_until(&mut h, |v| v["id"] == json!(p_id)).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn");
+
+    // Steer now targets a turn that already ended.
+    let s_id = h
+        .send(
+            "_goose/unstable/session/steer",
+            json!({
+                "sessionId": sid,
+                "expectedRunId": "run_already_finished",
+                "prompt": [{"type":"text","text":"too late"}],
+            }),
+        )
+        .await;
+    let v = log.wait_until(&mut h, |v| v["id"] == json!(s_id)).await;
+    assert_eq!(
+        v["error"]["code"], -32602,
+        "steer at an ended run must be rejected invalid_params"
+    );
+
+    // The prompt response is already in the log; this must return it without
+    // reading further (a second wait would hang to the recv timeout).
+    let again = log.wait_until(&mut h, |v| v["id"] == json!(p_id)).await;
+    assert_eq!(again, response, "prompt response must be found in the log");
     h.shutdown().await;
 }
 
@@ -1062,6 +1117,80 @@ fn openai_text_with_usage_no_total(content: &str, input_tokens: u64, output_toke
 fn is_usage_update(v: &Value) -> bool {
     v.get("method") == Some(&json!("_goose/unstable/session/update"))
         && v["params"]["update"]["sessionUpdate"] == "usage_update"
+}
+
+/// Ordered, accumulating collector for the agent's stdout stream.
+///
+/// `recv_until`/`recv_until_with_drain` answer one question at a time and
+/// either discard what they see or window-split it. That is exactly how the
+/// steer/cancel races slipped through: a prompt response drained during the
+/// cancel-ack wait was forgotten, so the follow-up wait for it hung to the
+/// recv timeout; and frames read after an early prompt response were folded
+/// into the same "before" bucket, letting a late usage_update falsely satisfy
+/// ordering.
+///
+/// `FrameLog` keeps every frame in arrival order and answers queries against
+/// the whole history: `wait_until` matches already-collected frames BEFORE
+/// reading more, so a response seen in an earlier window terminates the wait
+/// immediately instead of blocking on a second copy that will never come.
+struct FrameLog {
+    frames: Vec<Value>,
+}
+
+impl FrameLog {
+    fn new() -> Self {
+        Self { frames: Vec::new() }
+    }
+
+    /// Wait until a frame matching `pred` exists in the log, appending every
+    /// frame read along the way (bounded by `Harness::recv`'s timeout).
+    /// Already-collected frames are matched first.
+    async fn wait_until<F: FnMut(&Value) -> bool>(
+        &mut self,
+        h: &mut Harness,
+        mut pred: F,
+    ) -> Value {
+        if let Some(v) = self.frames.iter().find(|f| pred(f)) {
+            return v.clone();
+        }
+        loop {
+            let v = h.recv().await;
+            let matched = pred(&v);
+            self.frames.push(v.clone());
+            if matched {
+                return v;
+            }
+        }
+    }
+
+    /// Index of the first frame matching `pred`, in arrival order.
+    fn first_index<F: Fn(&Value) -> bool>(&self, pred: F) -> Option<usize> {
+        self.frames.iter().position(pred)
+    }
+}
+
+/// Invariant: buzz-agent emits the turn's usage_update notification strictly
+/// BEFORE the `session/prompt` response for that turn (buzz-acp's UsageTracker
+/// consumes the notification while the turn is still in flight, before the
+/// response triggers take_turn_usage()).
+///
+/// Asserted over the ordered frame log: a usage_update must exist at an index
+/// strictly less than the index of the FIRST frame whose id matches `p_id`.
+/// Usage updates at or after the first prompt response do NOT satisfy the
+/// invariant — the response has already gone out — and anchoring on the FIRST
+/// response matters when the log spans multiple turns: usage arriving before a
+/// later turn's response cannot retroactively fix ordering for the first.
+fn assert_usage_strictly_before_prompt_response(log: &FrameLog, p_id: i64) {
+    let first_response = log
+        .first_index(|v| v["id"] == json!(p_id))
+        .unwrap_or_else(|| panic!("no session/prompt response for id {p_id} in frame log"));
+    let usage_at = log.first_index(is_usage_update);
+    assert!(
+        matches!(usage_at, Some(u) if u < first_response),
+        "usage_update must arrive strictly before the FIRST session/prompt response \
+         (usage_update index {usage_at:?}, response index {first_response}); frames: {:#?}",
+        log.frames,
+    );
 }
 
 /// Collect every frame that arrives BEFORE the message matching `until_pred`,
@@ -1420,57 +1549,147 @@ async fn cancelled_turn_with_usage_emits_notification_before_response() {
         )
         .await;
 
-    // Wait for the activeRunId advert (agent is live).
-    let _run_id = recv_active_run_id(&mut h).await;
+    // Wait for the activeRunId advert (agent is live) — collected, not
+    // discarded, so the usage_update racing the advert is never dropped.
+    let mut log = FrameLog::new();
+    log.wait_until(&mut h, |v| {
+        v.get("method") == Some(&json!("session/update"))
+            && v["params"]["update"]["_meta"]["goose"]["activeRunId"].is_string()
+    })
+    .await;
     // Wait for tool_call_update — proves round 1 LLM response is fully processed
-    // and tokens are captured before we send cancel.
-    h.recv_until(|v| {
+    // and tokens are captured before we send cancel. Every frame seen along the
+    // way stays in the ordered log and feeds the assertions below.
+    log.wait_until(&mut h, |v| {
         v.get("method") == Some(&json!("session/update"))
             && v["params"]["update"]["sessionUpdate"] == "tool_call_update"
     })
     .await;
 
-    // Now send cancel and release the round-2 gate. Cancel is enqueued before
-    // round 2 can respond, so the turn exits with stopReason: cancelled.
+    // Now send cancel and release the round-2 gate. Waiting for the cancel ack
+    // first is what makes this deterministic: the handler awaits
+    // `cancel_session` before replying, so once the ack lands the cancellation
+    // is registered and round 2 cannot beat it to the turn's end.
     let c_id = h.send("session/cancel", json!({"sessionId": sid})).await;
+    let cancel_ack = log.wait_until(&mut h, |v| v["id"] == json!(c_id)).await;
+    assert!(
+        cancel_ack.get("result").is_some() && cancel_ack.get("error").is_none(),
+        "session/cancel must be acknowledged with a success response"
+    );
     let _ = gate_tx.send(()); // unblock round 2
 
-    let mut saw_usage_before_prompt_response = false;
-    let mut saw_usage = false;
-    let mut saw_cancel_ok = false;
-    let mut saw_prompt_response = false;
-    for _ in 0..40 {
-        let v = h.recv().await;
-        if v["id"] == json!(c_id) {
-            saw_cancel_ok = true;
-        } else if is_usage_update(&v) {
-            saw_usage = true;
-            if !saw_prompt_response {
-                saw_usage_before_prompt_response = true;
-            }
-        } else if v["id"] == json!(p_id) {
-            saw_prompt_response = true;
-            // The gate guarantees stopReason: cancelled — not a race-driven error.
-            assert_eq!(
-                v["result"]["stopReason"], "cancelled",
-                "turn must end with stopReason: cancelled"
-            );
-        }
-        if saw_usage && saw_prompt_response && saw_cancel_ok {
-            break;
-        }
-    }
-    assert!(saw_cancel_ok, "session/cancel was not acknowledged");
-    assert!(
-        saw_usage,
-        "expected usage_update notification for cancelled turn with observed tokens"
+    // Drain everything up to and including the prompt response. If the prompt
+    // response already landed in an earlier window it is FOUND here, not
+    // re-read — the previous unconditional second wait could hang to the recv
+    // timeout when the response raced ahead of the cancel ack.
+    let prompt_response = log.wait_until(&mut h, |v| v["id"] == json!(p_id)).await;
+    // The gate guarantees stopReason: cancelled — not a race-driven error.
+    assert_eq!(
+        prompt_response["result"]["stopReason"], "cancelled",
+        "turn must end with stopReason: cancelled"
     );
+    // Ordering is asserted over the ordered log: a usage_update must sit
+    // strictly BEFORE the FIRST prompt response. A usage frame collected after
+    // an early prompt response cannot satisfy this.
+    assert_usage_strictly_before_prompt_response(&log, p_id);
+    h.shutdown().await;
+}
+
+/// Deterministic regression (prompt-before-ack): cancel is sent AFTER the
+/// turn has already completed, so the prompt response is necessarily already
+/// in the frame log when the cancel ack arrives. The ack wait must not
+/// discard it, and the follow-up prompt-response wait must be satisfied from
+/// the log without a further read. Cancel on an idle session still acks
+/// success (send on a dead cancel_tx is ignored).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_after_prompt_response_uses_existing_frames() {
+    let url = spawn_fake_llm(vec![openai_text_with_usage("quick turn", 7, 3)]).await;
+    let mut h = Harness::spawn(&url).await;
+    let sid = init_session(&mut h).await;
+
+    let p_id = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let mut log = FrameLog::new();
+    let response = log.wait_until(&mut h, |v| v["id"] == json!(p_id)).await;
+    assert_eq!(response["result"]["stopReason"], "end_turn");
+
+    // Late cancel: the turn is over, the response is collected, but the cancel
+    // must still be acknowledged with success.
+    let c_id = h.send("session/cancel", json!({"sessionId": sid})).await;
+    let ack = log.wait_until(&mut h, |v| v["id"] == json!(c_id)).await;
     assert!(
-        saw_usage_before_prompt_response,
-        "usage_update must arrive before the session/prompt response"
+        ack.get("result").is_some() && ack.get("error").is_none(),
+        "session/cancel on an idle session must still be acked with success"
     );
 
+    // Found in the log — no further read (a second wait would hang).
+    let again = log.wait_until(&mut h, |v| v["id"] == json!(p_id)).await;
+    assert_eq!(again, response, "prompt response must be found in the log");
+    assert_usage_strictly_before_prompt_response(&log, p_id);
     h.shutdown().await;
+}
+
+/// Unit check of the ordering assertion itself: a usage_update that arrives
+/// AFTER the first session/prompt response must be rejected, and one that
+/// arrives before a LATER turn's response cannot retroactively fix ordering
+/// for the first turn.
+#[test]
+fn usage_ordering_assertion_rejects_usage_after_first_prompt_response() {
+    let usage = json!({
+        "method": "_goose/unstable/session/update",
+        "params": {"update": {"sessionUpdate": "usage_update"}}
+    });
+    let resp = json!({"id": 42, "result": {"stopReason": "cancelled"}});
+
+    // usage after the first response → must be rejected.
+    let mut log = FrameLog::new();
+    log.frames = vec![resp.clone(), usage.clone()];
+    let r = std::panic::catch_unwind(|| {
+        let log = FrameLog {
+            frames: log.frames.clone(),
+        };
+        assert_usage_strictly_before_prompt_response(&log, 42);
+    });
+    assert!(r.is_err(), "usage after the first response must fail");
+
+    // usage before the response → must pass.
+    let mut log = FrameLog::new();
+    log.frames = vec![usage.clone(), resp.clone()];
+    assert_usage_strictly_before_prompt_response(&log, 42);
+
+    // usage before a SECOND turn's response cannot fix the first turn's
+    // ordering: anchored on the FIRST response, this must be rejected.
+    let mut log = FrameLog::new();
+    log.frames = vec![
+        resp.clone(),
+        usage.clone(),
+        json!({"id": 43, "result": {"stopReason": "end_turn"}}),
+    ];
+    let r = std::panic::catch_unwind(|| {
+        let log = FrameLog {
+            frames: log.frames.clone(),
+        };
+        assert_usage_strictly_before_prompt_response(&log, 42);
+    });
+    assert!(
+        r.is_err(),
+        "usage before a later response must not satisfy the first turn's ordering"
+    );
+
+    // no response for the id at all → must be rejected.
+    let mut log = FrameLog::new();
+    log.frames = vec![usage.clone()];
+    let r = std::panic::catch_unwind(|| {
+        let log = FrameLog {
+            frames: log.frames.clone(),
+        };
+        assert_usage_strictly_before_prompt_response(&log, 42);
+    });
+    assert!(r.is_err(), "missing prompt response must fail");
 }
 
 /// A tool-call OpenAI response with a `usage` block. Used to capture tokens in
