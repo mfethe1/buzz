@@ -17,6 +17,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AGENT_ENV");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_RELAY_RECONNECT_CMD");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_SKIP_WELCOME_TEAM");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_DEMO_SLUG");
     println!("cargo:rustc-check-cfg=cfg(buzz_updater_enabled)");
@@ -45,6 +46,13 @@ fn main() {
     // presence-only marker; OSS/custom builds leave agent access configurable.
     if std::env::var("BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY").is_ok() {
         println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_AGENT_ACCESS_OWNER_ONLY=1");
+    }
+
+    // Fleet build marker: skip provisioning the built-in Welcome Team during
+    // onboarding so dedicated per-machine agents start with a clean inventory.
+    // OSS builds leave Welcome Team provisioning on (unchanged default).
+    if std::env::var("BUZZ_BUILD_SKIP_WELCOME_TEAM").is_ok() {
+        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_SKIP_WELCOME_TEAM=1");
     }
 
     if let Ok(relay_url) = std::env::var("BUZZ_RELAY_URL") {

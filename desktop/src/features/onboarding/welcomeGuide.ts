@@ -10,9 +10,12 @@ import {
   updateManagedAgent,
 } from "@/shared/api/tauri";
 import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
-import { getAgentAccessOwnerOnly } from "@/shared/api/tauriAgentAccess";
 import { getGlobalAgentConfig } from "@/shared/api/tauriGlobalAgentConfig";
 import { listPersonas, setPersonaActive } from "@/shared/api/tauriPersonas";
+import {
+  getAgentAccessOwnerOnly,
+  getSkipWelcomeTeamProvisioning,
+} from "@/shared/api/tauriAgentAccess";
 import type {
   AcpRuntime,
   AgentPersona,
@@ -405,4 +408,23 @@ export function ensureWelcomeTeam(
   );
   welcomeTeamPromises.set(key, promise);
   return promise;
+}
+
+/**
+ * Provision the Welcome Team for `channelId` unless this build opts out.
+ *
+ * Fleet builds (`BUZZ_BUILD_SKIP_WELCOME_TEAM`) intentionally start with a
+ * clean agent inventory, so onboarding must not materialize the built-in trio.
+ * The channel/canvas seeding still runs; only the agent team is skipped, and
+ * any previously provisioned Welcome agents are left untouched (this never
+ * deletes anything).
+ */
+export async function ensureWelcomeTeamUnlessSkipped(
+  channelId: string,
+  relayUrl?: string | null,
+): Promise<WelcomeTeamAgents | null> {
+  if (await getSkipWelcomeTeamProvisioning()) {
+    return null;
+  }
+  return ensureWelcomeTeam(channelId, relayUrl);
 }

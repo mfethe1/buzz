@@ -712,6 +712,7 @@ pub fn run() {
             get_agent_models,
             discover_agent_models,
             agent_access_owner_only,
+            skip_welcome_team_provisioning,
             get_agent_config_surface,
             get_runtime_file_config,
             get_baked_build_env_keys,
