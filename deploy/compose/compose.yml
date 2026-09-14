@@ -84,8 +84,17 @@ services:
     networks:
       - buzz-net
 
+  # MinIO's own Docker Hub / Quay repositories were removed when the project
+  # went source-only (2025-10); chainguard/minio is built from upstream MinIO
+  # source (incl. the CVE-2025-62506 fix the last official image never got) and
+  # is digest-pinned for reproducible pulls. No registry login required.
   minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    image: chainguard/minio@sha256:039800e64ec7247d2fde7cff3697e964f6fe20b6d7d2c46aa7d82cc63355d512
+    # Last verified 2026-09-12 via hub.docker.com/v2/repositories/chainguard/minio/tags/latest
+    # (index digest; amd64 28bcf77e..., arm64 d3241231...). Runs as 65532 by default;
+    # root keeps compatibility with buzz-minio-data volumes created by earlier
+    # root-owned minio/minio images so existing object data keeps working.
+    user: "0:0"
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${BUZZ_S3_ACCESS_KEY:?set BUZZ_S3_ACCESS_KEY}
@@ -93,7 +102,12 @@ services:
     volumes:
       - buzz-minio-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      # chainguard/minio ships no curl/wget/busybox; bash /dev/tcp HTTP probe
+      # is the image-supported liveness check (verified against the pinned
+      # digest: HTTP/1.x 200 on /minio/health/live).
+      test:
+        - CMD-SHELL
+        - "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/9000; printf \"GET /minio/health/live HTTP/1.0\\r\\nHost: 127.0.0.1\\r\\n\\r\\n\" >&3; read -t 4 -r line <&3; case \"$$line\" in *\" 200 \"*) exit 0;; *) exit 1;; esac'"
       interval: 5s
       timeout: 5s
       retries: 12
@@ -103,16 +117,20 @@ services:
       - buzz-net
 
   minio-init:
-    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    image: chainguard/minio-client@sha256:01fda3c663e18914a1c39ea7b5bec8aa9a792066933ad264fd5b0847f082d6cb
+    # Last verified 2026-09-12 via hub.docker.com/v2/repositories/chainguard/minio-client/tags/latest
+    # (index digest; amd64 72dd40d7..., arm64 3ea251d5...). Entry point is /usr/bin/mc and the
+    # image runs as 65532; HOME must be writable for the mc config dir.
     depends_on:
       minio:
         condition: service_healthy
     environment:
+      MC_CONFIG_DIR: /tmp/.mc
       BUZZ_S3_ACCESS_KEY: ${BUZZ_S3_ACCESS_KEY:?set BUZZ_S3_ACCESS_KEY}
       BUZZ_S3_SECRET_KEY: ${BUZZ_S3_SECRET_KEY:?set BUZZ_S3_SECRET_KEY}
       BUZZ_S3_BUCKET: ${BUZZ_S3_BUCKET:-buzz-media}
     entrypoint: >
-      /bin/sh -euc '
+      /usr/bin/bash -euc '
         mc alias set local http://minio:9000 "$${BUZZ_S3_ACCESS_KEY}" "$${BUZZ_S3_SECRET_KEY}"
         mc mb --ignore-existing "local/$${BUZZ_S3_BUCKET}"
         mc anonymous set none "local/$${BUZZ_S3_BUCKET}"
