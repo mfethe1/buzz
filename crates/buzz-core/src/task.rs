@@ -82,9 +82,9 @@ impl FromStr for TaskStatus {
 
 /// A row in the append-only `task_events` log.
 ///
-/// Stored as free `TEXT` rather than a database enum so a new action can ship
-/// across a rolling upgrade without a migration; this enum is the set the
-/// relay itself writes.
+/// Stored as free `TEXT` rather than a database enum. New spellings do not
+/// require a constraint migration, but readers must understand a spelling
+/// before writers emit it; parsing an unknown action intentionally fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskAction {
     /// The task was created.
@@ -97,6 +97,10 @@ pub enum TaskAction {
     Commented,
     /// `title` changed.
     TitleChanged,
+    /// `priority` changed.
+    PriorityChanged,
+    /// `due_at` changed or was cleared.
+    DueAtChanged,
     /// An agent persisted its summary of the task. At most one per task.
     SummaryPersisted,
 }
@@ -110,6 +114,8 @@ impl TaskAction {
             Self::Assigned => "assigned",
             Self::Commented => "commented",
             Self::TitleChanged => "title_changed",
+            Self::PriorityChanged => "priority_changed",
+            Self::DueAtChanged => "due_at_changed",
             Self::SummaryPersisted => "summary_persisted",
         }
     }
@@ -138,6 +144,8 @@ impl FromStr for TaskAction {
             "assigned" => Ok(Self::Assigned),
             "commented" => Ok(Self::Commented),
             "title_changed" => Ok(Self::TitleChanged),
+            "priority_changed" => Ok(Self::PriorityChanged),
+            "due_at_changed" => Ok(Self::DueAtChanged),
             "summary_persisted" => Ok(Self::SummaryPersisted),
             other => Err(format!("unknown task action: {other:?}")),
         }
@@ -185,6 +193,8 @@ mod tests {
             TaskAction::Assigned,
             TaskAction::Commented,
             TaskAction::TitleChanged,
+            TaskAction::PriorityChanged,
+            TaskAction::DueAtChanged,
             TaskAction::SummaryPersisted,
         ] {
             assert_eq!(action.as_str().parse::<TaskAction>(), Ok(action));
@@ -263,6 +273,8 @@ mod tests {
             TaskAction::Assigned,
             TaskAction::Commented,
             TaskAction::TitleChanged,
+            TaskAction::PriorityChanged,
+            TaskAction::DueAtChanged,
         ] {
             assert!(!action.is_singleton_per_task());
         }

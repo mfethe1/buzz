@@ -1292,7 +1292,8 @@ CREATE TABLE task_events (
     from_status   TEXT,
     to_status     TEXT,
     body          TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    changes       JSONB CHECK (changes IS NULL OR jsonb_typeof(changes) = 'object'),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_task_events_actor_len
         CHECK (actor_pubkey IS NULL OR length(actor_pubkey) = 32),
