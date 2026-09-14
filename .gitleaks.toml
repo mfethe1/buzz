@@ -13,3 +13,9 @@ paths = [
   '''crates/buzz-push-gateway/tests/fixtures/apns-test-identity\.pem''',
   '''crates/buzz-push-gateway/tests/fixtures/apns-test-mismatched-identity\.pem''',
 ]
+
+[[allowlists]]
+description = "Synthetic nostr nip19 round-trip test vectors in workflowFormTypes unit tests (introduced upstream via PR #39; synthetic keys, no production identity)"
+paths = [
+  '''desktop/src/features/workflows/ui/workflowFormTypes\.test\.mjs''',
+]
