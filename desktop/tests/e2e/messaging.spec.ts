@@ -3252,19 +3252,36 @@ test("narrow thread view collapses channel header actions into a menu", async ({
   await expect(page.getByTestId("channel-members-trigger")).toBeHidden();
   await expect(page.getByTestId("channel-management-trigger")).toBeHidden();
 
+  const tasksTrigger = page.getByRole("button", {
+    name: "Show channel tasks",
+    exact: true,
+  });
+  await expect(tasksTrigger).toBeVisible();
+  await waitForAnimations(page);
   const menuBox = await menuTrigger.boundingBox();
+  const tasksBox = await tasksTrigger.boundingBox();
   const threadPanelBox = await threadPanel.boundingBox();
-  if (!menuBox || !threadPanelBox) {
-    throw new Error("Expected header action menu and thread panel bounds");
+  if (!menuBox || !tasksBox || !threadPanelBox) {
+    throw new Error("Expected header actions and thread panel bounds");
   }
   const menuGap = threadPanelBox.x - (menuBox.x + menuBox.width);
+  const actionsGap = await menuTrigger.evaluate((menu) => {
+    if (!menu.parentElement) throw new Error("Missing header actions group");
+    return Number.parseFloat(
+      window.getComputedStyle(menu.parentElement).columnGap,
+    );
+  });
   const headerPaddingInlineEnd = await page
     .getByTestId("chat-header")
     .evaluate((header) =>
       Number.parseFloat(window.getComputedStyle(header).paddingRight),
     );
   expect(menuGap).toBeGreaterThanOrEqual(0);
-  expect(menuGap).toBeLessThanOrEqual(headerPaddingInlineEnd + menuBox.width);
+  // Tasks follows the menu; its width and the group gap also occupy this edge.
+  expect(tasksBox.x - (menuBox.x + menuBox.width)).toBeCloseTo(actionsGap, 1);
+  const trailingGap = threadPanelBox.x - (tasksBox.x + tasksBox.width);
+  expect(trailingGap).toBeGreaterThanOrEqual(0);
+  expect(trailingGap).toBeLessThanOrEqual(headerPaddingInlineEnd);
 
   await menuTrigger.click();
 
