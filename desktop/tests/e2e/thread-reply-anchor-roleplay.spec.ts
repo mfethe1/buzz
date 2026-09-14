@@ -202,8 +202,12 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
 
     await openThread(page);
     await expandReply(page, humanReply.id);
-    await expect(page.getByText("Nora: adding context")).toBeVisible();
-    await expect(page.getByText("Pinky: Got it")).toBeVisible();
+    // Scope to the thread panel: the timeline's sr-only aria-live region
+    // (message-timeline-announcements) echoes message text and otherwise
+    // makes these text locators resolve to 2 elements (strict mode).
+    const threadPanel = page.getByTestId("message-thread-panel");
+    await expect(threadPanel.getByText("Nora: adding context")).toBeVisible();
+    await expect(threadPanel.getByText("Pinky: Got it")).toBeVisible();
     await expect(
       page.getByTestId("message-thread-replies").getByTestId("message-row"),
     ).toHaveCount(2);
@@ -253,8 +257,10 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
     );
 
     await openThread(page);
-    await expect(page.getByText("Nora: adding context")).toBeVisible();
-    await expect(page.getByText("Pinky: Got it")).toBeVisible();
+    // Scoped to the thread panel — see test 01 for the aria-live note.
+    const threadPanel = page.getByTestId("message-thread-panel");
+    await expect(threadPanel.getByText("Nora: adding context")).toBeVisible();
+    await expect(threadPanel.getByText("Pinky: Got it")).toBeVisible();
     await expect(
       page.getByTestId("message-thread-replies").getByTestId("message-row"),
     ).toHaveCount(2);
@@ -292,7 +298,11 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
     );
 
     await openThread(page);
-    await expect(page.getByText("Pinky: Starting the audit")).toBeVisible();
+    // Scoped to the thread panel — see test 01 for the aria-live note.
+    const threadPanel = page.getByTestId("message-thread-panel");
+    await expect(
+      threadPanel.getByText("Pinky: Starting the audit"),
+    ).toBeVisible();
     await expect(
       page.getByTestId("message-thread-replies").getByTestId("message-row"),
     ).toHaveCount(1);
@@ -339,8 +349,12 @@ test.describe("thread reply anchor A/B roleplay screenshots", () => {
 
     await openThread(page);
     await expandReply(page, brainReply.id);
-    await expect(page.getByText("Brain: Check the anchor")).toBeVisible();
-    await expect(page.getByText("Pinky: Good catch")).toBeVisible();
+    // Scoped to the thread panel — see test 01 for the aria-live note.
+    const threadPanel = page.getByTestId("message-thread-panel");
+    await expect(
+      threadPanel.getByText("Brain: Check the anchor"),
+    ).toBeVisible();
+    await expect(threadPanel.getByText("Pinky: Good catch")).toBeVisible();
     await expect(
       page.getByTestId("message-thread-replies").getByTestId("message-row"),
     ).toHaveCount(2);
