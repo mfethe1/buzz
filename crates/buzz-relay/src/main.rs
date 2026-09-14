@@ -574,10 +574,12 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         let cfg = buzz_relay::api::git::store::ProbeConfig {
             race_width,
             race_rounds,
+            ..Default::default()
         };
         tracing::info!(
             race_width,
             race_rounds,
+            timeout_seconds = cfg.total_timeout.as_secs(),
             "running git object-store conformance probe (A3 gate)"
         );
         let report = state
