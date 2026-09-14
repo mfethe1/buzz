@@ -35,11 +35,7 @@ void main() {
 
     test('shortens a long pubkey when no profile is cached', () {
       final digest = threadSummaryDigest([
-        _message(
-          id: '1',
-          pubkey: 'b' * 64,
-          content: 'hello',
-        ),
+        _message(id: '1', pubkey: 'b' * 64, content: 'hello'),
       ], profiles: const {});
       expect(digest.single.author, 'npub1hwa…04hu');
     });
