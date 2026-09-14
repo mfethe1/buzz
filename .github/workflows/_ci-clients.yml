@@ -12,6 +12,8 @@ on:
         required: true
         type: string
     outputs:
+      mobile_swift_result:
+        value: ${{ jobs.results.outputs.mobile_swift_result }}
       web_result:
         value: ${{ jobs.results.outputs.web_result }}
       mobile_result:
@@ -119,7 +121,7 @@ jobs:
     name: Mobile Swift
     runs-on: macos-latest
     timeout-minutes: 30
-    if: inputs.lane == 'mobile-swift' && inputs.mobile
+    if: inputs.lane == 'mobile-swift' && (github.event_name == 'push' || inputs.mobile)
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
@@ -142,6 +144,7 @@ jobs:
     timeout-minutes: 5
     permissions: {}
     outputs:
+      mobile_swift_result: ${{ needs.mobile-swift.result }}
       web_result: ${{ needs.web.result }}
       mobile_result: ${{ needs.mobile.result }}
     steps:
