@@ -6,6 +6,7 @@ import {
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
 import { useAgentAccessOwnerOnlyQuery } from "@/features/agents/useAgentAccessOwnerOnly";
+import { useSkipWelcomeTeamProvisioningQuery } from "@/features/onboarding/useSkipWelcomeTeamProvisioning";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
 import { useCommunities } from "@/features/communities/useCommunities";
@@ -502,6 +503,8 @@ export function useWelcomeKickoff(
   const managedAgentsQuery = useManagedAgentsQuery();
   const agentAccessOwnerOnlyQuery = useAgentAccessOwnerOnlyQuery();
   const agentAccessOwnerOnly = agentAccessOwnerOnlyQuery.data;
+  const skipWelcomeTeamQuery = useSkipWelcomeTeamProvisioningQuery();
+  const skipWelcomeTeam = skipWelcomeTeamQuery.data;
   const { globalConfig, isLoading: configLoading } = useGlobalAgentConfig();
   const channelId = activeChannel?.id ?? null;
   const isActiveWelcome = isWelcomeChannel(activeChannel);
@@ -563,10 +566,15 @@ export function useWelcomeKickoff(
       !isActiveWelcome ||
       configLoading ||
       runtimesQuery.isPending ||
-      agentAccessOwnerOnly === undefined
+      agentAccessOwnerOnly === undefined ||
+      skipWelcomeTeam === undefined
     ) {
       return;
     }
+
+    // Fleet builds skip the Welcome Team entirely: no provisioning, no kickoff
+    // messages. The user lands in a clean community with their own agents.
+    if (skipWelcomeTeam) return;
 
     const kickoffController = kickoffCoordinator.begin(channelId);
     if (!kickoffController) return;
@@ -706,6 +714,7 @@ export function useWelcomeKickoff(
     queryClient,
     readiness,
     runtimesQuery.isPending,
+    skipWelcomeTeam,
   ]);
 
   React.useEffect(() => {

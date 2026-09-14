@@ -593,6 +593,8 @@ type E2eConfig = {
     };
     /** Explicit owner-only agent-access capability; independent of baked defaults. */
     ownerOnlyAccessBuild?: boolean;
+    /** Explicit skip-Welcome-Team provisioning capability; independent of baked defaults. */
+    skipWelcomeTeamProvisioning?: boolean;
     /** File-layer config returned by runtime id. */
     runtimeFileConfigs?: Record<string, RuntimeFileConfigSubset | null>;
     /** Baked build env returned by the display and key-name Tauri commands. */
@@ -14246,6 +14248,8 @@ export function maybeInstallE2eTauriMocks() {
         return (config?.mock?.bakedBuildEnv ?? []).map((entry) => entry.key);
       case "agent_access_owner_only":
         return config?.mock?.ownerOnlyAccessBuild ?? false;
+      case "skip_welcome_team_provisioning":
+        return config?.mock?.skipWelcomeTeamProvisioning ?? false;
       case "update_managed_agent":
         return handleUpdateManagedAgent(
           payload as Parameters<typeof handleUpdateManagedAgent>[0],
