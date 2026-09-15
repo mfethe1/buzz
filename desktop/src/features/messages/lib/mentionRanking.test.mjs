@@ -247,3 +247,108 @@ test("pickDefaultAgentCandidate: returns null without an addressable agent", () 
   assert.equal(pickDefaultAgentCandidate([]), null);
   assert.equal(pickDefaultAgentCandidate([candidate()]), null);
 });
+
+// #53: a deleted-and-recreated agent leaves a stale 30175/30177 binding on the
+// relay. The old ghost is relay-only (not locally managed); the live agent is
+// the device's current managed record. Mention resolution must prefer the
+// managed binding, not the alphabetically-earlier stale pubkey.
+const STALE_GHOST_PUBKEY = "0".repeat(64); // sorts before LIVE_AGENT_PUBKEY
+const LIVE_AGENT_PUBKEY = "9".repeat(64);
+
+test("pickDefaultAgentCandidate: managed binding beats a stale same-named relay ghost", () => {
+  const staleGhost = candidate({
+    displayName: "X",
+    isActiveAgent: false,
+    isAgent: true,
+    isManagedAgent: false,
+    isMember: false,
+    pubkey: STALE_GHOST_PUBKEY,
+  });
+  const liveManaged = candidate({
+    displayName: "X",
+    isActiveAgent: false,
+    isAgent: true,
+    isManagedAgent: true,
+    isMember: false,
+    pubkey: LIVE_AGENT_PUBKEY,
+  });
+
+  // Ghost sorts first alphabetically and is the relay-only record; without the
+  // managed tiebreak it would win. Order both ways to prove stability.
+  assert.equal(
+    pickDefaultAgentCandidate([staleGhost, liveManaged]),
+    liveManaged,
+  );
+  assert.equal(
+    pickDefaultAgentCandidate([liveManaged, staleGhost]),
+    liveManaged,
+  );
+});
+
+test("pickDefaultAgentCandidate: liveness still outranks the managed tiebreak", () => {
+  const managedButStopped = candidate({
+    displayName: "X",
+    isActiveAgent: false,
+    isAgent: true,
+    isManagedAgent: true,
+    pubkey: LIVE_AGENT_PUBKEY,
+  });
+  const relayButActive = candidate({
+    displayName: "X",
+    isActiveAgent: true,
+    isAgent: true,
+    isManagedAgent: false,
+    pubkey: STALE_GHOST_PUBKEY,
+  });
+
+  assert.equal(
+    pickDefaultAgentCandidate([managedButStopped, relayButActive]),
+    relayButActive,
+  );
+});
+
+test("rankMentionCandidates: managed binding outranks a stale same-named ghost on equal label score", () => {
+  const staleGhost = candidate({
+    displayName: "X",
+    isActiveAgent: false,
+    isAgent: true,
+    isManagedAgent: false,
+    isMember: false,
+    pubkey: STALE_GHOST_PUBKEY,
+  });
+  const liveManaged = candidate({
+    displayName: "X",
+    isActiveAgent: false,
+    isAgent: true,
+    isManagedAgent: true,
+    isMember: false,
+    pubkey: LIVE_AGENT_PUBKEY,
+  });
+
+  // Ghost listed first in source order; freshness must lift the managed one up.
+  assert.deepEqual(rankedPubkeys([staleGhost, liveManaged], "x"), [
+    LIVE_AGENT_PUBKEY,
+    STALE_GHOST_PUBKEY,
+  ]);
+});
+
+test("rankMentionCandidates: freshness tiebreak does not reorder non-agents", () => {
+  const alice = candidate({
+    displayName: "Alice",
+    isAgent: false,
+    isMember: true,
+    pubkey: STALE_GHOST_PUBKEY,
+  });
+  const andrew = candidate({
+    displayName: "Alice",
+    isAgent: false,
+    isMember: true,
+    pubkey: LIVE_AGENT_PUBKEY,
+  });
+
+  // Two humans sharing a label keep source order — no managed/active signal.
+  assert.deepEqual(rankedPubkeys([alice, andrew], "alice"), [
+    STALE_GHOST_PUBKEY,
+    LIVE_AGENT_PUBKEY,
+  ]);
+});
