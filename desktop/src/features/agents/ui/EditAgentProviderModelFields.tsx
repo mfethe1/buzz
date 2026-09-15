@@ -10,6 +10,10 @@ import {
 } from "./agentConfigOptions";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
+import {
+  OpenaiCompatBaseUrlConfig,
+  PersonaProviderBaseUrlField,
+} from "./PersonaProviderBaseUrlField";
 
 /**
  * LLM provider + provider API key + model block of the Edit Agent dialog.
@@ -37,6 +41,7 @@ export function EditAgentProviderModelFields({
   effectiveProvider,
   apiKeyValue,
   onApiKeyChange,
+  openaiCompatBaseUrl,
   modelRequired,
   modelDiscoveryLoading,
   modelDropdownOptions,
@@ -63,6 +68,7 @@ export function EditAgentProviderModelFields({
   effectiveProvider: string;
   apiKeyValue: string;
   onApiKeyChange: (value: string) => void;
+  openaiCompatBaseUrl: OpenaiCompatBaseUrlConfig;
   modelRequired: boolean;
   modelDiscoveryLoading: boolean;
   modelDropdownOptions: PersonaDropdownOption[];
@@ -134,6 +140,17 @@ export function EditAgentProviderModelFields({
           label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
           onValueChange={onApiKeyChange}
           value={apiKeyValue}
+        />
+      ) : null}
+
+      {openaiCompatBaseUrl?.fieldVisible ? (
+        <PersonaProviderBaseUrlField
+          disabled={disabled}
+          id="edit-agent-openai-compat-base-url"
+          inheritedLabel={openaiCompatBaseUrl.inheritedLabel}
+          isInherited={false}
+          onValueChange={openaiCompatBaseUrl.onValueChange}
+          value={openaiCompatBaseUrl.value}
         />
       ) : null}
 
