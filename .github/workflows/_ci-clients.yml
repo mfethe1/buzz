@@ -87,7 +87,7 @@ jobs:
           flutter --version --machine > "$RUNNER_TEMP/mobile-flutter-version.json"
           printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/mobile-tested-sha.txt"
       - name: Save Hermit package cache
-        if: always() && steps.hermit-cache.outputs.cache-hit != 'true'
+        if: always() && github.event_name != 'pull_request' && steps.hermit-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         continue-on-error: true
         with:
@@ -103,7 +103,7 @@ jobs:
       - name: Install dependencies
         run: cd mobile && flutter pub get
       - name: Save pub cache
-        if: always() && steps.pub-cache.outputs.cache-hit != 'true'
+        if: always() && github.event_name != 'pull_request' && steps.pub-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         continue-on-error: true
         with:
