@@ -2698,7 +2698,6 @@ async fn tokio_main() -> Result<()> {
             None
         };
 
-    let cwd = current_working_directory()?;
     let base_prompt_content = config.base_prompt_content.take();
     let base_prompt = if config.no_base_prompt {
         None
@@ -2977,6 +2976,7 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
+    let cwd = current_working_directory()?;
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -2987,7 +2987,7 @@ async fn tokio_main() -> Result<()> {
         system_prompt: config.system_prompt.clone(),
         session_title: config.session_title.clone(),
         team_instructions: config.team_instructions.clone(),
-        // Built above so the Pi launcher consumes the same assembled bytes.
+        // Built above so the session store and pool share the same assembled bytes.
         base_prompt,
         heartbeat_prompt: config.heartbeat_prompt.clone(),
         cwd,
@@ -4936,7 +4936,7 @@ fn handle_prompt_result(
             result
                 .agent
                 .state
-                .mark_scope_delivery_success(scope, false, event_ids);
+                .mark_scope_delivery_success(scope, false, event_ids, []);
         }
     }
 
@@ -5536,6 +5536,16 @@ mod agent_draft_prompt_tests {
     #[test]
     fn shared_base_prompt_names_current_context_framing() {
         let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("## Incoming Turn Contract"));
+        assert!(prompt.contains("`Content:` field in the current `<buzz-event>`"));
+        assert!(prompt.contains("each event inside `<buzz-events>`"));
+        // Bind native-steer wording to its production framing. Interrupt
+        // framing is bound through `format_prompt` in the queue tests.
+        assert!(prompt.contains(crate::queue::native_steer_framing().0));
+        assert!(prompt.contains("Use `<thread-context>` or `<conversation-context>`"));
+        assert!(prompt.contains("do not mistake prior messages for the current request"));
+        assert!(prompt.contains("Treat `<context>` as authoritative routing"));
+        assert!(prompt.contains("supporting structured metadata"));
         assert!(prompt.contains("UUID from `<context>`"));
         assert!(prompt.contains("reply destination supplied in the `<context>` block"));
         assert!(!prompt.contains("`[Context]`"));
