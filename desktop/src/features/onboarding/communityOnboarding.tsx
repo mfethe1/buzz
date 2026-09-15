@@ -249,12 +249,17 @@ export function shouldSkipCommunityOnboarding(
  * - `{ action: "skip", profile }` — kind:0 exists; mark complete and enter
  *   the app. The resolved `Profile` is included so callers have the pubkey
  *   for `markCommunityOnboardingComplete` without a second fetch.
- * - `{ action: "show-profile" }` — no kind:0, or the fetch failed / timed
- *   out; show the profile setup step.
+ * - `{ action: "show-profile" }` — the fetch succeeded and there is no kind:0:
+ *   a genuine first run. Show the profile setup step.
+ * - `{ action: "fetch-failed" }` — the fetch failed or timed out (#49). The
+ *   backend may be down; this is NOT evidence the user is new. The caller
+ *   stays on the connecting screen with a retryable error instead of
+ *   re-presenting "Build your profile" to an already-onboarded user.
  */
 export type ProfileCheckAction =
   | { action: "skip"; profile: Profile }
-  | { action: "show-profile" };
+  | { action: "show-profile" }
+  | { action: "fetch-failed"; error: string };
 
 /**
  * Returns true when a live transaction snapshot still represents the
@@ -279,8 +284,11 @@ export function isTransactionStillConnecting(
  * must return a cancellation handle (like `window.setTimeout`) so the timer
  * can be cleared when the fetch settles before the deadline.
  *
- * Any fetch error or timeout → `{ action: "show-profile" }` (never strands
- * onboarding).
+ * A fetch error or timeout → `{ action: "fetch-failed" }` (#49): the backend
+ * is unreachable, which must never be read as "this user has no profile". A
+ * successful fetch with no kind:0 → `{ action: "show-profile" }`. Neither
+ * outcome can strand onboarding — `fetch-failed` renders a retryable error on
+ * the connecting screen.
  */
 export async function resolveProfileCheckAction(
   fetchProfile: () => Promise<Profile>,
@@ -305,8 +313,15 @@ export async function resolveProfileCheckAction(
     return shouldSkipCommunityOnboarding(profile)
       ? { action: "skip", profile }
       : { action: "show-profile" };
-  } catch {
-    return { action: "show-profile" };
+  } catch (error) {
+    const timedOut =
+      error instanceof Error && error.message === "profile-check-timeout";
+    return {
+      action: "fetch-failed",
+      error: timedOut
+        ? "Couldn't reach the server to check your profile. Check your connection and retry."
+        : "Couldn't load your profile — the server may be temporarily unavailable. Retry in a moment.",
+    };
   } finally {
     if (timerId !== undefined) clearTimeout(timerId);
   }

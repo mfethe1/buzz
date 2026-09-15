@@ -553,6 +553,17 @@ function CommunityApp({
       if (result.action === "skip") {
         markCommunityOnboardingComplete(result.profile.pubkey, relayUrl);
         communityOnboarding.clear();
+      } else if (result.action === "fetch-failed") {
+        // #49: an unreachable backend is not evidence that the user is new.
+        // Stay on the connecting screen with a retryable error instead of
+        // re-presenting "Build your profile" to an already-onboarded user.
+        // Release the profile-check ref so the user's retry (which rewrites
+        // stage+error and re-renders this effect) can launch a fresh check.
+        profileCheckTransactionRef.current = null;
+        communityOnboarding.update(
+          { stage: "connecting", error: result.error },
+          transactionId,
+        );
       } else {
         communityOnboarding.update(
           { stage: "profile", error: undefined },
