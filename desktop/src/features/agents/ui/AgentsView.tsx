@@ -20,7 +20,9 @@ import { TeamShareDialog } from "./TeamShareDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
+import { FleetAuditSection } from "./FleetAuditSection";
 import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
@@ -45,6 +47,7 @@ export function AgentsView() {
   const { data: bakedEnv } = useBakedBuildEnvQuery({ enabled: true });
   const inheritedDefaults = getInheritedAgentDefaults(globalConfig, bakedEnv);
   const agents = useManagedAgentActions();
+  const identityQuery = useIdentityQuery();
   const personas = usePersonaActions();
   const subagents = useSubagents();
   const teamImportInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -330,6 +333,22 @@ export function AgentsView() {
               }}
               personas={personas.libraryPersonas}
               teams={teamActions.teams}
+            />
+
+            <FleetAuditSection
+              relayAgents={agents.relayAgentsQuery.data ?? []}
+              relayAgentsError={
+                agents.relayAgentsQuery.error instanceof Error
+                  ? agents.relayAgentsQuery.error
+                  : null
+              }
+              isRelayLoading={agents.relayAgentsQuery.isLoading}
+              managedAgents={agents.managedAgents}
+              viewerPubkey={identityQuery.data?.pubkey ?? null}
+              onRefresh={() => {
+                void agents.relayAgentsQuery.refetch();
+              }}
+              isRefreshing={agents.relayAgentsQuery.isFetching}
             />
           </div>
         </div>

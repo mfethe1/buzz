@@ -243,6 +243,12 @@ pub struct RelayAgentInfo {
     /// whose author matches the agent's signed NIP-OA owner.
     #[serde(default)]
     pub device_label: Option<String>,
+    /// Fleet-audit (#55): earliest `created_at` across the agent's verified
+    /// kind:30177 coordinate history — when this agent first appeared on the
+    /// relay. `None` on legacy kind:10100 entries and when every 30177 event
+    /// for the agent fails owner verification.
+    #[serde(default)]
+    pub first_seen: Option<i64>,
     /// AGENT-HOMES-001: machine-home designation from the 30177 record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine_home: Option<MachineHome>,

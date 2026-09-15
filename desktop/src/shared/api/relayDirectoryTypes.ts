@@ -25,6 +25,11 @@ export type RelayAgent = {
   deviceId: string | null;
   /** Human label for that device, or null on pre-feature events. */
   deviceLabel: string | null;
+  /**
+   * Unix seconds of the earliest owner-verified kind:30177 event for this
+   * agent (#55 fleet audit). Null on legacy kind:10100 entries.
+   */
+  firstSeen: number | null;
 };
 
 /** Identity of the computer this Buzz install runs on. */
