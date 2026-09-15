@@ -31,6 +31,7 @@ import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { pickWelcomeGuideAgent } from "@/features/onboarding/welcomeGuide";
 import { useWelcomeKickoffEntrance } from "@/features/onboarding/useWelcomeKickoffEntrance";
 import { useWelcomeKickoffStagePresence } from "@/features/onboarding/useWelcomeKickoffStagePresence";
+import { useSkipWelcomeTeamProvisioningQuery } from "@/features/onboarding/useSkipWelcomeTeamProvisioning";
 import { useWelcomeAgentCreate } from "@/features/channels/useWelcomeAgentCreate";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
@@ -631,12 +632,19 @@ export function ChannelScreen({
         hasPersistedHydratedChannel(queryClient, activeChannelId),
     );
   settledChannelIdRef.current = settledChannelId;
-  const { welcomeKickoffStage, welcomeKickoffSettingUp } =
-    useWelcomeKickoffStagePresence(
-      activeChannel,
-      timelineMessages,
-      isTimelineLoading,
-    );
+  // #50: fleet builds skip Welcome-team provisioning; the stage must know so
+  // an empty Welcome channel never promises a team for 90s.
+  const skipWelcomeTeamQuery = useSkipWelcomeTeamProvisioningQuery();
+  const {
+    welcomeKickoffStage,
+    welcomeKickoffSettingUp,
+    welcomeKickoffDegraded,
+  } = useWelcomeKickoffStagePresence(
+    activeChannel,
+    timelineMessages,
+    isTimelineLoading,
+    skipWelcomeTeamQuery.data === true,
+  );
   useChannelTargetReset({
     activeChannelId,
     setEditTargetId,
@@ -864,6 +872,7 @@ export function ChannelScreen({
                   onEntranceMessageComplete={handleWelcomeEntranceComplete}
                   welcomeKickoffStage={welcomeKickoffStage}
                   welcomeKickoffSettingUp={welcomeKickoffSettingUp}
+                  welcomeKickoffDegraded={welcomeKickoffDegraded}
                   editTarget={
                     editTargetMessage
                       ? buildMessageComposerEditTarget(
