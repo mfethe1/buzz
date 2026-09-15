@@ -118,6 +118,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
           // sibling device to disambiguate against here.
           deviceId: null,
           deviceLabel: null,
+          firstSeen: null,
         });
       }
     }

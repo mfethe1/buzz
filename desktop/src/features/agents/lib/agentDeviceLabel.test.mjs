@@ -16,6 +16,7 @@ test("device label stays silent for a local agent with no name collision", () =>
     describeAgentDevice({
       isLocal: true,
       deviceLabel: null,
+      firstSeen: null,
       hasNameCollision: false,
     }),
     null,
@@ -35,6 +36,7 @@ test("device label names this device when a local agent collides on name", () =>
     describeAgentDevice({
       isLocal: true,
       deviceLabel: null,
+      firstSeen: null,
       hasNameCollision: true,
     }),
     "on this device",
