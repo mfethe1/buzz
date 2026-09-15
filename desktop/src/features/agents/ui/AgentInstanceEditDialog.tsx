@@ -76,8 +76,7 @@ import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
-import { EditAgentProviderModelFields } from "./EditAgentProviderModelFields";
-import { OPENAI_COMPAT_BASE_URL_ENV_VAR } from "./PersonaProviderBaseUrlField";
+import { AgentProviderSection } from "./AgentProviderSection";
 import {
   getBakedModelInheritLabel,
   getBakedProviderInheritLabel,
@@ -1073,55 +1072,34 @@ export function AgentInstanceEditDialog({
               </div>
             ) : null}
             {/* LLM provider + provider API key + model */}
-            <EditAgentProviderModelFields
-              disabled={isSaving}
-              llmProviderFieldVisible={llmProviderFieldVisible}
-              providerRequired={providerRequired}
-              providerDropdownOptions={providerDropdownOptions}
-              providerSelectValue={providerSelectValue}
-              onProviderDropdownChange={handleProviderDropdownChange}
-              isCustomProviderEditing={isCustomProviderEditing}
-              provider={provider}
-              onProviderChange={setProvider}
-              topLevelSecretEnvVar={topLevelSecretEnvVar}
-              apiKeyIsInherited={apiKeyIsInherited}
+            <AgentProviderSection
               apiKeyInheritedLabel={apiKeyInheritedLabel}
+              apiKeyIsInherited={apiKeyIsInherited}
               apiKeyIsRequired={apiKeyIsRequired}
-              effectiveProvider={effectiveProvider}
               apiKeyValue={apiKeyValue}
-              onApiKeyChange={(next) => {
-                setEnvVars((prev) => ({
-                  ...prev,
-                  [topLevelSecretEnvVar as string]: next,
-                }));
-              }}
-              baseUrlFieldVisible={effectiveProvider === "openai-compat"}
-              baseUrlValue={envVars[OPENAI_COMPAT_BASE_URL_ENV_VAR] ?? ""}
-              baseUrlInheritedLabel={
-                globalConfig.env_vars[OPENAI_COMPAT_BASE_URL_ENV_VAR] ?? ""
-              }
-              onBaseUrlChange={(next) => {
-                setEnvVars((prev) =>
-                  next.trim().length === 0
-                    ? (() => {
-                        const {
-                          [OPENAI_COMPAT_BASE_URL_ENV_VAR]: _dropped,
-                          ...rest
-                        } = prev;
-                        return rest;
-                      })()
-                    : { ...prev, [OPENAI_COMPAT_BASE_URL_ENV_VAR]: next },
-                );
-              }}
-              modelRequired={modelRequired}
+              disabled={isSaving}
+              effectiveProvider={effectiveProvider}
+              envVars={envVars}
+              globalEnvVars={globalConfig.env_vars}
+              isCustomProviderEditing={isCustomProviderEditing}
+              llmProviderFieldVisible={llmProviderFieldVisible}
+              model={model}
               modelDiscoveryLoading={modelDiscoveryLoading}
               modelDropdownOptions={modelDropdownOptions}
+              modelRequired={modelRequired}
               modelSelectValue={modelSelectValue}
-              onModelDropdownChange={handleModelDropdownChange}
-              showCustomModelInput={showCustomModelInput}
-              model={model}
-              onModelChange={setModel}
               modelStatusMessage={modelStatusMessage}
+              onModelDropdownChange={handleModelDropdownChange}
+              onProviderDropdownChange={handleProviderDropdownChange}
+              provider={provider}
+              providerDropdownOptions={providerDropdownOptions}
+              providerRequired={providerRequired}
+              providerSelectValue={providerSelectValue}
+              setEnvVars={setEnvVars}
+              setModel={setModel}
+              setProvider={setProvider}
+              showCustomModelInput={showCustomModelInput}
+              topLevelSecretEnvVar={topLevelSecretEnvVar}
             />
 
             <EffortPickerField
@@ -1143,9 +1121,9 @@ export function AgentInstanceEditDialog({
             />
 
             <AgentAiDefaultsNotice
-              onEditDefaults={() => {
-                if (!isSaving) setAiDefaultsOpen(true);
-              }}
+              onEditDefaults={() =>
+                isSaving ? undefined : setAiDefaultsOpen(true)
+              }
               triggerRef={aiDefaultsTriggerRef}
               explicitModel={inheritedSubmission.model ?? ""}
               explicitProvider={inheritedSubmission.provider ?? ""}
