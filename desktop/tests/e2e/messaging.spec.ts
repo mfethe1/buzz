@@ -3257,7 +3257,18 @@ test("narrow thread view collapses channel header actions into a menu", async ({
   if (!menuBox || !threadPanelBox) {
     throw new Error("Expected header action menu and thread panel bounds");
   }
-  const menuGap = threadPanelBox.x - (menuBox.x + menuBox.width);
+  // The menu trigger is not necessarily the header's trailing control at this
+  // width (the channel-tasks toggle also stays visible), so the panel gap is
+  // measured from the rightmost visible header button.
+  const headerTrailingRight = await page
+    .getByTestId("chat-header")
+    .locator("button:visible")
+    .evaluateAll((buttons) =>
+      Math.max(
+        ...buttons.map((button) => button.getBoundingClientRect().right),
+      ),
+    );
+  const menuGap = threadPanelBox.x - headerTrailingRight;
   const headerPaddingInlineEnd = await page
     .getByTestId("chat-header")
     .evaluate((header) =>

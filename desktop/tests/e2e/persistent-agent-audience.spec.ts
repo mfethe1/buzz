@@ -475,15 +475,19 @@ test("primary+Shift+M addresses the default agent, then toggles the highlighted 
   await input.fill("draft text");
   await pressPrimaryShiftM(page);
 
-  await expect(input).toHaveText("@alice draft text");
-  await expect(input.locator(".agent-mention-highlight")).toHaveText("alice");
+  // Since #53, a locally-managed agent (Morgarita) outranks the relay-advertised
+  // agent ("alice") in default-agent selection, so the shortcut pins Morgarita.
+  await expect(input).toHaveText("@Morgarita draft text");
+  await expect(input.locator(".agent-mention-highlight")).toHaveText(
+    "Morgarita",
+  );
   await expect(
     page.getByTestId("composer-auto-pin-confirmation"),
-  ).toContainText("alice will be mentioned automatically");
+  ).toContainText("Morgarita will be mentioned automatically");
   await pressPrimaryShiftM(page);
   await expect(input).toHaveText("draft text");
   await pressPrimaryShiftM(page);
-  await expect(input).toHaveText("@alice draft text");
+  await expect(input).toHaveText("@Morgarita draft text");
   await expect(
     composer
       .getByTestId("composer-address-locks")
@@ -1553,15 +1557,17 @@ test("captures the lightweight auto-pin popover", async ({ page }) => {
   const composer = threadComposer(page);
   const input = composer.getByTestId("message-input");
   await input.fill("draft text");
+  // Since #53, the managed agent (Morgarita) is the default agent, not the
+  // relay-advertised "alice".
   await pressPrimaryShiftM(page);
-  await expect(input).toHaveText("@alice draft text");
+  await expect(input).toHaveText("@Morgarita draft text");
 
   const addressControl = composer
     .getByTestId("composer-address-locks")
     .locator("..");
   const confirmation = page.getByTestId("composer-auto-pin-confirmation");
   await expect(confirmation).toContainText(
-    "alice will be mentioned automatically",
+    "Morgarita will be mentioned automatically",
   );
   await waitForAnimations(page);
 

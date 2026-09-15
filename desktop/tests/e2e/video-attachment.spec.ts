@@ -1625,6 +1625,9 @@ test("playback speed persists across videos and reloads", async ({ page }) => {
     VIDEO_SHA,
     "launch-demo.mp4",
   );
+  // Inline controls are opacity-0 until the player is hovered
+  // (group-hover/video) — hover first so the button is visible/stable.
+  await firstPlayer.hover();
   const firstSpeedButton = firstPlayer.getByTestId("video-inline-speed");
   await expect(firstSpeedButton).toHaveText("1x");
   await firstSpeedButton.click();
