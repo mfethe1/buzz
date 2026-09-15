@@ -77,6 +77,7 @@ import {
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
 import { EditAgentProviderModelFields } from "./EditAgentProviderModelFields";
+import { OPENAI_COMPAT_BASE_URL_ENV_VAR } from "./PersonaProviderBaseUrlField";
 import {
   getBakedModelInheritLabel,
   getBakedProviderInheritLabel,
@@ -1093,6 +1094,24 @@ export function AgentInstanceEditDialog({
                   ...prev,
                   [topLevelSecretEnvVar as string]: next,
                 }));
+              }}
+              baseUrlFieldVisible={effectiveProvider === "openai-compat"}
+              baseUrlValue={envVars[OPENAI_COMPAT_BASE_URL_ENV_VAR] ?? ""}
+              baseUrlInheritedLabel={
+                globalConfig.env_vars[OPENAI_COMPAT_BASE_URL_ENV_VAR] ?? ""
+              }
+              onBaseUrlChange={(next) => {
+                setEnvVars((prev) =>
+                  next.trim().length === 0
+                    ? (() => {
+                        const {
+                          [OPENAI_COMPAT_BASE_URL_ENV_VAR]: _dropped,
+                          ...rest
+                        } = prev;
+                        return rest;
+                      })()
+                    : { ...prev, [OPENAI_COMPAT_BASE_URL_ENV_VAR]: next },
+                );
               }}
               modelRequired={modelRequired}
               modelDiscoveryLoading={modelDiscoveryLoading}

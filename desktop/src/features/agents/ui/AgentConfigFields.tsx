@@ -47,6 +47,10 @@ import {
   AgentModelField,
 } from "@/features/agents/ui/agentConfigControls";
 import { PersonaProviderApiKeyField } from "@/features/agents/ui/PersonaProviderApiKeyField";
+import {
+  OPENAI_COMPAT_BASE_URL_ENV_VAR,
+  PersonaProviderBaseUrlField,
+} from "@/features/agents/ui/PersonaProviderBaseUrlField";
 import { usePersonaModelDiscovery } from "@/features/agents/ui/usePersonaModelDiscovery";
 import { resolveModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import {
@@ -792,6 +796,30 @@ export function AgentConfigFields({
               })
             }
             value={apiKeyValue}
+          />
+        </div>
+      ) : null}
+
+      {/* #52: OpenAI-compatible base URL — without a top-level field the
+          dialog silently dropped local endpoints (Ollama/vLLM) and every
+          call went to api.openai.com. */}
+      {providerFieldVisible && effectiveProvider === "openai-compat" ? (
+        <div className={blockClassName}>
+          <PersonaProviderBaseUrlField
+            disabled={false}
+            id="global-agent-openai-compat-base-url"
+            inheritedLabel="Inherited from runtime config"
+            isInherited={false}
+            onValueChange={(value) => {
+              const nextEnvVars = { ...config.env_vars };
+              if (value.trim().length === 0) {
+                delete nextEnvVars[OPENAI_COMPAT_BASE_URL_ENV_VAR];
+              } else {
+                nextEnvVars[OPENAI_COMPAT_BASE_URL_ENV_VAR] = value;
+              }
+              onConfigChange({ ...config, env_vars: nextEnvVars });
+            }}
+            value={config.env_vars[OPENAI_COMPAT_BASE_URL_ENV_VAR] ?? ""}
           />
         </div>
       ) : null}
