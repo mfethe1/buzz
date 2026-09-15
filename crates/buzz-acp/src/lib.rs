@@ -2698,7 +2698,6 @@ async fn tokio_main() -> Result<()> {
             None
         };
 
-    let cwd = current_working_directory()?;
     let base_prompt_content = config.base_prompt_content.take();
     let base_prompt = if config.no_base_prompt {
         None
@@ -2977,7 +2976,6 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
-    let base_prompt_content = config.base_prompt_content.take();
     let cwd = current_working_directory()?;
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
