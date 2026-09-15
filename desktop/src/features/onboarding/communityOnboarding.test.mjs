@@ -230,17 +230,31 @@ test("resolveProfileCheckAction_noProfileEvent_returnsShowProfile", async () => 
   assert.equal(result.action, "show-profile");
 });
 
-test("resolveProfileCheckAction_fetchRejects_returnsShowProfile", async () => {
+test("resolveProfileCheckAction_fetchRejects_returnsFetchFailed_notShowProfile", async () => {
+  // #49: a fetch failure means the backend is unreachable, NOT that the user
+  // has no profile. It must resolve to `fetch-failed` (retryable) so a
+  // returning user is never re-onboarded during an outage.
   const result = await resolveProfileCheckAction(
     () => Promise.reject(new Error("network error")),
     10_000,
     makeScheduler().schedule,
   );
-  assert.equal(result.action, "show-profile");
+  assert.equal(result.action, "fetch-failed");
+  assert.notEqual(
+    result.action,
+    "show-profile",
+    "an outage must not be misread as a first run",
+  );
+  assert.equal(typeof result.error, "string");
+  assert.ok(
+    result.error.length > 0,
+    "fetch-failed carries a retryable message",
+  );
 });
 
-test("resolveProfileCheckAction_timeout_returnsShowProfile", async () => {
-  // Fetch never settles; scheduler fires the timeout immediately.
+test("resolveProfileCheckAction_timeout_returnsFetchFailed", async () => {
+  // Fetch never settles; scheduler fires the timeout immediately. A timeout is
+  // a backend-unreachable signal (#49), never evidence of a first run.
   const scheduler = makeScheduler();
   const result = await resolveProfileCheckAction(
     () => new Promise(() => {}), // hangs forever
@@ -253,8 +267,12 @@ test("resolveProfileCheckAction_timeout_returnsShowProfile", async () => {
   );
   assert.equal(
     result.action,
-    "show-profile",
-    "timeout ⇒ show-profile (never strands onboarding)",
+    "fetch-failed",
+    "timeout ⇒ fetch-failed (retryable, never re-onboards, never strands)",
+  );
+  assert.ok(
+    result.error.toLowerCase().includes("reach"),
+    "timeout message points at connectivity, not at the user",
   );
 });
 
@@ -283,7 +301,7 @@ test("resolveProfileCheckAction_lateSuccessAfterTimeout_doesNotSkip", async () =
   const result = await resultPromise;
   assert.equal(
     result.action,
-    "show-profile",
+    "fetch-failed",
     "late success after timeout must not complete onboarding",
   );
 });
