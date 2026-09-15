@@ -188,6 +188,8 @@ export type AgentConfigFieldsProps = {
   runtimeFileConfig?: RuntimeFileConfigSubset | null;
   placeholderClassName?: string;
   selectClassName?: string;
+  showApiKeyEnvVarName?: boolean;
+  stackModelAndEffortHorizontally?: boolean;
   /**
    * Which disclosure preset to render (PR 2 flag cleanup — replaces eight
    * independent show* booleans):
@@ -224,6 +226,8 @@ export function AgentConfigFields({
   runtimeFileConfig,
   placeholderClassName,
   selectClassName,
+  showApiKeyEnvVarName = true,
+  stackModelAndEffortHorizontally = false,
   disclosure = "full",
   unstyled = false,
   useCustomSelect = false,
@@ -645,6 +649,27 @@ export function AgentConfigFields({
     ? (config.env_vars[effortPersistenceKey] ?? "")
     : "";
   const effortFieldVisible = showEffortField && effortField !== undefined;
+  const apiKeyCredentialPresent =
+    apiKeyValue.trim().length > 0 || apiKeyInherited;
+  const apiKeyValidationRequired =
+    stackModelAndEffortHorizontally && apiKeyEnvVar !== null;
+  const apiKeyValidationPending =
+    apiKeyValidationRequired &&
+    apiKeyCredentialPresent &&
+    modelDiscoveryLoading;
+  const apiKeyValidationSucceeded =
+    !apiKeyValidationRequired ||
+    (apiKeyCredentialPresent &&
+      !modelDiscoveryLoading &&
+      discoveredModelOptions !== null);
+  const apiKeyValidationFailed =
+    apiKeyValidationRequired &&
+    apiKeyCredentialPresent &&
+    !modelDiscoveryLoading &&
+    discoveredModelOptions === null &&
+    modelDiscoveryStatus !== null;
+  const onboardingModelAndEffortVisible =
+    configuredProviderValue.trim().length > 0 && apiKeyValidationSucceeded;
 
   const progressiveDefaults = disclosure === "progressive-defaults";
   const fieldClassName = unstyled
@@ -654,7 +679,9 @@ export function AgentConfigFields({
     : "space-y-1.5 p-3";
   const blockClassName = unstyled ? "" : "p-3";
   const fieldLabelClassName =
-    unstyled && !progressiveDefaults ? "pl-3" : undefined;
+    unstyled && !progressiveDefaults && !stackModelAndEffortHorizontally
+      ? "pl-3"
+      : undefined;
   const providerDropdownOptions = [
     ...providerOptions
       .filter(
@@ -774,56 +801,8 @@ export function AgentConfigFields({
     </>
   );
 
-  const dependentContent = (
+  const modelAndEffortFields = (
     <>
-      {providerFieldVisible && apiKeyEnvVar ? (
-        <div className={blockClassName}>
-          <PersonaProviderApiKeyField
-            disabled={false}
-            envVarName={apiKeyEnvVar}
-            inheritedLabel={
-              apiKeyFileSatisfied
-                ? "Set in runtime config"
-                : "Provided by this build"
-            }
-            isInherited={apiKeyInherited}
-            isRequired={!apiKeyInherited && apiKeyValue.length === 0}
-            label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
-            onValueChange={(value) =>
-              onConfigChange({
-                ...config,
-                env_vars: { ...config.env_vars, [apiKeyEnvVar]: value },
-              })
-            }
-            value={apiKeyValue}
-          />
-        </div>
-      ) : null}
-
-      {/* #52: OpenAI-compatible base URL — without a top-level field the
-          dialog silently dropped local endpoints (Ollama/vLLM) and every
-          call went to api.openai.com. */}
-      {providerFieldVisible && effectiveProvider === "openai-compat" ? (
-        <div className={blockClassName}>
-          <PersonaProviderBaseUrlField
-            disabled={false}
-            id="global-agent-openai-compat-base-url"
-            inheritedLabel="Inherited from runtime config"
-            isInherited={false}
-            onValueChange={(value) => {
-              const nextEnvVars = { ...config.env_vars };
-              if (value.trim().length === 0) {
-                delete nextEnvVars[OPENAI_COMPAT_BASE_URL_ENV_VAR];
-              } else {
-                nextEnvVars[OPENAI_COMPAT_BASE_URL_ENV_VAR] = value;
-              }
-              onConfigChange({ ...config, env_vars: nextEnvVars });
-            }}
-            value={config.env_vars[OPENAI_COMPAT_BASE_URL_ENV_VAR] ?? ""}
-          />
-        </div>
-      ) : null}
-
       {/* Model field — omitted only after confirmed successful empty discovery */}
       {modelControlVisible ? (
         <div className={showDescriptions ? fieldClassName : undefined}>
@@ -920,6 +899,74 @@ export function AgentConfigFields({
             useCustomSelect={useCustomSelect}
           />
         </div>
+      ) : null}
+    </>
+  );
+
+  const dependentContent = (
+    <>
+      {providerFieldVisible && apiKeyEnvVar ? (
+        <div className={blockClassName}>
+          <PersonaProviderApiKeyField
+            disabled={false}
+            envVarName={showApiKeyEnvVarName ? apiKeyEnvVar : undefined}
+            inheritedLabel={
+              apiKeyFileSatisfied
+                ? "Set in runtime config"
+                : "Provided by this build"
+            }
+            isInherited={apiKeyInherited}
+            isRequired={!apiKeyInherited && apiKeyValue.length === 0}
+            isValidating={apiKeyValidationPending}
+            label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
+            onValueChange={(value) =>
+              onConfigChange({
+                ...config,
+                env_vars: { ...config.env_vars, [apiKeyEnvVar]: value },
+              })
+            }
+            validationMessage={
+              apiKeyValidationFailed
+                ? "We couldn’t validate this API key. Check the key or your connection and try again."
+                : null
+            }
+            value={apiKeyValue}
+          />
+        </div>
+      ) : null}
+
+      {/* #52: OpenAI-compatible base URL — without a top-level field the
+          dialog silently dropped local endpoints (Ollama/vLLM) and every
+          call went to api.openai.com. */}
+      {providerFieldVisible && effectiveProvider === "openai-compat" ? (
+        <div className={blockClassName}>
+          <PersonaProviderBaseUrlField
+            disabled={false}
+            id="global-agent-openai-compat-base-url"
+            inheritedLabel="Inherited from runtime config"
+            isInherited={false}
+            onValueChange={(value) => {
+              const nextEnvVars = { ...config.env_vars };
+              if (value.trim().length === 0) {
+                delete nextEnvVars[OPENAI_COMPAT_BASE_URL_ENV_VAR];
+              } else {
+                nextEnvVars[OPENAI_COMPAT_BASE_URL_ENV_VAR] = value;
+              }
+              onConfigChange({ ...config, env_vars: nextEnvVars });
+            }}
+            value={config.env_vars[OPENAI_COMPAT_BASE_URL_ENV_VAR] ?? ""}
+          />
+        </div>
+      ) : null}
+
+      {!stackModelAndEffortHorizontally || onboardingModelAndEffortVisible ? (
+        stackModelAndEffortHorizontally ? (
+          <div className="grid w-full grid-cols-2 gap-4 [&>*:only-child]:col-span-2">
+            {modelAndEffortFields}
+          </div>
+        ) : (
+          modelAndEffortFields
+        )
       ) : null}
 
       {showAdvancedFields ? (
