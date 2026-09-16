@@ -292,6 +292,12 @@ type WelcomeComposerBannerProps = {
    */
   settingUp?: boolean;
   /**
+   * #50: the kickoff window expired with the channel still empty. Instead of
+   * promising a team, the banner reads as a quiet degraded state that points
+   * at harness configuration and can be dismissed.
+   */
+  degraded?: boolean;
+  /**
    * Called when the user dismisses the banner manually via the close button.
    * Only rendered while `state === "prompt"`.
    */
@@ -299,6 +305,7 @@ type WelcomeComposerBannerProps = {
 };
 
 export function WelcomeComposerBanner({
+  degraded = false,
   onDismiss,
   settingUp = false,
   state,
@@ -390,6 +397,19 @@ export function WelcomeComposerBanner({
               >
                 Nice work.
               </motion.span>
+            ) : degraded ? (
+              <motion.span
+                animate="animate"
+                className="min-w-0 flex-1"
+                data-testid="welcome-composer-degraded-copy"
+                exit="exit"
+                initial="initial"
+                key="degraded-copy"
+                variants={welcomeComposerBannerContentVariants}
+              >
+                Welcome team pending — configure a harness in Settings → Agents
+                to bring your teammates online.
+              </motion.span>
             ) : settingUp ? (
               <motion.span
                 animate="animate"
@@ -416,7 +436,7 @@ export function WelcomeComposerBanner({
               </motion.span>
             )}
           </AnimatePresence>
-          {state === "prompt" && onDismiss && !settingUp ? (
+          {state === "prompt" && onDismiss && (!settingUp || degraded) ? (
             <button
               aria-label="Dismiss hint"
               className="ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-muted-foreground/60 transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -439,6 +459,7 @@ type WelcomeComposerGuidanceLayerProps = WelcomeComposerBannerProps & {
 
 export function WelcomeComposerGuidanceLayer({
   children,
+  degraded,
   onDismiss,
   settingUp,
   state,
@@ -455,6 +476,7 @@ export function WelcomeComposerGuidanceLayer({
       />
       {children}
       <WelcomeComposerBanner
+        degraded={degraded}
         onDismiss={onDismiss}
         settingUp={settingUp}
         state={state}

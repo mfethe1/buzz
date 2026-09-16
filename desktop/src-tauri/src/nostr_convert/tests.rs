@@ -951,3 +951,54 @@ fn managed_directory_rejects_tampered_event_envelopes() {
         "a valid OA tag does not authenticate the profile envelope"
     );
 }
+
+/// #55 fleet audit: `first_seen` is the earliest verified 30177 `created_at`
+/// across the agent's history, not the latest event's timestamp — and it
+/// ignores forged events from a non-owner.
+#[test]
+fn managed_agent_directory_reports_earliest_verified_sighting() {
+    let agent_keys = Keys::generate();
+    let owner_keys = Keys::generate();
+    let attacker_keys = Keys::generate();
+    let agent_pubkey = agent_keys.public_key().to_hex();
+
+    let auth_tag_json =
+        buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "")
+            .expect("compute auth tag");
+    let auth_tag_values: Vec<String> =
+        serde_json::from_str(&auth_tag_json).expect("parse auth tag json");
+    let profile = EventBuilder::new(Kind::Metadata, r#"{"display_name":"Fleet"}"#)
+        .tags([Tag::parse(auth_tag_values).expect("parse auth tag")])
+        .sign_with_keys(&agent_keys)
+        .expect("sign profile");
+
+    let event_at = |keys: &Keys, name: &str, secs: u64| {
+        let content = serde_json::json!({
+            "name": name,
+            "parallelism": 1,
+            "respond_to": "anyone",
+            "respond_to_allowlist": Vec::<String>::new(),
+        })
+        .to_string();
+        EventBuilder::new(Kind::Custom(30177), content)
+            .tags([Tag::parse(["d", agent_pubkey.as_str()]).expect("parse d tag")])
+            .custom_created_at(nostr::Timestamp::from(secs))
+            .sign_with_keys(keys)
+            .expect("sign managed-agent event")
+    };
+
+    // Oldest verified sighting in the middle of the input; a forged older
+    // event from a non-owner must not lower it; a newer event stays "latest".
+    let agents = relay_agents_from_managed_agent_events(
+        &[
+            event_at(&owner_keys, "Fleet v2", 5_000),
+            event_at(&owner_keys, "Fleet v1", 1_000),
+            event_at(&attacker_keys, "Fake", 100),
+        ],
+        std::slice::from_ref(&profile),
+    );
+
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].name, "Fleet v2");
+    assert_eq!(agents[0].first_seen, Some(1_000));
+}

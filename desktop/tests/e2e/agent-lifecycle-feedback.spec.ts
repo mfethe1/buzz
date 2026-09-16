@@ -109,10 +109,14 @@ test.describe("agent lifecycle feedback screenshots", () => {
     // Both instances were renamed, so the persona splits into one card per
     // name rather than hiding an instance behind a single persona card.
     await expect(
-      page.getByText("Cascade Instance A", { exact: true }),
+      page.getByTestId(
+        `persona-agent-row-custom:test-cascade::cascade instance a`,
+      ),
     ).toBeVisible({ timeout: 10_000 });
     await expect(
-      page.getByText("Cascade Instance B", { exact: true }),
+      page.getByTestId(
+        `persona-agent-row-custom:test-cascade::cascade instance b`,
+      ),
     ).toBeVisible();
 
     // The persona's own name stays visible as each split card's second line,

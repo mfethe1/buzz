@@ -111,6 +111,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onEntranceMessageComplete,
   welcomeKickoffStage = null,
   welcomeKickoffSettingUp = false,
+  welcomeKickoffDegraded = false,
   messages,
   threadSummaries,
   huddleThreadRepliesError = false,
@@ -723,6 +724,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 >
                   {isActiveWelcomeChannel && !timeoutState.active ? (
                     <WelcomeComposerGuidanceLayer
+                      degraded={welcomeKickoffDegraded}
                       onDismiss={handleDismissWelcomeBanner}
                       settingUp={welcomeKickoffSettingUp}
                       state={welcomeComposerBannerState}

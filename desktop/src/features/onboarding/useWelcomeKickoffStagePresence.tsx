@@ -27,16 +27,18 @@ export function useWelcomeKickoffStagePresence(
   activeChannel: Channel | null,
   timelineMessages: readonly TimelineMessage[],
   isTimelineLoading: boolean,
+  skipTeam = false,
 ) {
   const hasVisibleTimelineMessages = React.useMemo(
     () =>
       timelineMessages.some((message) => !isWelcomeSetupSystemMessage(message)),
     [timelineMessages],
   );
-  const { phase, handleExitComplete } = useWelcomeKickoffStage(
+  const { phase, handleExitComplete, degraded } = useWelcomeKickoffStage(
     activeChannel,
     hasVisibleTimelineMessages,
     isTimelineLoading,
+    skipTeam,
   );
   // Announce the Welcome surface's first settled render (per channel) so the
   // onboarding "entering" curtain knows it can fade. Harmless outside
@@ -57,5 +59,6 @@ export function useWelcomeKickoffStagePresence(
   return {
     welcomeKickoffStage,
     welcomeKickoffSettingUp: isWelcomeKickoffSettingUp(phase),
+    welcomeKickoffDegraded: degraded,
   };
 }

@@ -86,12 +86,16 @@ pub fn relay_agents_from_directory_events(
             .into_iter()
             .map(|agent| (agent.pubkey.clone(), agent))
             .collect();
-    for (agent_pubkey, event) in verified_policies {
+    for (agent_pubkey, verified) in verified_policies {
         // Remove even when policy parsing fails: invalid latest policy must not
         // revive runtime permissions. Only verified runtime liveness survives
         // a valid policy overlay; ownership, permissions and membership do not.
         let runtime = agents.remove(&agent_pubkey);
-        if let Some(mut agent) = relay_agent_from_managed_policy(&agent_pubkey, event) {
+        if let Some(mut agent) = relay_agent_from_managed_policy(
+            &agent_pubkey,
+            verified.latest,
+            verified.first_seen_secs,
+        ) {
             if let Some(runtime) = runtime {
                 agent.status = runtime.status;
             }
@@ -130,10 +134,10 @@ pub fn verified_agent_owners_from_profiles(events: &[Event]) -> HashMap<String, 
 fn latest_verified_managed_policies<'a>(
     managed_agent_events: &'a [Event],
     profile_events: &[Event],
-) -> HashMap<String, &'a Event> {
+) -> HashMap<String, VerifiedManagedPolicy<'a>> {
     let verified_owners = verified_agent_owners_from_profiles(profile_events);
 
-    let mut latest: HashMap<String, &'a Event> = HashMap::new();
+    let mut latest: HashMap<String, VerifiedManagedPolicy<'a>> = HashMap::new();
     for event in managed_agent_events {
         let Some(agent_pubkey) = first_tag_value(event, "d") else {
             continue;
@@ -141,17 +145,37 @@ fn latest_verified_managed_policies<'a>(
         if verified_owners.get(agent_pubkey) != Some(&event.pubkey.to_hex()) {
             continue;
         }
-        if latest
-            .get(agent_pubkey)
-            .is_none_or(|previous| event_is_newer(event, previous))
-        {
-            latest.insert(agent_pubkey.to_string(), event);
+        // #55: track the earliest verified sighting for first-seen, while the
+        // map below keeps only the newest policy as the directory entry.
+        let seen_secs = event.created_at.as_secs() as i64;
+        match latest.get_mut(agent_pubkey) {
+            Some(entry) => {
+                if event_is_newer(event, entry.latest) {
+                    entry.latest = event;
+                }
+                if entry.first_seen_secs.is_none_or(|first| seen_secs < first) {
+                    entry.first_seen_secs = Some(seen_secs);
+                }
+            }
+            None => {
+                latest.insert(
+                    agent_pubkey.to_string(),
+                    VerifiedManagedPolicy {
+                        latest: event,
+                        first_seen_secs: Some(seen_secs),
+                    },
+                );
+            }
         }
     }
     latest
 }
 
-fn relay_agent_from_managed_policy(agent_pubkey: &str, event: &Event) -> Option<RelayAgentInfo> {
+fn relay_agent_from_managed_policy(
+    agent_pubkey: &str,
+    event: &Event,
+    first_seen_secs: Option<i64>,
+) -> Option<RelayAgentInfo> {
     // Check the envelope as well as the declared author. Keep invalid latest
     // coordinates reserved above so they cannot revive older legacy permissions.
     if event.kind != nostr::Kind::Custom(30177) || event.verify().is_err() {
@@ -196,6 +220,7 @@ fn relay_agent_from_managed_policy(agent_pubkey: &str, event: &Event) -> Option<
         device_label: content
             .device_label
             .filter(|label| validate_device_label(label).is_ok()),
+        first_seen: first_seen_secs,
         // Same validate-or-None rule: `model` is an owner-attested free-form
         // string rendered verbatim, so a hostile or buggy publisher gets a
         // `None` (no model shown), not a 10 KB control-character blob.
@@ -218,10 +243,23 @@ pub fn relay_agents_from_managed_agent_events(
 ) -> Vec<RelayAgentInfo> {
     let mut agents: Vec<_> = latest_verified_managed_policies(managed_agent_events, profile_events)
         .into_iter()
-        .filter_map(|(agent_pubkey, event)| relay_agent_from_managed_policy(&agent_pubkey, event))
+        .filter_map(|(agent_pubkey, verified)| {
+            relay_agent_from_managed_policy(
+                &agent_pubkey,
+                verified.latest,
+                verified.first_seen_secs,
+            )
+        })
         .collect();
     agents.sort_by(|left, right| left.name.cmp(&right.name));
     agents
+}
+
+/// Owner-verified 30177 history summary for one agent pubkey: the newest
+/// policy event plus the earliest `created_at` ever seen for it (#55).
+struct VerifiedManagedPolicy<'a> {
+    latest: &'a Event,
+    first_seen_secs: Option<i64>,
 }
 
 /// Build a pubkey-to-channel-id candidate map from relay-signed membership

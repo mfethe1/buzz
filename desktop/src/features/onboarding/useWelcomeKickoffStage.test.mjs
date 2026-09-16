@@ -113,3 +113,67 @@ test("done is terminal and never replays on a still-empty timeline", () => {
     "done",
   );
 });
+
+// #50: fleet builds skip Welcome-team provisioning (#54). The stage must never
+// promise a team that will not arrive — no 90s spinner on an empty channel.
+test("skipTeam keeps the stage hidden and never enters active", () => {
+  assert.equal(
+    resolveWelcomeKickoffStagePhase("hidden", { ...base, skipTeam: true }),
+    "hidden",
+  );
+  // An already-active stage leaves quietly the same way a timeout does.
+  assert.equal(
+    resolveWelcomeKickoffStagePhase("active", { ...base, skipTeam: true }),
+    "timed-out",
+  );
+});
+
+test("skipTeam never claims setup is in progress", () => {
+  assert.equal(
+    isWelcomeKickoffSettingUp(
+      resolveWelcomeKickoffStagePhase("hidden", { ...base, skipTeam: true }),
+    ),
+    false,
+  );
+});
+
+// #50: a channel whose kickoff window already expired in a previous app run
+// starts latched, so a restart never replays the 90s "Setting up…" stage.
+test("latchedTimeout prevents a restart from re-entering active", () => {
+  assert.equal(
+    resolveWelcomeKickoffStagePhase("hidden", {
+      ...base,
+      latchedTimeout: true,
+    }),
+    "hidden",
+  );
+  // Defensive: even if somehow active, the latch downgrades it immediately.
+  assert.equal(
+    resolveWelcomeKickoffStagePhase("active", {
+      ...base,
+      latchedTimeout: true,
+    }),
+    "timed-out",
+  );
+});
+
+test("latchedTimeout does not resurrect a terminal done stage", () => {
+  assert.equal(
+    resolveWelcomeKickoffStagePhase("done", { ...base, latchedTimeout: true }),
+    "done",
+  );
+});
+
+test("a message still clears a latched stage on entry", () => {
+  // hasMessages short-circuits before the latch path for a fresh hidden->…
+  // transition only matters once active; a latched hidden channel with a
+  // message simply stays hidden (nothing to set up, nothing to announce).
+  assert.equal(
+    resolveWelcomeKickoffStagePhase("hidden", {
+      ...base,
+      hasMessages: true,
+      latchedTimeout: true,
+    }),
+    "hidden",
+  );
+});

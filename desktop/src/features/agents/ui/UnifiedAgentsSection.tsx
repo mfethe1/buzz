@@ -1,6 +1,8 @@
 import * as React from "react";
 import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
 
+import { actionBannerInitial, actionBannerReduce } from "./actionBannerState";
+
 import {
   isAgentCardAvatarLoading,
   resolveAgentCardAvatarUrl,
@@ -134,12 +136,47 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   useFeedbackToasts(personaFeedbackNoticeMessage, personaFeedbackErrorMessage);
   const isLoading = isAgentsLoading || isPersonasLoading;
 
+  // #51: transient toasts are easy to miss when Start fails (e.g. the Windows
+  // installer shipped without buzz-acp.exe). Keep the last action error
+  // visible inline until the next action clears it.
+  const [banner, bannerDispatch] = React.useReducer(
+    actionBannerReduce,
+    actionBannerInitial,
+  );
+  React.useEffect(() => {
+    bannerDispatch({
+      type: "sync",
+      errorMessage: actionErrorMessage,
+      noticeMessage: actionNoticeMessage,
+    });
+  }, [actionErrorMessage, actionNoticeMessage]);
+  const lastActionError = banner.error;
+
   return (
     <section
       className="relative space-y-4"
       data-testid="agents-library-personas"
     >
       {isLoading ? <LoadingSkeleton /> : null}
+
+      {lastActionError && !isLoading ? (
+        <div
+          className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          data-testid="agents-action-error-banner"
+          role="alert"
+        >
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div className="flex-1">{lastActionError}</div>
+          <button
+            aria-label="Dismiss error"
+            className="shrink-0 text-muted-foreground hover:text-foreground"
+            onClick={() => bannerDispatch({ type: "dismiss" })}
+            type="button"
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
 
       {!isLoading ? (
         <div className="space-y-3" data-testid="unified-agents-groups">

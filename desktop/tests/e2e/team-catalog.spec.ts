@@ -271,10 +271,14 @@ test("a head that moved while the dialog was open is rejected", async ({
   );
 
   await page.getByTestId("community-catalog-add-team").click();
+  // The stale-head error surfaces in more than one region (banner and inline
+  // confirmation), so strict-mode getByText resolves to multiple nodes.
   await expect(
-    page.getByText(
-      "This team was updated since you opened the catalog. Reopen it and try again.",
-    ),
+    page
+      .getByText(
+        "This team was updated since you opened the catalog. Reopen it and try again.",
+      )
+      .first(),
   ).toBeVisible();
   expect(
     (await listMockTeams(page)).filter(
@@ -360,10 +364,14 @@ test("at an equal timestamp the lower-id head is canonical and a superseding hea
   );
 
   await page.getByTestId("community-catalog-add-team").click();
+  // The stale-head error surfaces in more than one region (banner and inline
+  // confirmation), so strict-mode getByText resolves to multiple nodes.
   await expect(
-    page.getByText(
-      "This team was updated since you opened the catalog. Reopen it and try again.",
-    ),
+    page
+      .getByText(
+        "This team was updated since you opened the catalog. Reopen it and try again.",
+      )
+      .first(),
   ).toBeVisible();
 });
 

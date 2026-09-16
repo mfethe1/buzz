@@ -1,6 +1,10 @@
 import * as React from "react";
 
 import { isWelcomeChannel } from "@/features/onboarding/welcome";
+import {
+  isChannelKickoffTimedOut,
+  latchChannelKickoffTimeout,
+} from "@/features/onboarding/welcomeKickoffTimeoutStorage";
 import type { Channel } from "@/shared/api/types";
 
 /**
@@ -46,6 +50,18 @@ export type WelcomeKickoffStageInput = {
   hasMessages: boolean;
   /** The timeout window elapsed while the stage was active. */
   timedOut: boolean;
+  /**
+   * Fleet builds skip Welcome-team provisioning entirely (#54). With no team
+   * ever arriving, the stage must never promise one: it stays hidden and the
+   * banner keeps its ordinary prompt copy (#50).
+   */
+  skipTeam?: boolean;
+  /**
+   * This channel already exhausted its kickoff window in a previous app run
+   * (#50). Restored from persistent storage so a restart never replays the
+   * 90s "Setting up your welcome team…" stage for a team that will not come.
+   */
+  latchedTimeout?: boolean;
 };
 
 /**
@@ -65,12 +81,23 @@ export function resolveWelcomeKickoffStagePhase(
   // momentarily reads as non-Welcome. Real channel changes reset the hook.
   if (current === "done") return "done";
   if (!input.isWelcome) return "hidden";
+  // #50: a build that skips Welcome-team provisioning must never show a stage
+  // promising one. An already-active stage leaves the same way a timeout
+  // does — quietly, and without ever claiming setup is in progress.
+  if (input.skipTeam) {
+    return current === "active" ? "timed-out" : "hidden";
+  }
+  // #50: this channel already exhausted its window in a previous app run.
+  // Never re-enter `active` on restart; the banner shows the degraded state
+  // instead (see useWelcomeKickoffStage's `degraded` flag).
+  if (input.latchedTimeout && current === "hidden") return "hidden";
   if (current === "hidden") {
     return input.timelineSettled && !input.hasMessages ? "active" : "hidden";
   }
   if (current === "exiting") return "exiting";
   if (input.hasMessages) return "exiting";
   if (input.timedOut && current === "active") return "timed-out";
+  if (input.latchedTimeout && current === "active") return "timed-out";
   return current;
 }
 
@@ -105,9 +132,16 @@ export function useWelcomeKickoffStage(
   activeChannel: Channel | null,
   hasTimelineMessages: boolean,
   timelineLoading: boolean,
+  skipTeam = false,
 ) {
   const channelId = activeChannel?.id ?? null;
   const isWelcome = isWelcomeChannel(activeChannel);
+  // #50: a channel whose kickoff already timed out in a previous run starts
+  // latched, so a restart never replays the 90s stage. Read once per channel.
+  const latched = React.useMemo(
+    () => isChannelKickoffTimedOut(window.localStorage, channelId),
+    [channelId],
+  );
   const [phase, setPhase] = React.useState<WelcomeKickoffStagePhase>("hidden");
   const [timedOut, setTimedOut] = React.useState(false);
 
@@ -124,22 +158,39 @@ export function useWelcomeKickoffStage(
         timelineSettled: !timelineLoading,
         hasMessages: hasTimelineMessages,
         timedOut,
+        skipTeam,
+        latchedTimeout: latched,
       }),
     );
-  }, [hasTimelineMessages, isWelcome, timedOut, timelineLoading]);
+  }, [
+    hasTimelineMessages,
+    isWelcome,
+    latched,
+    skipTeam,
+    timedOut,
+    timelineLoading,
+  ]);
 
   React.useEffect(() => {
     if (phase !== "active") return;
-    const timer = globalThis.setTimeout(
-      () => setTimedOut(true),
-      WELCOME_KICKOFF_STAGE_TIMEOUT_MS,
-    );
+    const timer = globalThis.setTimeout(() => {
+      setTimedOut(true);
+      // #50: persist the latch so the next app run skips the stage entirely.
+      if (channelId) {
+        latchChannelKickoffTimeout(window.localStorage, channelId, Date.now());
+      }
+    }, WELCOME_KICKOFF_STAGE_TIMEOUT_MS);
     return () => globalThis.clearTimeout(timer);
-  }, [phase]);
+  }, [channelId, phase]);
 
   const handleExitComplete = React.useCallback(() => {
     setPhase("done");
   }, []);
 
-  return { phase, handleExitComplete };
+  // #50: the stage resolved (or never started) without a team — the channel
+  // is still empty after the window expired this run or a previous one. The
+  // banner swaps its setup copy for a quiet degraded state with guidance.
+  const degraded = isWelcome && (timedOut || latched) && !hasTimelineMessages;
+
+  return { phase, handleExitComplete, degraded };
 }

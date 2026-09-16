@@ -58,6 +58,9 @@ jobs:
               - 'scripts/run-tests.sh'
               - 'scripts/model-capabilities.json'
               - 'scripts/normative-corpus.json'
+              # The relay/desktop integration lanes start MinIO/Postgres/Redis
+              # from docker-compose.yml; compose changes must run those lanes.
+              - 'docker-compose.yml'
               - 'justfile'
             desktop:
               - 'scripts/model-capabilities.json'
@@ -92,6 +95,8 @@ jobs:
         run: scripts/test-release-ref-contract.sh
       - name: Relay image eligibility contract
         run: scripts/test-relay-image-eligibility-workflow.sh
+      - name: Docker cache ownership contract
+        run: just docker-cache-check
       - name: Desktop release candidate contract
         run: scripts/test-desktop-release-candidate.sh
       - name: OSS desktop promotion contract

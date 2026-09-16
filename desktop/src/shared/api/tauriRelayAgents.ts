@@ -15,6 +15,8 @@ export type RawRelayAgent = {
   respond_to_allowlist?: string[];
   device_id?: string | null;
   device_label?: string | null;
+  /** Unix seconds of the earliest verified kind:30177 event (#55). */
+  first_seen?: number | null;
 };
 
 /** Normalize a wire relay agent, defaulting fields absent on older payloads. */
@@ -32,6 +34,7 @@ export function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
     respondToAllowlist: agent.respond_to_allowlist ?? [],
     deviceId: agent.device_id ?? null,
     deviceLabel: agent.device_label ?? null,
+    firstSeen: agent.first_seen ?? null,
   };
 }
 

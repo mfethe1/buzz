@@ -20,7 +20,7 @@
 //! `AcpClient` is NOT Clone — ownership moves out on claim and back on return.
 
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -47,6 +47,8 @@ use crate::scope::SessionScope;
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
 const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
+
+const MAX_HYDRATED_THREAD_ROOTS_PER_SCOPE: usize = 1024;
 
 // FlushBatch and BatchEvent derive Clone (added in queue.rs) so we can store
 // a recoverable copy in TaskMeta for panic recovery in Queue mode.
@@ -110,6 +112,10 @@ pub struct ChannelDeliveryState {
     /// Buzz event IDs already delivered to this ACP session, either as trigger
     /// events or conversation context.
     pub delivered_event_ids: HashSet<String>,
+    /// Canonical thread roots that have completed a successful context fetch in
+    /// this ACP session. Hydrated threads use bounded overfetch so exact event-ID
+    /// deduplication does not unnecessarily shrink the new-context window.
+    pub hydrated_thread_roots: VecDeque<String>,
 }
 
 /// Per-channel session IDs, turn counters, and delivery state.
@@ -222,10 +228,20 @@ impl SessionState {
         scope: SessionScope,
         standing_context_sent: bool,
         event_ids: impl IntoIterator<Item = String>,
+        hydrated_thread_roots: impl IntoIterator<Item = String>,
     ) {
         let delivery = self.deliveries.entry(scope).or_default();
         delivery.standing_context_sent |= standing_context_sent;
         delivery.delivered_event_ids.extend(event_ids);
+        for root in hydrated_thread_roots {
+            if delivery.hydrated_thread_roots.contains(&root) {
+                continue;
+            }
+            if delivery.hydrated_thread_roots.len() >= MAX_HYDRATED_THREAD_ROOTS_PER_SCOPE {
+                delivery.hydrated_thread_roots.pop_front();
+            }
+            delivery.hydrated_thread_roots.push_back(root);
+        }
     }
 
     #[cfg(test)]
@@ -1173,7 +1189,7 @@ impl AgentPool {
         };
         agent
             .state
-            .mark_scope_delivery_success(scope.clone(), false, [event_id]);
+            .mark_scope_delivery_success(scope.clone(), false, [event_id], []);
         true
     }
 
@@ -2374,6 +2390,7 @@ async fn try_restore_stored_session(
                     ChannelDeliveryState {
                         standing_context_sent: true,
                         delivered_event_ids: delivered.into_iter().collect(),
+                        hydrated_thread_roots: Default::default(),
                     },
                 );
             } else {
@@ -2896,7 +2913,7 @@ pub async fn run_prompt_task(
                     if !agent.has_system_prompt_support() {
                         agent
                             .state
-                            .mark_scope_delivery_success(scope.clone(), true, []);
+                            .mark_scope_delivery_success(scope.clone(), true, [], []);
                     }
                     let usage = agent.acp.take_turn_usage();
                     publish_agent_turn_metric(
@@ -3022,6 +3039,7 @@ pub async fn run_prompt_task(
     // Event IDs represented by this prompt. Commit only after ACP reports a
     // successful turn; failed/cancelled prompts must be retryable without loss.
     let mut pending_delivered_event_ids = HashSet::new();
+    let mut pending_hydrated_thread_roots = HashSet::new();
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
@@ -3050,11 +3068,21 @@ pub async fn run_prompt_task(
         // reuse that exact typed result for prompt formatting.
         let channel_info = resolved_channel_info.clone();
 
+        let is_dm = channel_info
+            .as_ref()
+            .map(|ci| ci.channel_type == "dm")
+            .unwrap_or(false);
+        let context_target = resolve_context_target(b, is_dm);
         let conversation_context = if ctx.context_message_limit > 0 {
             fetch_conversation_context(b, &channel_info, &ctx).await
         } else {
             None
         };
+        if let Some(root) =
+            fetched_thread_root_to_hydrate(&context_target, conversation_context.as_ref(), is_dm)
+        {
+            pending_hydrated_thread_roots.insert(root);
+        }
         let rendered_batch_ids: HashSet<String> = b
             .events
             .iter()
@@ -3068,7 +3096,7 @@ pub async fn run_prompt_task(
             .map(|delivery| &delivery.delivered_event_ids)
             .cloned()
             .unwrap_or_default();
-        let conversation_context_had_delivered_events =
+        let conversation_context_had_session_events =
             conversation_context.as_ref().is_some_and(|context| {
                 conversation_context_event_ids(Some(context))
                     .iter()
@@ -3107,7 +3135,7 @@ pub async fn run_prompt_task(
                 huddle_instructions: standing.huddle_instructions,
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
-                conversation_context_had_delivered_events,
+                conversation_context_had_session_events,
                 profile_lookup: profile_lookup.as_ref(),
                 has_system_prompt_support: agent.has_system_prompt_support(),
                 base_prompt: standing.base_prompt,
@@ -3340,6 +3368,7 @@ pub async fn run_prompt_task(
                                 scope.clone(),
                                 standing_sent,
                                 &pending_delivered_event_ids,
+                                &pending_hydrated_thread_roots,
                             );
                             store_mark_events_processed(
                                 &ctx,
@@ -3399,6 +3428,7 @@ pub async fn run_prompt_task(
                     scope.clone(),
                     standing_sent,
                     &pending_delivered_event_ids,
+                    &pending_hydrated_thread_roots,
                 );
                 store_mark_events_processed(&ctx, scope.channel_id(), &pending_delivered_event_ids)
                     .await;
@@ -4171,6 +4201,20 @@ fn resolve_context_target(batch: &FlushBatch, is_dm: bool) -> ContextTarget {
     ContextTarget::None
 }
 
+fn fetched_thread_root_to_hydrate(
+    target: &ContextTarget,
+    context: Option<&ConversationContext>,
+    is_dm: bool,
+) -> Option<String> {
+    if is_dm || !matches!(context, Some(ConversationContext::Thread { .. })) {
+        return None;
+    }
+    match target {
+        ContextTarget::Thread(root) => Some(root.clone()),
+        ContextTarget::Dm | ContextTarget::None => None,
+    }
+}
+
 /// Normalize AND validate a pubkey for the batch profile API request.
 /// Returns `None` for malformed input — only valid 64-char hex passes.
 /// See also: `normalize_lookup_key` in queue.rs (normalize-only, no validation).
@@ -4936,6 +4980,7 @@ fn record_scope_delivery_success(
     scope: SessionScope,
     standing_context_sent: bool,
     event_ids: &HashSet<String>,
+    hydrated_thread_roots: &HashSet<String>,
 ) {
     tracing::info!(
         target: "pool::prompt",
@@ -4946,6 +4991,7 @@ fn record_scope_delivery_success(
         scope,
         standing_context_sent,
         event_ids.iter().cloned(),
+        hydrated_thread_roots.iter().cloned(),
     );
 }
 
@@ -7690,6 +7736,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             conv(channel),
             true,
             ["trigger".to_string(), "context".to_string()],
+            [],
         );
         let delivery = state.deliveries.get(&conv(channel)).unwrap();
         assert!(delivery.standing_context_sent);
@@ -7701,7 +7748,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let channel = Uuid::new_v4();
         let mut state = SessionState::default();
         state.sessions.insert(conv(channel), "old-session".into());
-        state.mark_scope_delivery_success(conv(channel), true, ["old-event".to_string()]);
+        state.mark_scope_delivery_success(conv(channel), true, ["old-event".to_string()], []);
 
         assert!(state.invalidate_channel(&channel) > 0);
         assert!(!state.deliveries.contains_key(&conv(channel)));
@@ -7831,6 +7878,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             ChannelDeliveryState {
                 standing_context_sent: true,
                 delivered_event_ids: HashSet::from(["event-a".into()]),
+                hydrated_thread_roots: Default::default(),
             },
         );
         s.deliveries.insert(
@@ -7838,6 +7886,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             ChannelDeliveryState {
                 standing_context_sent: true,
                 delivered_event_ids: HashSet::from(["event-b".into()]),
+                hydrated_thread_roots: Default::default(),
             },
         );
         s.heartbeat_session = Some("sess-hb".into());

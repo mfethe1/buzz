@@ -4,6 +4,14 @@ export type MentionCandidateForRanking = {
   displayName: string | null;
   isAgent: boolean;
   isActiveAgent?: boolean;
+  /**
+   * #53: this candidate comes from this device's managed-agent inventory.
+   * When the relay still carries a stale binding for a same-named deleted
+   * agent (tombstone lost or not yet synced), the managed record IS the
+   * current binding — rank it above relay-only ghosts before falling back to
+   * alphabetical pubkey order.
+   */
+  isManagedAgent?: boolean;
   isMember: boolean;
   kind: "identity" | "persona" | "team";
   personaId?: string | null;
@@ -52,6 +60,24 @@ function scoreMentionCandidateLabel(
   return null;
 }
 
+/**
+ * #53: tiebreak that prefers the device's current agent binding over a stale
+ * relay ghost with the same label. A live agent beats a stopped one; a
+ * locally-managed record beats a relay-only identity (which may be a deleted
+ * agent whose 30175/30177 events outlived their tombstone). Lower sorts first.
+ * Non-agents score 0 on both axes, so this never reorders people among
+ * themselves.
+ */
+function agentFreshnessTiebreak<T extends MentionCandidateForRanking>(
+  a: T,
+  b: T,
+): number {
+  const activeDiff =
+    Number(b.isActiveAgent === true) - Number(a.isActiveAgent === true);
+  if (activeDiff !== 0) return activeDiff;
+  return Number(b.isManagedAgent === true) - Number(a.isManagedAgent === true);
+}
+
 export function pickDefaultAgentCandidate<T extends MentionCandidateForRanking>(
   candidates: readonly T[],
   activePersonaIds: ReadonlySet<string> = new Set(),
@@ -81,6 +107,15 @@ export function pickDefaultAgentCandidate<T extends MentionCandidateForRanking>(
           Number(right.isActiveAgent === true) -
           Number(left.isActiveAgent === true);
         if (activeDiff !== 0) return activeDiff;
+        // #53: a locally-managed record is the device's current binding. When
+        // the relay still advertises a same-named deleted agent (stale
+        // 30175/30177 events), the ghost must not win on the alphabetical
+        // pubkey fallback — mentions would route to an agent that no longer
+        // runs. Factual liveness still outranks this (activeDiff above).
+        const managedDiff =
+          Number(right.isManagedAgent === true) -
+          Number(left.isManagedAgent === true);
+        if (managedDiff !== 0) return managedDiff;
         const memberDiff = Number(right.isMember) - Number(left.isMember);
         if (memberDiff !== 0) return memberDiff;
         const runnableDiff =
@@ -150,6 +185,11 @@ export function rankMentionCandidates<T extends MentionCandidateForRanking>(
     .filter((item): item is RankedMentionCandidate<T> => item.score !== null)
     .sort(
       (a, b) =>
-        a.groupRank - b.groupRank || a.score - b.score || a.order - b.order,
+        a.groupRank - b.groupRank ||
+        a.score - b.score ||
+        // #53: within one label-score group, prefer the current binding over a
+        // stale relay ghost before falling back to source order.
+        agentFreshnessTiebreak(a.candidate, b.candidate) ||
+        a.order - b.order,
     );
 }

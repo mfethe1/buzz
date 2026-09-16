@@ -156,6 +156,7 @@ fn built_in_persona_records(now: &str) -> Vec<AgentDefinition> {
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
+            session_policy: super::AcpSessionPolicy::Channel,
             created_at: now.to_string(),
             updated_at: now.to_string(),
         })
@@ -197,6 +198,7 @@ fn retired_persona_record(persona: &BuiltInPersona, now: &str) -> AgentDefinitio
         source_team_persona_slug: None,
         catalog_source: None,
         team_catalog_source: None,
+        session_policy: super::AcpSessionPolicy::Channel,
         env_vars: Default::default(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),

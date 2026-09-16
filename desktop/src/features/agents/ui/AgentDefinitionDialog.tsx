@@ -18,6 +18,10 @@ import { PersonaModelField } from "./PersonaModelField";
 import { runtimeAvailabilityWarning } from "./runtimeAvailabilityWarning";
 import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
 import {
+  OPENAI_COMPAT_BASE_URL_ENV_VAR,
+  PersonaProviderBaseUrlField,
+} from "./PersonaProviderBaseUrlField";
+import {
   canSubmitPersonaDialog,
   formatPersonaNamePoolText,
   parsePersonaNamePoolText,
@@ -892,6 +896,31 @@ export function AgentDefinitionDialog({
                 }));
               }}
               value={apiKeyValue}
+            />
+          ) : null}
+
+          {llmProviderFieldVisible &&
+          aiConfigurationMode === "custom" &&
+          effectiveProvider === "openai-compat" ? (
+            <PersonaProviderBaseUrlField
+              disabled={isPending}
+              id="persona-openai-compat-base-url"
+              inheritedLabel="Inherited from global config"
+              isInherited={false}
+              onValueChange={(next) => {
+                setEnvVars((prev) =>
+                  next.trim().length === 0
+                    ? (() => {
+                        const {
+                          [OPENAI_COMPAT_BASE_URL_ENV_VAR]: _dropped,
+                          ...rest
+                        } = prev;
+                        return rest;
+                      })()
+                    : { ...prev, [OPENAI_COMPAT_BASE_URL_ENV_VAR]: next },
+                );
+              }}
+              value={envVars[OPENAI_COMPAT_BASE_URL_ENV_VAR] ?? ""}
             />
           ) : null}
 

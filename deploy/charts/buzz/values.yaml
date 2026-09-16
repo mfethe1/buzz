@@ -367,8 +367,12 @@ s3:
 # this disabled and use s3.* (or secrets.existingSecret) against managed S3.
 minio:
   enabled: false                 # quickstart: set true for bundled in-cluster MinIO
-  image: minio/minio:RELEASE.2025-09-07T16-13-09Z
-  mcImage: minio/mc:RELEASE.2025-08-13T08-35-41Z
+  # MinIO's own registries removed when the project went source-only (2025-10).
+  # chainguard images are built from upstream source (CVE-2025-62506 fixed) and
+  # are digest-pinned; no registry login required. Renews with chainguard
+  # rebuilds — bump via images.chainguard.dev/directory/image/minio.
+  image: "chainguard/minio@sha256:039800e64ec7247d2fde7cff3697e964f6fe20b6d7d2c46aa7d82cc63355d512"
+  mcImage: "chainguard/minio-client@sha256:01fda3c663e18914a1c39ea7b5bec8aa9a792066933ad264fd5b0847f082d6cb"
   persistence:
     enabled: true
     size: 10Gi

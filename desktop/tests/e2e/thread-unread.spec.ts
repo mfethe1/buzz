@@ -986,7 +986,10 @@ test.describe("thread unread indicator", () => {
     const openMenu = async () => {
       await expect(toggle).toHaveCount(0);
       await page.mouse.move(0, 0);
-      await page.getByText("Toggle me").hover();
+      // Scope the hover to the timeline: the sr-only aria-live region
+      // (message-timeline-announcements) echoes message text and would
+      // otherwise make this locator resolve to 2 elements (strict mode).
+      await page.getByTestId("message-timeline").getByText("Toggle me").hover();
       await moreActions.click();
       await expect(toggle).toHaveCount(1);
     };

@@ -70,6 +70,12 @@ export type ChannelPaneProps = {
   welcomeKickoffStage?: React.ReactNode;
   /** The kickoff is still setting up the team — the banner copy reads as setup status. */
   welcomeKickoffSettingUp?: boolean;
+  /**
+   * #50: the kickoff window expired (this run or a previous one) with the
+   * channel still empty — the banner swaps setup copy for a quiet degraded
+   * state with harness guidance instead of spinning forever.
+   */
+  welcomeKickoffDegraded?: boolean;
   messages: TimelineMessage[];
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
   /**

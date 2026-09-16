@@ -164,6 +164,7 @@ type MockPersonaSeed = {
   namePool?: string[];
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
+  sessionPolicy?: "channel" | "thread";
 };
 
 type MockTeamSeed = {
@@ -421,6 +422,8 @@ type E2eConfig = {
     /** Delay (ms) applied to newest-page channel-window requests. */
     channelHeadDelayMs?: number;
     profileReadDelayMs?: number;
+    /** Hold `get_profile` responses until the E2E release seam is invoked. */
+    deferProfileReads?: boolean;
     profileReadError?: string;
     /** Override whether get_profile reports a real kind:0 event. */
     profileHasEvent?: boolean;
@@ -572,6 +575,8 @@ type E2eConfig = {
       id: string;
       href: string;
     }>;
+    /** Reject one `get_identity` call after this many successful reads. */
+    identityReadErrorAfter?: { message: string; successfulReads: number };
     // When true, `get_identity` returns `lost: true` until `persist_current_identity`
     // or `import_identity` is called. Drives the identity-lost recovery UX in tests.
     identityLost?: boolean;
@@ -593,6 +598,8 @@ type E2eConfig = {
     };
     /** Explicit owner-only agent-access capability; independent of baked defaults. */
     ownerOnlyAccessBuild?: boolean;
+    /** Explicit skip-Welcome-Team provisioning capability; independent of baked defaults. */
+    skipWelcomeTeamProvisioning?: boolean;
     /** File-layer config returned by runtime id. */
     runtimeFileConfigs?: Record<string, RuntimeFileConfigSubset | null>;
     /** Baked build env returned by the display and key-name Tauri commands. */
@@ -1036,6 +1043,7 @@ type RawPersona = {
   respond_to?: string | null;
   respond_to_allowlist?: string[];
   parallelism?: number | null;
+  session_policy?: "channel" | "thread";
   created_at: string;
   updated_at: string;
 };
@@ -1598,6 +1606,10 @@ declare global {
     __BUZZ_E2E_HOLD_USERS_BATCH__?: (hold: boolean) => number;
     /** Number of `get_users_batch` calls currently held. */
     __BUZZ_E2E_USERS_BATCH_PENDING__?: () => number;
+    /** Release every `get_profile` response held by `deferProfileReads`. */
+    __BUZZ_E2E_RELEASE_PROFILE_READS__?: () => number;
+    /** Number of `get_profile` responses currently held. */
+    __BUZZ_E2E_PROFILE_READS_PENDING__?: () => number;
     /** Uploads that passed mock-native registration and began relay work. */
     __BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__?: number;
     /** Hold renderer-owned media fetches until their cancellation command. */
@@ -1701,6 +1713,8 @@ const STARTER_WELCOME_CHANNEL_NAME = "welcome-everyone";
 let mockIdentityLostCleared = false;
 // Same pattern for `mock.identityLocked`.
 let mockIdentityLockedCleared = false;
+let identityReadCount = 0;
+let identityReadErrorConsumed = false;
 
 // ── get_event defer/release seam ────────────────────────────────────────────
 // When `window.__BUZZ_E2E_DEFER_GET_EVENT__` is set to a target event ID,
@@ -1719,6 +1733,13 @@ let deferredGetEventQueue: DeferredGetEvent[] = [];
 let deferredLinkPreviewMetadataQueue: Array<() => void> = [];
 let deferredLinkPreviewUploadQueue: Array<() => void> = [];
 let deferredThreadRepliesQueue: Array<() => void> = [];
+type DeferredProfileRead = {
+  reject: (reason: unknown) => void;
+  resolve: (value: unknown) => void;
+  run: () => Promise<unknown>;
+};
+let deferredProfileReadQueue: DeferredProfileRead[] = [];
+let profileReadsReleased = false;
 // ── get_users_batch hold seam ───────────────────────────────────────────────
 // Toggled at runtime by `__BUZZ_E2E_HOLD_USERS_BATCH__(hold)` rather than fixed
 // at boot by a mock-config flag, because a mention-identity spec needs both
@@ -2658,6 +2679,7 @@ function resetMockPersonas(config?: E2eConfig) {
     model: null,
     provider: null,
     name_pool: [],
+    session_policy: "channel",
     is_builtin: true,
     is_active: activePersonaIds.has(persona.id),
     shared: false,
@@ -2681,6 +2703,7 @@ function resetMockPersonas(config?: E2eConfig) {
         persona.respondTo === "allowlist"
           ? [...(persona.respondToAllowlist ?? [])]
           : [],
+      session_policy: persona.sessionPolicy ?? "channel",
       is_builtin: false,
       is_active: persona.isActive ?? true,
       shared: persona.shared ?? false,
@@ -3584,6 +3607,8 @@ function mockPersonaCatalogPublications() {
       });
     };
     const rawDescription = content.description;
+    const sessionPolicy =
+      content.session_policy === "thread" ? "thread" : "channel";
     if (
       typeof displayName !== "string" ||
       !displayName.trim() ||
@@ -3627,6 +3652,7 @@ function mockPersonaCatalogPublications() {
               : null,
         parallelism:
           typeof content.parallelism === "number" ? content.parallelism : null,
+        sessionPolicy,
       },
     });
   }
@@ -6786,8 +6812,15 @@ async function handleGetChannels(
   };
 }
 
-async function handleGetProfile(config: E2eConfig | undefined) {
+async function runGetProfile(config: E2eConfig | undefined) {
   const identity = getIdentity(config);
+  const profileReadDelayMs = config?.mock?.profileReadDelayMs ?? 0;
+  if (profileReadDelayMs > 0) {
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, profileReadDelayMs);
+    });
+  }
+
   const forcedHasProfileEvent = config?.mock?.profileHasEvent;
   if (forcedHasProfileEvent !== undefined) {
     return {
@@ -6796,13 +6829,6 @@ async function handleGetProfile(config: E2eConfig | undefined) {
     };
   }
   if (!identity) {
-    const profileReadDelayMs = config?.mock?.profileReadDelayMs ?? 0;
-    if (profileReadDelayMs > 0) {
-      await new Promise<void>((resolve) => {
-        window.setTimeout(resolve, profileReadDelayMs);
-      });
-    }
-
     const profileReadError = config?.mock?.profileReadError;
     if (profileReadError) {
       throw new Error(profileReadError);
@@ -6836,6 +6862,20 @@ async function handleGetProfile(config: E2eConfig | undefined) {
     owner_pubkey: null,
     has_profile_event: true,
   };
+}
+
+async function handleGetProfile(config: E2eConfig | undefined) {
+  if (!config?.mock?.deferProfileReads || profileReadsReleased) {
+    return runGetProfile(config);
+  }
+
+  return new Promise<unknown>((resolve, reject) => {
+    deferredProfileReadQueue.push({
+      resolve,
+      reject,
+      run: () => runGetProfile(config),
+    });
+  });
 }
 
 async function handleUpdateProfile(
@@ -8897,6 +8937,7 @@ type PersonaBehaviorInput = {
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
   parallelism?: number;
+  sessionPolicy?: "channel" | "thread";
 };
 
 /** Mirrors `apply_persona_behavior`: replace all four as a unit. */
@@ -8913,6 +8954,7 @@ function applyMockPersonaBehavior(
       ? [...(behavior.respondToAllowlist ?? [])]
       : [];
   persona.parallelism = behavior.parallelism ?? null;
+  persona.session_policy = behavior.sessionPolicy ?? "channel";
 }
 
 async function handleCreatePersona(args: {
@@ -8954,6 +8996,7 @@ async function handleCreatePersona(args: {
         }
       : null,
     env_vars: { ...(args.input.envVars ?? {}) },
+    session_policy: "channel",
     created_at: now,
     updated_at: now,
   };
@@ -11374,6 +11417,8 @@ export function maybeInstallE2eTauriMocks() {
   deferredLinkPreviewMetadataQueue = [];
   deferredLinkPreviewUploadQueue = [];
   deferredThreadRepliesQueue = [];
+  deferredProfileReadQueue = [];
+  profileReadsReleased = false;
   holdUsersBatch = false;
   heldUsersBatchReleases = [];
   cancelledMediaUploadIds = new Set<string>();
@@ -11401,6 +11446,16 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_THREAD_REPLIES_PENDING__ = () =>
     deferredThreadRepliesQueue.length;
+  window.__BUZZ_E2E_RELEASE_PROFILE_READS__ = () => {
+    profileReadsReleased = true;
+    const queued = deferredProfileReadQueue.splice(0);
+    for (const deferred of queued) {
+      void deferred.run().then(deferred.resolve, deferred.reject);
+    }
+    return queued.length;
+  };
+  window.__BUZZ_E2E_PROFILE_READS_PENDING__ = () =>
+    deferredProfileReadQueue.length;
   window.__BUZZ_E2E_HOLD_USERS_BATCH__ = (hold: boolean) => {
     holdUsersBatch = hold;
     // Releasing on the way out of the hold, not on the way in, is what lets a
@@ -12610,6 +12665,16 @@ export function maybeInstallE2eTauriMocks() {
         }
       }
       case "get_identity": {
+        const identityReadError = activeConfig?.mock?.identityReadErrorAfter;
+        if (
+          identityReadError &&
+          !identityReadErrorConsumed &&
+          identityReadCount >= identityReadError.successfulReads
+        ) {
+          identityReadErrorConsumed = true;
+          throw new Error(identityReadError.message);
+        }
+        identityReadCount += 1;
         const isLost =
           !mockIdentityLostCleared && activeConfig?.mock?.identityLost === true;
         const isLocked =
@@ -14035,8 +14100,6 @@ export function maybeInstallE2eTauriMocks() {
         return [];
       case "set_agent_managed_profiles":
         return undefined;
-      case "set_thread_scoped_acp_sessions":
-        return undefined;
       case "set_managed_agent_auto_restart":
         return handleSetManagedAgentAutoRestart(
           payload as Parameters<typeof handleSetManagedAgentAutoRestart>[0],
@@ -14246,6 +14309,8 @@ export function maybeInstallE2eTauriMocks() {
         return (config?.mock?.bakedBuildEnv ?? []).map((entry) => entry.key);
       case "agent_access_owner_only":
         return config?.mock?.ownerOnlyAccessBuild ?? false;
+      case "skip_welcome_team_provisioning":
+        return config?.mock?.skipWelcomeTeamProvisioning ?? false;
       case "update_managed_agent":
         return handleUpdateManagedAgent(
           payload as Parameters<typeof handleUpdateManagedAgent>[0],

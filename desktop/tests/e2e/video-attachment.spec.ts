@@ -1611,9 +1611,17 @@ test("playback speed persists across videos and reloads", async ({ page }) => {
         ],
       },
     )) as { id: string };
-    const player = page
-      .locator(`[data-message-id="${emitted.id}"]`)
-      .getByTestId("video-player");
+    const row = page.locator(`[data-message-id="${emitted.id}"]`);
+    const player = row.getByTestId("video-player");
+    // After a reload the virtualizer may not have measured the new row yet, so
+    // the message stays gated behind the "N new message(s)" jump button. Give
+    // the virtualizer a beat to mount the row itself; if the jump pill is up
+    // instead, click it (the app's own jump-to-latest path).
+    await player.waitFor({ state: "visible", timeout: 3_000 }).catch(() => {});
+    const jump = page.getByTestId("message-scroll-to-latest");
+    if (await jump.isVisible()) {
+      await jump.click();
+    }
     await expect(player).toBeVisible();
     await player.getByRole("button", { name: "Play video" }).click();
     return player;
@@ -1625,6 +1633,9 @@ test("playback speed persists across videos and reloads", async ({ page }) => {
     VIDEO_SHA,
     "launch-demo.mp4",
   );
+  // Inline controls are opacity-0 until the player is hovered
+  // (group-hover/video) — hover first so the button is visible/stable.
+  await firstPlayer.hover();
   const firstSpeedButton = firstPlayer.getByTestId("video-inline-speed");
   await expect(firstSpeedButton).toHaveText("1x");
   await firstSpeedButton.click();

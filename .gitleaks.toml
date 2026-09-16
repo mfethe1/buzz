@@ -6,10 +6,11 @@
 useDefault = true
 
 [allowlist]
-description = "Synthetic APNs test fixtures used by buzz-push-gateway unit tests"
+description = "Synthetic test fixtures: APNs PEMs (buzz-push-gateway) + nostr handoff test vectors (workflowFormTypes.test.mjs, upstream block/buzz)"
 paths = [
   '''crates/buzz-push-gateway/tests/fixtures/apns-test-encrypted-identity\.pem''',
   '''crates/buzz-push-gateway/tests/fixtures/apns-test-key-only\.pem''',
   '''crates/buzz-push-gateway/tests/fixtures/apns-test-identity\.pem''',
   '''crates/buzz-push-gateway/tests/fixtures/apns-test-mismatched-identity\.pem''',
+  '''desktop/src/features/workflows/ui/workflowFormTypes\.test\.mjs''',
 ]
