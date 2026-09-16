@@ -409,8 +409,18 @@ for (const surface of ["agents", "members"] as const) {
       }
       return calls;
     }, keys);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toEqual(expect.arrayContaining(keys));
+    // A surface may host multiple presence observers (sidebar rows plus the
+    // members popover) whose key sets include additional channel members, so
+    // invalidateQueries can fan out to more than one call. The guarantee under
+    // test is that no observer issues a partial per-row request: every call
+    // touching our keys must cover all of them.
+    const touching = calls.filter((call) =>
+      call.some((key) => keys.includes(key)),
+    );
+    expect(touching.length).toBeGreaterThan(0);
+    for (const call of touching) {
+      expect(call).toEqual(expect.arrayContaining(keys));
+    }
     await expect
       .poll(() =>
         page.evaluate(() =>

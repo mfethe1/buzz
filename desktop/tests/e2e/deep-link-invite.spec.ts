@@ -113,14 +113,15 @@ test("connect deep link shows a static acknowledgment during setup", async ({
 test("add-community deep link starts onboarding when no community is configured", async ({
   page,
 }) => {
-  // profileReadError forces the fallback path (error → profile step), so the
-  // test asserts pre-existing-profile behavior without the default mock
-  // identity's has_profile_event:true triggering the skip.
+  // profileHasEvent:false forces the no-profile path with a *successful*
+  // fetch. A read error no longer falls through to the profile step since #49
+  // (fetch errors render a retryable error instead), so the test must use the
+  // clean "no kind:0 on the relay" shape to assert profile-step onboarding.
   await installMockBridge(
     page,
     {
       pendingCommunityDeepLinks: [PENDING_ADD_COMMUNITY_LINK],
-      profileReadError: "no-kind-0",
+      profileHasEvent: false,
     },
     { skipCommunitySeed: true },
   );

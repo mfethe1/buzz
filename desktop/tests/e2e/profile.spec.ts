@@ -1917,7 +1917,12 @@ test("an older agent message stays exact while persona navigation selects the li
   await page.goto("/");
 
   await page.getByTestId("open-agents-view").click();
-  await page.getByTestId(`persona-agent-row-${personaId}`).click();
+  // Two live instances under one persona split into per-name cards keyed
+  // `<personaId>::<foldedName>`; the running "Current" instance is the profile
+  // target this test navigates to (it asserts Stop on the primary action).
+  await page
+    .getByTestId(`persona-agent-row-${personaId}::current parity agent`)
+    .click();
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
   ).toHaveAttribute("aria-label", "Stop");
