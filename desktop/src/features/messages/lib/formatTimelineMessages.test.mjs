@@ -14,6 +14,7 @@ import {
   CHANNEL_TIMELINE_CONTENT_KINDS,
   KIND_HUDDLE_ENDED,
   KIND_HUDDLE_STARTED,
+  KIND_VOICE_NOTE_TRANSCRIPT,
 } from "@/shared/constants/kinds";
 
 const HEX64_A =
@@ -772,4 +773,89 @@ test("verified agent owner may publish a suppression edit", () => {
     message.tags.some((tag) => tag[0] === "link-preview"),
     true,
   );
+});
+
+// --- voice-note transcripts (kind:40009 overlays) ---------------------------
+
+const CHANNEL = { id: CHANNEL_ID };
+
+function transcriptEvent(overrides = {}) {
+  return {
+    id: HEX64_B,
+    pubkey: PUBKEY_B,
+    kind: 40009,
+    created_at: 1_700_000_100,
+    content: "spoken words",
+    tags: [
+      ["e", HEX64_A, "", "mention"],
+      ["h", CHANNEL_ID],
+    ],
+    sig: "sig",
+    ...overrides,
+  };
+}
+
+test("a transcript overlay attaches to the voice note it anchors", () => {
+  const [message] = formatTimelineMessages(
+    [streamMessage(), transcriptEvent()],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  assert.equal(message.transcript.text, "spoken words");
+  assert.equal(message.transcript.pubkey, PUBKEY_B);
+});
+
+test("the transcript event does not itself render as a timeline row", () => {
+  const out = formatTimelineMessages(
+    [streamMessage(), transcriptEvent()],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  assert.equal(out.length, 1);
+  assert.equal(out[0].id, HEX64_A);
+});
+
+test("a message with no transcript leaves the field absent", () => {
+  const [message] = formatTimelineMessages(
+    [streamMessage()],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  assert.equal(message.transcript, undefined);
+});
+
+test("a transcript scoped to another channel is not attached", () => {
+  const [message] = formatTimelineMessages(
+    [
+      streamMessage(),
+      transcriptEvent({
+        tags: [
+          ["e", HEX64_A, "", "mention"],
+          ["h", "00000000-0000-0000-0000-000000000000"],
+        ],
+      }),
+    ],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  assert.equal(message.transcript, undefined);
+});
+
+test("the resolver's hardcoded kind matches the shared constant", () => {
+  // voiceNoteTranscript.mjs cannot import the .ts constant (no TS loader under
+  // node:test), so this pins the literal against the single source of truth.
+  assert.equal(KIND_VOICE_NOTE_TRANSCRIPT, 40009);
+  assert.equal(transcriptEvent().kind, KIND_VOICE_NOTE_TRANSCRIPT);
+});
+
+test("transcripts are an aux overlay kind, never a timeline row kind", () => {
+  assert.ok(CHANNEL_AUX_EVENT_KINDS.includes(KIND_VOICE_NOTE_TRANSCRIPT));
+  assert.ok(
+    !CHANNEL_TIMELINE_CONTENT_KINDS.includes(KIND_VOICE_NOTE_TRANSCRIPT),
+  );
+  assert.equal(isTimelineContentEvent(transcriptEvent()), false);
 });

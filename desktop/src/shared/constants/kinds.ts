@@ -21,6 +21,8 @@ export const KIND_STREAM_MESSAGE_EDIT = 40003;
 export const KIND_CHANNEL_THREAD_SUMMARY = 39005;
 export const KIND_CHANNEL_WINDOW_BOUNDS = 39006;
 export const KIND_STREAM_MESSAGE_DIFF = 40008;
+/** Voice-note transcript overlay: attaches to an existing voice note by `e` tag. */
+export const KIND_VOICE_NOTE_TRANSCRIPT = 40009;
 export const KIND_REMINDER = 40007;
 export const KIND_SYSTEM_MESSAGE = 40099;
 export const KIND_JOB_REQUEST = 43001;
@@ -116,6 +118,7 @@ export const CHANNEL_EVENT_KINDS = [
   40001, // legacy: pre-migration stream messages
   KIND_STREAM_MESSAGE_EDIT, // 40003 — message edits
   KIND_STREAM_MESSAGE_DIFF, // 40008 — message diffs
+  KIND_VOICE_NOTE_TRANSCRIPT, // 40009 — voice-note transcript overlays
   KIND_SYSTEM_MESSAGE, // 40099 — system messages (join, leave, etc.)
   KIND_HUDDLE_STARTED, // 48100 — visible huddle session card
   KIND_HUDDLE_PARTICIPANT_JOINED, // 48101 — huddle lifecycle overlay
@@ -142,6 +145,7 @@ export const CHANNEL_AUX_EVENT_KINDS = [
   KIND_REACTION, // 7 — NIP-25 reactions
   KIND_NIP29_DELETE_EVENT, // 9005 — NIP-29 / Buzz-native deletions
   KIND_STREAM_MESSAGE_EDIT, // 40003 — message edits
+  KIND_VOICE_NOTE_TRANSCRIPT, // 40009 — voice-note transcripts (overlay a note)
 ] as const;
 
 // Visible content kinds the main timeline renders as their own rows. Mirrors

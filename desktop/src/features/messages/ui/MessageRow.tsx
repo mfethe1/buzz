@@ -57,6 +57,7 @@ import {
 } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { SentFromThreadLine } from "./SentFromThreadLine";
+import { VoiceNoteTranscript } from "./VoiceNoteTranscript";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useMessageAgentAddressPrefix } from "./MessageAgentAddressPrefix";
@@ -687,6 +688,9 @@ export const MessageRow = React.memo(
       <>
         <SentFromThreadLine channelId={channelId} tags={message.tags} />
         {renderBody()}
+        {message.transcript ? (
+          <VoiceNoteTranscript text={message.transcript.text} />
+        ) : null}
         {continuationMetadataNode}
         <MessageReactions
           messageId={message.id}
@@ -956,6 +960,11 @@ export const MessageRow = React.memo(
     prev.message.kind === next.message.kind &&
     prev.message.pending === next.message.pending &&
     prev.message.edited === next.message.edited &&
+    // A transcript arrives as a *separate* event after the voice note is
+    // already rendered; without this the memo would swallow the update and the
+    // affordance would only appear on a full remount.
+    prev.message.transcript?.id === next.message.transcript?.id &&
+    prev.message.transcript?.text === next.message.transcript?.text &&
     // Value comparisons, not identity: these arrays are rebuilt with fresh
     // identities on every ingest/refetch even when unchanged — identity
     // checks made every row re-render on every streamed event in an open
