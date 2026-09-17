@@ -14,9 +14,8 @@
 -- write path, not here, exactly as the icon's URL validation lives at that
 -- write path rather than in a CHECK constraint.
 --
--- Numbering note: product/main now owns 0035_task_system and the sibling
--- channel-write-policy branch owns 0036, so this file takes 0037 rather than
--- colliding. Migrations are content-addressed by checksum, so the branch-local
--- features are independent and order-insensitive.
+-- Numbering note: renumbered from 0037 to 0048 — 0037 is upstream-owned
+-- (relay_admin_action_lease). Migrations are content-addressed by checksum, so
+-- these branch-local features are independent and order-insensitive.
 
 ALTER TABLE communities ADD COLUMN brand_color TEXT;

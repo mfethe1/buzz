@@ -58,7 +58,7 @@ CREATE TABLE communities (
     -- Added by migration 0003; kept here so desired-state applies match.
     icon            TEXT,
     -- Per-community brand color (`#rrggbb`), set via the same kind:9033
-    -- workspace-profile command. Added by migration 0037; kept here so
+    -- workspace-profile command. Added by migration 0048; kept here so
     -- desired-state applies match.
     brand_color     TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
