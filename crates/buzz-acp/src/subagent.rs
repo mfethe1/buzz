@@ -508,6 +508,28 @@ mod tests {
         assert!(tracker.take_completed().is_empty());
     }
 
+    /// One delegation owes exactly one delivery. Identity is the `toolCallId`,
+    /// so a second retirement of the SAME call is suppressed even if its
+    /// payload differs (e.g. a late frame carrying a different summary) —
+    /// a whole-value compare would let that through as a second report.
+    #[test]
+    fn same_call_retired_twice_delivers_once_even_if_payload_differs() {
+        let mut tracker = SubagentTracker::new();
+        let entry = |summary: &str| CompletedSubagent {
+            tool_call_id: "t1".into(),
+            name: "worker".into(),
+            status: "complete",
+            summary: Some(summary.into()),
+            origin: None,
+        };
+        tracker.push_completed(entry("first"));
+        tracker.push_completed(entry("revised"));
+
+        let done = tracker.take_completed();
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].summary.as_deref(), Some("first"));
+    }
+
     /// Two delegations to the SAME subagent, spawned concurrently from the same
     /// thread, both finishing with no summary, are value-identical as pending
     /// entries — but they are two real results and both are owed to the author.
