@@ -845,9 +845,9 @@ test("a transcript scoped to another channel is not attached", () => {
   assert.equal(message.transcript, undefined);
 });
 
-test("the resolver's hardcoded kind matches the shared constant", () => {
-  // voiceNoteTranscript.mjs cannot import the .ts constant (no TS loader under
-  // node:test), so this pins the literal against the single source of truth.
+test("the resolver filters on the shared kind constant", () => {
+  // The resolver imports KIND_VOICE_NOTE_TRANSCRIPT rather than hardcoding the
+  // number; this pins the constant's value so a renumber is a loud failure.
   assert.equal(KIND_VOICE_NOTE_TRANSCRIPT, 40009);
   assert.equal(transcriptEvent().kind, KIND_VOICE_NOTE_TRANSCRIPT);
 });
