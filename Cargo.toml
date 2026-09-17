@@ -30,6 +30,7 @@ members = [
     "crates/buzz-dev-mcp",
     "crates/buzz-voice",
     "crates/buzz-backend-kubernetes",
+    "crates/buzz-budget",
     "crates/buzz-datastore-tracing",
     "examples/countdown-bot",
 ]
