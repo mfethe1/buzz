@@ -13,11 +13,18 @@
  * by `created_at`, ties broken by the lexicographically smallest event id so
  * every client converges on the same transcript regardless of arrival order.
  *
- * Runtime lives in `.mjs` so the (TS-loader-less) `node:test` runner imports the
- * same source production uses; `voiceNoteTranscript.d.mts` types it for callers.
+ * Runtime lives in `.mjs` so the `node:test` runner imports the same source
+ * production uses; `voiceNoteTranscript.d.mts` types it for callers.
  */
 
-/** Matches the sanitisation ceiling applied by the publisher. */
+import { KIND_VOICE_NOTE_TRANSCRIPT } from "../../../shared/constants/kinds.ts";
+
+/**
+ * Defensive read-side ceiling on rendered transcript text. There is no
+ * first-party publisher yet, so this cannot be described as "matching" one: a
+ * transcript is an event signed by an arbitrary transcriber, and the renderer
+ * is responsible for bounding what an unbounded `content` can do to a row.
+ */
 export const MAX_TRANSCRIPT_LENGTH = 8000;
 
 const ANCHOR_MARKER = "mention";
@@ -80,7 +87,7 @@ export function resolveVoiceNoteTranscripts(events, voiceNoteChannel) {
   if (!Array.isArray(events)) return winners;
 
   for (const event of events) {
-    if (event?.kind !== 40009) continue;
+    if (event?.kind !== KIND_VOICE_NOTE_TRANSCRIPT) continue;
     if (typeof event.id !== "string" || !event.id) continue;
     if (
       typeof event.created_at !== "number" ||
