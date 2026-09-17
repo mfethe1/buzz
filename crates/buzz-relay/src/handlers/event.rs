@@ -1218,6 +1218,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::AtomicU8;
     use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
 
     use buzz_core::kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST,
@@ -1523,7 +1524,7 @@ mod tests {
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
-                auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
+                auth_state: StdMutex::new(crate::connection::AuthState::Authenticated(
                     buzz_auth::AuthContext {
                         pubkey: keys.public_key(),
                         scopes: vec![],
@@ -1668,7 +1669,7 @@ mod tests {
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
-                auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
+                auth_state: StdMutex::new(crate::connection::AuthState::Authenticated(
                     buzz_auth::AuthContext {
                         pubkey: keys.public_key(),
                         scopes: vec![],

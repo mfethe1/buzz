@@ -7731,6 +7731,7 @@ done"#
                     },
                 )]),
                 RestClient {
+                    auth_base_url: None,
                     http: reqwest::Client::new(),
                     base_url: base_url.clone(),
                     keys: agent_keys.clone(),
