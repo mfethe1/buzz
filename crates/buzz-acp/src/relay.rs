@@ -251,6 +251,11 @@ pub(crate) fn merge_discovered_channels(
 pub struct RestClient {
     pub http: reqwest::Client,
     pub base_url: String,
+    /// URL used when signing NIP-98 events. When the client dials a local
+    /// tunnel (base_url) that fronts the canonical relay host, the relay
+    /// verifies auth against its canonical URL — set from BUZZ_AUTH_RELAY_URL.
+    /// When unset, defaults to base_url (unchanged behavior).
+    pub auth_base_url: Option<String>,
     pub keys: Keys,
     /// Optional NIP-OA auth tag JSON for `x-auth-tag` header (relay membership delegation).
     pub auth_tag_json: Option<String>,
@@ -529,13 +534,19 @@ impl RestClient {
         retry: bool,
     ) -> Result<reqwest::Response, RelayError> {
         let url = format!("{}{}", self.base_url, path);
+        // NIP-98 signature must cover the canonical relay URL when an auth
+        // override is configured (tunnel fronting), not the dial URL.
+        let sign_url = match &self.auth_base_url {
+            Some(auth_base) => format!("{}{}", auth_base, path),
+            None => url.clone(),
+        };
         let body_owned = body_bytes.to_vec();
         let auth_tag_header = self.auth_tag_json.clone();
         let build = || {
             // NIP-98 is re-signed each attempt (fresh created_at).
             // sign_nip98 is infallible in practice (key is always valid).
             let auth = self
-                .nip98_header("POST", &url, Some(&body_owned))
+                .nip98_header("POST", &sign_url, Some(&body_owned))
                 .unwrap_or_default();
             let mut req = self
                 .http
@@ -979,7 +990,13 @@ impl HarnessRelay {
     /// The returned client is cheap to clone (wraps `reqwest::Client` which is
     /// internally `Arc`-ed) and safe to share across spawned tasks via `Arc`.
     pub fn rest_client(&self) -> RestClient {
+        // BUZZ_AUTH_RELAY_URL (if set) is the canonical URL NIP-98 auth must
+        // sign, while HTTP requests still dial base_url (tunnel fronting).
+        let auth_base_url = std::env::var("BUZZ_AUTH_RELAY_URL")
+            .ok()
+            .map(|u| relay_ws_to_http(&u));
         RestClient {
+            auth_base_url,
             http: self.http.clone(),
             base_url: relay_ws_to_http(&self.relay_url),
             keys: self.keys.clone(),
@@ -3741,13 +3758,20 @@ async fn send_auth_response(
     keys: &Keys,
     auth_tag: Option<&nostr::Tag>,
 ) -> Result<(), RelayError> {
-    let relay_nostr_url = RelayUrl::parse(relay_url)
+    // NIP-42 AUTH relay tag override: when the agent dials a local tunnel
+    // (e.g. ws://127.0.0.1:PORT) that fronts the canonical relay host, the
+    // relay still verifies the AUTH tag against its canonical URL. Setting
+    // BUZZ_AUTH_RELAY_URL signs that URL instead of the dial URL. Falls back
+    // to the dial URL (default, unchanged behavior).
+    let auth_relay_url = std::env::var("BUZZ_AUTH_RELAY_URL")
+        .unwrap_or_else(|_| relay_url.to_string());
+    let relay_nostr_url = RelayUrl::parse(&auth_relay_url)
         .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
 
     let auth_event = if let Some(tag) = auth_tag {
         // Cannot use EventBuilder::auth() shortcut — it doesn't accept extra tags.
         let tags = vec![
-            nostr::Tag::parse(["relay", relay_url])
+            nostr::Tag::parse(["relay", auth_relay_url.as_str()])
                 .map_err(|e| RelayError::Http(format!("tag parse error: {e}")))?,
             nostr::Tag::parse(["challenge", challenge])
                 .map_err(|e| RelayError::Http(format!("tag parse error: {e}")))?,
@@ -4355,6 +4379,7 @@ mod tests {
             }
         });
         let client = RestClient {
+            auth_base_url: None,
             http: reqwest::Client::new(),
             base_url,
             keys: Keys::generate(),

@@ -526,6 +526,11 @@ pub struct BuzzClient {
     auth_tag: Option<Tag>,
     /// Raw JSON of the auth tag for the `x-auth-tag` HTTP header.
     auth_tag_json: Option<String>,
+    /// Canonical relay base URL used for NIP-98 `u` tags when the dialed base
+    /// URL differs — e.g. a local tunnel (`http://127.0.0.1:18456`) fronting
+    /// the canonical relay host. Loaded from `BUZZ_AUTH_RELAY_URL`; when unset
+    /// (the normal case) signatures use the dialed URL unchanged.
+    auth_relay_url: Option<String>,
 }
 
 impl BuzzClient {
@@ -555,7 +560,28 @@ impl BuzzClient {
             keys,
             auth_tag,
             auth_tag_json,
+            auth_relay_url: std::env::var("BUZZ_AUTH_RELAY_URL")
+                .ok()
+                .map(|v| normalize_relay_url(&v))
+                .filter(|v| !v.is_empty()),
         })
+    }
+
+    /// Rewrite a dialed URL to the canonical signing URL when
+    /// `BUZZ_AUTH_RELAY_URL` is set: swaps the relay base for the canonical
+    /// base, keeping path and query. No-op when the URL does not start with
+    /// the dialed base.
+    fn authed_url_for(&self, dialed: &str) -> String {
+        match &self.auth_relay_url {
+            Some(base) => {
+                if let Some(rest) = dialed.strip_prefix(&self.relay_url) {
+                    format!("{base}{rest}")
+                } else {
+                    dialed.to_string()
+                }
+            }
+            None => dialed.to_string(),
+        }
     }
 
     /// Get the keypair.
@@ -801,7 +827,7 @@ impl BuzzClient {
             let body = body.clone();
             let url = url.clone();
             async move {
-                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+                let auth = sign_nip98(&self.keys, "POST", &self.authed_url_for(&url), Some(&body))?;
                 let resp = self
                     .with_auth_tag(
                         self.http
@@ -831,7 +857,7 @@ impl BuzzClient {
             let body = body.clone();
             let url = url.clone();
             async move {
-                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+                let auth = sign_nip98(&self.keys, "POST", &self.authed_url_for(&url), Some(&body))?;
                 let resp = self
                     .with_auth_tag(
                         self.http
@@ -859,7 +885,7 @@ impl BuzzClient {
         self.with_retry_body(|| {
             let url = url.clone();
             async move {
-                let auth = sign_nip98(&self.keys, "GET", &url, None)?;
+                let auth = sign_nip98(&self.keys, "GET", &self.authed_url_for(&url), None)?;
                 let resp = self
                     .with_auth_tag(self.http.get(&url).header("Authorization", auth))
                     .send()
@@ -881,7 +907,7 @@ impl BuzzClient {
             serde_json::to_vec(value)
                 .map_err(|e| CliError::Other(format!("JSON serialization failed: {e}")))?,
         );
-        let auth = sign_nip98(&self.keys, method.as_str(), &url, Some(&body))?;
+        let auth = sign_nip98(&self.keys, method.as_str(), &self.authed_url_for(&url), Some(&body))?;
         let request = self
             .http
             .request(method, &url)
@@ -932,7 +958,7 @@ impl BuzzClient {
             let body_bytes = body_bytes.clone();
             let url = url.clone();
             async move {
-                let auth = sign_nip98(&self.keys, "POST", &url, Some(&body_bytes))?;
+                let auth = sign_nip98(&self.keys, "POST", &self.authed_url_for(&url), Some(&body_bytes))?;
                 let resp = self
                     .with_auth_tag(
                         self.http
@@ -963,7 +989,7 @@ impl BuzzClient {
     ) -> Result<String, CliError> {
         let url = format!("{}{path}", self.relay_url);
         let body = serde_json::to_vec(body).map_err(|e| CliError::Other(e.to_string()))?;
-        let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+        let auth = sign_nip98(&self.keys, "POST", &self.authed_url_for(&url), Some(&body))?;
         let unknown = |detail: String| CliError::DeliveryUnknown(detail);
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -1037,7 +1063,7 @@ impl BuzzClient {
 
             // Re-sign NIP-98 each attempt: the nonce tag generates a fresh
             // event ID, keeping retries safe against the relay's replay guard.
-            let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+            let auth = sign_nip98(&self.keys, "POST", &self.authed_url_for(&url), Some(&body))?;
             let send_result: Result<reqwest::Response, CliError> = self
                 .with_auth_tag(
                     self.http
@@ -1189,7 +1215,7 @@ impl BuzzClient {
                 async move {
                     // Re-sign NIP-98 each attempt: the nonce tag generates a fresh
                     // event ID, keeping retries safe against the relay's replay guard.
-                    let auth = sign_nip98(&self.keys, "POST", &url, Some(&body))?;
+                    let auth = sign_nip98(&self.keys, "POST", &self.authed_url_for(&url), Some(&body))?;
                     let resp = self
                         .with_auth_tag(
                             self.http

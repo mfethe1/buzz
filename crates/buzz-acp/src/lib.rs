@@ -6794,6 +6794,7 @@ mod workflow_owner_tests {
     async fn relay_identity_refresh_keeps_last_good_key_after_fetch_error() {
         let previous = Keys::generate().public_key().to_hex();
         let client = relay::RestClient {
+            auth_base_url: None,
             http: reqwest::Client::new(),
             base_url: "http://127.0.0.1:0".into(),
             keys: Keys::generate(),
@@ -7067,6 +7068,7 @@ mod author_gate_tests {
     /// this client is never actually used to make a request.
     fn dummy_rest_client() -> relay::RestClient {
         relay::RestClient {
+            auth_base_url: None,
             http: reqwest::Client::new(),
             base_url: "http://localhost:0".into(),
             keys: nostr::Keys::generate(),
@@ -7147,6 +7149,7 @@ mod author_gate_tests {
             }
         });
         let rest = relay::RestClient {
+            auth_base_url: None,
             http: reqwest::Client::new(),
             base_url,
             keys: nostr::Keys::generate(),
@@ -7643,6 +7646,7 @@ mod author_gate_tests {
 
         // Construct against an unreachable relay: no identity yet.
         let unreachable = relay::RestClient {
+            auth_base_url: None,
             http: reqwest::Client::new(),
             base_url: "http://127.0.0.1:1".into(),
             keys: nostr::Keys::generate(),
@@ -8333,6 +8337,7 @@ mod author_gate_tests {
             }
         });
         let rest = relay::RestClient {
+            auth_base_url: None,
             http: reqwest::Client::new(),
             base_url,
             keys: nostr::Keys::generate(),
@@ -11384,6 +11389,7 @@ mod error_outcome_emission_tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let rest = relay::RestClient {
+            auth_base_url: None,
             http: reqwest::Client::new(),
             base_url: format!("http://{}", listener.local_addr().unwrap()),
             keys: Keys::generate(),
