@@ -5970,6 +5970,7 @@ mod tests {
         summary: Option<&str>,
     ) -> crate::subagent::CompletedSubagent {
         crate::subagent::CompletedSubagent {
+            tool_call_id: "tool-call-1".to_string(),
             name: "reviewer".to_string(),
             status,
             summary: summary.map(str::to_string),
