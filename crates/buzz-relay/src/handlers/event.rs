@@ -632,8 +632,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     .increment(1);
 
     let (conn_id, pubkey_bytes, auth_pubkey, scopes, channel_ids) = {
-        let auth = conn.auth_state.read().await;
-        match &*auth {
+        match conn.auth_state_snapshot() {
             AuthState::Authenticated(ctx) => (
                 conn.conn_id,
                 ctx.pubkey.to_bytes().to_vec(),
@@ -1059,8 +1058,7 @@ async fn handle_agent_observer_event(
     // Fast path: if this connection authenticated via NIP-OA and the verified
     // owner matches the observer frame's target owner, skip the DB lookup entirely.
     let session_owner_match = {
-        let auth = conn.auth_state.read().await;
-        if let crate::connection::AuthState::Authenticated(ctx) = &*auth {
+        if let crate::connection::AuthState::Authenticated(ctx) = conn.auth_state_snapshot() {
             ctx.agent_owner_pubkey.as_ref() == Some(&route.owner)
         } else {
             false
@@ -1220,6 +1218,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::AtomicU8;
     use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
 
     use buzz_core::kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST,
@@ -1230,7 +1229,7 @@ mod tests {
         OBSERVER_FRAME_TELEMETRY,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
-    use tokio::sync::{mpsc, Mutex, RwLock};
+    use tokio::sync::{mpsc, Mutex};
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
@@ -1447,7 +1446,7 @@ mod tests {
             conn_id: Uuid::new_v4(),
             tenant: buzz_core::TenantContext::resolved(community_b, "b.example"),
             remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
-            auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
+            auth_state: std::sync::Mutex::new(crate::connection::AuthState::Authenticated(
                 buzz_auth::AuthContext {
                     pubkey: agent.public_key(),
                     scopes: vec![],
@@ -1525,7 +1524,7 @@ mod tests {
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
-                auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
+                auth_state: StdMutex::new(crate::connection::AuthState::Authenticated(
                     buzz_auth::AuthContext {
                         pubkey: keys.public_key(),
                         scopes: vec![],
@@ -1670,7 +1669,7 @@ mod tests {
                 conn_id: Uuid::new_v4(),
                 tenant: tenant.clone(),
                 remote_addr: "127.0.0.1:1234".parse().unwrap(),
-                auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
+                auth_state: StdMutex::new(crate::connection::AuthState::Authenticated(
                     buzz_auth::AuthContext {
                         pubkey: keys.public_key(),
                         scopes: vec![],

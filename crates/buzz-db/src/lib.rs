@@ -34,8 +34,8 @@ mod test_support;
 pub mod task;
 
 pub use runtime::{
-    insert_mentions, migration, replica_fence, Db, DbConfig, DbPoolStats, DbReadinessOutcome,
-    ReadSession,
+    insert_mentions, migration, replica_fence, Db, DbConfig, DbPoolRole, DbPoolStats,
+    DbReadinessOutcome, ReadSession,
 };
 
 /// Valid low-cardinality `(pool_role, operation)` pairs for pool-acquisition telemetry.
