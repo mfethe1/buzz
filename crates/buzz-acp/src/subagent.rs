@@ -61,6 +61,11 @@ pub(crate) struct DelegationOrigin {
 /// A delegation that reached a terminal status and has not been delivered yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompletedSubagent {
+    /// ACP `toolCallId` that produced this result. Unique per delegation, so it
+    /// is the identity used to suppress re-emitted terminal frames — two
+    /// concurrent delegations to the same subagent are value-identical but are
+    /// two distinct results, and both are owed to the waiting author.
+    pub tool_call_id: String,
     /// Display name of the subagent.
     pub name: String,
     /// Terminal status: `complete` or `failed`.
@@ -118,11 +123,17 @@ impl SubagentTracker {
 
     /// Retire a terminal delegation into the pending-delivery buffer.
     ///
-    /// Duplicate guard: an identical pending entry is not pushed twice, so a
-    /// re-emitted terminal update cannot produce two deliveries of the same
-    /// report.
+    /// Duplicate guard keys on `tool_call_id`, not on the whole value: a
+    /// re-emitted terminal frame for the same call must not deliver twice,
+    /// while two *different* calls that happen to look identical (same
+    /// subagent, same thread, both summary-less) are two real results and must
+    /// both be delivered.
     fn push_completed(&mut self, entry: CompletedSubagent) {
-        if self.completed.contains(&entry) {
+        if self
+            .completed
+            .iter()
+            .any(|e| e.tool_call_id == entry.tool_call_id)
+        {
             return;
         }
         if self.completed.len() >= MAX_PENDING_DELIVERIES {
@@ -184,6 +195,7 @@ impl SubagentTracker {
                 let retired = self.tasks.remove(tool_call_id)?;
                 let summary = extract_summary(update);
                 self.push_completed(CompletedSubagent {
+                    tool_call_id: tool_call_id.to_string(),
                     name: name.clone(),
                     status: "complete",
                     summary: summary.clone(),
@@ -195,6 +207,7 @@ impl SubagentTracker {
                 let retired = self.tasks.remove(tool_call_id)?;
                 let summary = extract_summary(update);
                 self.push_completed(CompletedSubagent {
+                    tool_call_id: tool_call_id.to_string(),
                     name: name.clone(),
                     status: "failed",
                     summary: summary.clone(),
@@ -493,6 +506,73 @@ mod tests {
             .observe_update(&tool_call_update("ghost", "completed"))
             .is_none());
         assert!(tracker.take_completed().is_empty());
+    }
+
+    /// Two delegations to the SAME subagent, spawned concurrently from the same
+    /// thread, both finishing with no summary, are value-identical as pending
+    /// entries — but they are two real results and both are owed to the author.
+    #[test]
+    fn concurrent_identical_delegations_both_deliver() {
+        let mut tracker = SubagentTracker::new();
+        tracker.set_origin(Some(origin("chan-a")));
+        spawn(&mut tracker, "t1", "worker");
+        spawn(&mut tracker, "t2", "worker");
+        tracker.observe_update(&tool_call_update("t1", "completed"));
+        tracker.observe_update(&tool_call_update("t2", "completed"));
+
+        assert_eq!(tracker.take_completed().len(), 2);
+    }
+
+    /// Malformed terminal frame: `toolCallId` present but the status field is
+    /// absent/garbage. Must not retire the task nor queue a delivery.
+    #[test]
+    fn malformed_terminal_update_neither_retires_nor_delivers() {
+        let mut tracker = SubagentTracker::new();
+        tracker.set_origin(Some(origin("chan-a")));
+        spawn(&mut tracker, "t1", "worker");
+
+        assert!(tracker
+            .observe_update(&json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "t1",
+                "status": "not-a-real-status",
+            }))
+            .is_none());
+        assert!(tracker.take_completed().is_empty());
+
+        // The task survived, so the real completion still delivers.
+        tracker.observe_update(&tool_call_update("t1", "completed"));
+        assert_eq!(tracker.take_completed().len(), 1);
+    }
+
+    /// Offline/timeout shape: a delegation that never reaches a terminal frame
+    /// stays pending forever rather than being invented as a result.
+    #[test]
+    fn delegation_that_never_finishes_delivers_nothing() {
+        let mut tracker = SubagentTracker::new();
+        tracker.set_origin(Some(origin("chan-a")));
+        spawn(&mut tracker, "t1", "worker");
+        tracker.observe_update(&tool_call_update("t1", "in_progress"));
+
+        assert!(tracker.take_completed().is_empty());
+    }
+
+    /// Routing denial: results are stamped with the thread that spawned them,
+    /// so a result from another channel is never attributed to this one.
+    #[test]
+    fn results_from_different_threads_keep_their_own_origins() {
+        let mut tracker = SubagentTracker::new();
+        tracker.set_origin(Some(origin("chan-a")));
+        spawn(&mut tracker, "t1", "worker");
+        tracker.set_origin(Some(origin("chan-b")));
+        spawn(&mut tracker, "t2", "worker");
+        tracker.observe_update(&tool_call_update("t1", "completed"));
+        tracker.observe_update(&tool_call_update("t2", "completed"));
+
+        let done = tracker.take_completed();
+        assert_eq!(done.len(), 2);
+        assert_eq!(done[0].origin, Some(origin("chan-a")));
+        assert_eq!(done[1].origin, Some(origin("chan-b")));
     }
 
     #[test]
