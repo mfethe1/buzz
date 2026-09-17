@@ -7611,6 +7611,10 @@ done"#
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        windows,
+        ignore = "fixture spawns a POSIX bash script; bash is not reliable on Windows runners (upstream never runs buzz-acp tests on Windows)"
+    )]
     async fn hydrated_thread_prompt_omits_agent_reply_but_keeps_new_human_context() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
