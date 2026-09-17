@@ -907,7 +907,12 @@ impl BuzzClient {
             serde_json::to_vec(value)
                 .map_err(|e| CliError::Other(format!("JSON serialization failed: {e}")))?,
         );
-        let auth = sign_nip98(&self.keys, method.as_str(), &self.authed_url_for(&url), Some(&body))?;
+        let auth = sign_nip98(
+            &self.keys,
+            method.as_str(),
+            &self.authed_url_for(&url),
+            Some(&body),
+        )?;
         let request = self
             .http
             .request(method, &url)
@@ -958,7 +963,12 @@ impl BuzzClient {
             let body_bytes = body_bytes.clone();
             let url = url.clone();
             async move {
-                let auth = sign_nip98(&self.keys, "POST", &self.authed_url_for(&url), Some(&body_bytes))?;
+                let auth = sign_nip98(
+                    &self.keys,
+                    "POST",
+                    &self.authed_url_for(&url),
+                    Some(&body_bytes),
+                )?;
                 let resp = self
                     .with_auth_tag(
                         self.http
@@ -1215,7 +1225,8 @@ impl BuzzClient {
                 async move {
                     // Re-sign NIP-98 each attempt: the nonce tag generates a fresh
                     // event ID, keeping retries safe against the relay's replay guard.
-                    let auth = sign_nip98(&self.keys, "POST", &self.authed_url_for(&url), Some(&body))?;
+                    let auth =
+                        sign_nip98(&self.keys, "POST", &self.authed_url_for(&url), Some(&body))?;
                     let resp = self
                         .with_auth_tag(
                             self.http

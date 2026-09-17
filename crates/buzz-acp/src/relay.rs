@@ -3763,8 +3763,8 @@ async fn send_auth_response(
     // relay still verifies the AUTH tag against its canonical URL. Setting
     // BUZZ_AUTH_RELAY_URL signs that URL instead of the dial URL. Falls back
     // to the dial URL (default, unchanged behavior).
-    let auth_relay_url = std::env::var("BUZZ_AUTH_RELAY_URL")
-        .unwrap_or_else(|_| relay_url.to_string());
+    let auth_relay_url =
+        std::env::var("BUZZ_AUTH_RELAY_URL").unwrap_or_else(|_| relay_url.to_string());
     let relay_nostr_url = RelayUrl::parse(&auth_relay_url)
         .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
 

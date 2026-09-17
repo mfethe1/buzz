@@ -7944,7 +7944,7 @@ done"#
                 },
             )]),
             RestClient {
-            auth_base_url: None,
+                auth_base_url: None,
                 http: reqwest::Client::new(),
                 base_url,
                 keys: ctx.agent_keys.clone(),
@@ -8116,7 +8116,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 },
             )]),
             RestClient {
-            auth_base_url: None,
+                auth_base_url: None,
                 http: reqwest::Client::new(),
                 base_url,
                 keys: ctx.agent_keys.clone(),
@@ -10464,7 +10464,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             base_prompt: None,
             cwd: ".".to_string(),
             rest_client: RestClient {
-            auth_base_url: None,
+                auth_base_url: None,
                 http: reqwest::Client::new(),
                 base_url: "http://127.0.0.1:0".to_string(),
                 keys: agent_keys.clone(),
@@ -10473,7 +10473,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             channel_info: ChannelInfoResolver::new(
                 std::collections::HashMap::new(),
                 RestClient {
-            auth_base_url: None,
+                    auth_base_url: None,
                     http: reqwest::Client::new(),
                     base_url: "http://127.0.0.1:0".to_string(),
                     keys: agent_keys.clone(),
@@ -11546,7 +11546,7 @@ done"#,
         let resolver = ChannelInfoResolver::new(
             std::collections::HashMap::new(),
             crate::relay::RestClient {
-            auth_base_url: None,
+                auth_base_url: None,
                 http: reqwest::Client::new(),
                 base_url,
                 keys: nostr::Keys::generate(),
@@ -11604,7 +11604,7 @@ done"#,
                 },
             )]),
             crate::relay::RestClient {
-            auth_base_url: None,
+                auth_base_url: None,
                 http: reqwest::Client::new(),
                 base_url,
                 keys: nostr::Keys::generate(),
@@ -11748,7 +11748,7 @@ done"#
                 },
             )]),
             RestClient {
-            auth_base_url: None,
+                auth_base_url: None,
                 http: reqwest::Client::new(),
                 base_url,
                 keys: ctx.agent_keys.clone(),
@@ -11855,7 +11855,7 @@ done"#
                 },
             )]),
             crate::relay::RestClient {
-            auth_base_url: None,
+                auth_base_url: None,
                 http: reqwest::Client::new(),
                 base_url,
                 keys: nostr::Keys::generate(),
@@ -11954,7 +11954,7 @@ done"#
         let resolver = ChannelInfoResolver::new(
             std::collections::HashMap::new(),
             crate::relay::RestClient {
-            auth_base_url: None,
+                auth_base_url: None,
                 http: reqwest::Client::new(),
                 base_url,
                 keys: nostr::Keys::generate(),
