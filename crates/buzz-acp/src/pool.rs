@@ -5746,12 +5746,33 @@ pub(crate) async fn post_delegation_result(
         parent_event_id: origin.parent_event_id.clone(),
         mentioned_pubkeys: Vec::new(),
     };
-    let status = completed.status;
-    let content = match &completed.summary {
-        Some(summary) => format!("Delegation `{}` {status}: {summary}", completed.name),
-        None => format!("Delegation `{}` {status}.", completed.name),
-    };
+    let content = delegation_result_content(completed);
+    // `post_failure_notice` is the shared signed kind:9 thread-post path; its
+    // name reflects its first caller, not a constraint on the content. Reusing
+    // it keeps delivery on the one audited publish path (build → sign → submit,
+    // 5s timeout, errors swallowed) instead of forking a second one.
     post_failure_notice(rest, channel_id, &thread_tags, &content).await;
+}
+
+/// Render the message body for a finished delegation.
+///
+/// Pure so the wording is testable without a relay. The summary goes on its own
+/// paragraph: summaries are multi-line agent reports, and inlining them after a
+/// colon made the status line unreadable in the client.
+pub(crate) fn delegation_result_content(completed: &crate::subagent::CompletedSubagent) -> String {
+    let status = completed.status;
+    let name = &completed.name;
+    // A whitespace-only summary is treated as absent: emitting the header plus
+    // dangling blank lines reads as a rendering bug to the user.
+    match completed
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(summary) => format!("Delegation `{name}` {status}.\n\n{summary}"),
+        None => format!("Delegation `{name}` {status}, with no summary reported."),
+    }
 }
 
 /// Best-effort: remove a reaction via a signed kind:5 (NIP-09) deletion event.
@@ -5942,6 +5963,51 @@ mod tests {
             "an accepted ack has nothing to explain"
         );
         assert_eq!(event.pubkey, keys.public_key());
+    }
+
+    fn completed(
+        status: &'static str,
+        summary: Option<&str>,
+    ) -> crate::subagent::CompletedSubagent {
+        crate::subagent::CompletedSubagent {
+            name: "reviewer".to_string(),
+            status,
+            summary: summary.map(str::to_string),
+            origin: None,
+        }
+    }
+
+    #[test]
+    fn delegation_result_puts_the_summary_on_its_own_paragraph() {
+        // Summaries are multi-line agent reports; inlining them after a colon
+        // made the status line unreadable in the client.
+        let content = delegation_result_content(&completed("complete", Some("line one\nline two")));
+        assert_eq!(
+            content,
+            "Delegation `reviewer` complete.\n\nline one\nline two"
+        );
+    }
+
+    #[test]
+    fn delegation_result_without_a_summary_says_so_rather_than_trailing_off() {
+        // A bare "Delegation `x` failed." reads like the message was truncated;
+        // the absence of a summary is itself information the user needs.
+        let content = delegation_result_content(&completed("failed", None));
+        assert_eq!(
+            content,
+            "Delegation `reviewer` failed, with no summary reported."
+        );
+    }
+
+    #[test]
+    fn delegation_result_treats_a_blank_summary_as_no_summary() {
+        // A Some("   ") from a chatty-but-empty agent must not render as a
+        // header followed by dangling blank lines.
+        let content = delegation_result_content(&completed("complete", Some("  \n ")));
+        assert_eq!(
+            content,
+            "Delegation `reviewer` complete, with no summary reported."
+        );
     }
 
     #[test]
