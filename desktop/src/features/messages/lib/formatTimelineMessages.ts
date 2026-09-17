@@ -45,6 +45,7 @@ import { formatTime } from "@/features/messages/lib/dateFormatters";
 // Pure overlay helper lives in a sibling .mjs so node:test (no TS loader)
 // can exercise the exact same source the renderer uses.
 import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
+import { resolveVoiceNoteTranscripts } from "@/features/messages/lib/voiceNoteTranscript.mjs";
 import { truncateNpub } from "@/shared/lib/pubkey";
 
 const HEX_RE = /^[0-9a-f]+$/i;
@@ -253,6 +254,17 @@ export function formatTimelineMessages(
     events.filter(isTimelineContentEvent).map((event) => [event.id, event]),
   );
   const previewSuppressedTargetIds = new Set<string>();
+
+  // Voice-note transcripts arrive as separate signed kind:40009 events (a
+  // published voice note's `imeta alt` can no longer be amended). Resolve them
+  // once per format pass, first-writer-wins per anchored note. A transcript is
+  // only honoured when its `h` tag matches the channel of the note it claims —
+  // so an event signed elsewhere cannot inject text under a note it cannot read.
+  const transcriptsByNoteId = resolveVoiceNoteTranscripts(
+    events,
+    (voiceNoteId: string) =>
+      channel && timelineEventsById.has(voiceNoteId) ? channel.id : undefined,
+  );
 
   // Build a map of latest authorized edit per original message. Preview
   // suppression is monotonic: any authorized edit carrying the marker wins
@@ -526,6 +538,16 @@ export function formatTimelineMessages(
             : [...effectiveTags, ["link-preview", "none"]];
         }
         return effectiveTags;
+      })(),
+      transcript: (() => {
+        const resolved = transcriptsByNoteId.get(event.id);
+        if (!resolved) return undefined;
+        return {
+          id: resolved.id,
+          createdAt: resolved.created_at,
+          pubkey: resolved.pubkey,
+          text: resolved.text,
+        };
       })(),
       reactions: (() => {
         const reactions = reactionsByEventId.get(event.id);
