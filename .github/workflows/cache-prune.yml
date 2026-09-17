@@ -1,0 +1,55 @@
+name: Cache Prune
+
+# Evicts GitHub Actions cache bloat: within each (ref, normalized key) group
+# only the most recently accessed entry is kept, and anything not accessed
+# within a week is deleted. Without this, every push mints new exact-key
+# entries (rust caches, sccache shards, relay artifacts) while old versions
+# linger until GitHub's 10 GB quota forces blind eviction.
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Report deletions without performing them'
+        type: boolean
+        default: false
+
+permissions:
+  actions: write
+
+concurrency:
+  group: cache-prune
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: Prune stale and duplicate caches
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Prune actions caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/prune_actions_caches.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --max-age-days 7 \
+            --keep 1 ${{ inputs.dry_run && '--dry-run' || '' }}
+      - name: Report remaining cache usage
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, urllib.request
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/actions/caches?per_page=1",
+              headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                       "Accept": "application/vnd.github+json"})
+          with urllib.request.urlopen(req) as r:
+              data = json.load(r)
+          print(f"remaining: {data.get('total_count')} entries")
+          EOF
