@@ -2450,6 +2450,22 @@ pub async fn run_prompt_task(
         None => PromptSource::Heartbeat,
     };
     let observer_channel_id = source.channel_id();
+    // Stamp delegations spawned during this turn with the thread that asked for
+    // them. The turn that *observes* a delegation finishing is usually a later
+    // turn (often the channel-less idle heartbeat), so the originating thread
+    // must be captured here, at spawn time, or the result has nowhere to go.
+    agent.acp.set_delegation_origin(batch.as_ref().map(|b| {
+        let thread_tags = b
+            .events
+            .last()
+            .map(|be| crate::queue::parse_thread_tags(&be.event))
+            .unwrap_or_default();
+        crate::subagent::DelegationOrigin {
+            channel_id: b.channel_id.to_string(),
+            root_event_id: thread_tags.root_event_id,
+            parent_event_id: thread_tags.parent_event_id,
+        }
+    }));
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
@@ -5697,6 +5713,45 @@ pub(crate) async fn post_failure_notice(
         Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
         Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
     }
+}
+
+/// Post one finished delegation's report back into the thread that requested it.
+///
+/// Delegations outlive the turn that spawned them: the agent process reports
+/// completion on a later `session/update`, which is usually observed by an idle
+/// heartbeat turn with no channel of its own. Without the origin captured at
+/// spawn time there is no thread to answer, and the result is silently dropped —
+/// the requester waits forever for a delegation that already finished.
+///
+/// Best-effort and non-fatal: a delivery failure is logged, never retried, and
+/// never blocks the agent returning to the pool.
+pub(crate) async fn post_delegation_result(
+    rest: &crate::relay::RestClient,
+    completed: &crate::subagent::CompletedSubagent,
+) {
+    // No origin means the spawning turn had no channel (e.g. a heartbeat):
+    // there is no thread waiting on the answer, so there is nothing to deliver.
+    let Some(origin) = completed.origin.as_ref() else {
+        return;
+    };
+    let Ok(channel_id) = Uuid::parse_str(&origin.channel_id) else {
+        tracing::warn!(
+            channel = %origin.channel_id,
+            "delegation result: unparsable origin channel — dropping"
+        );
+        return;
+    };
+    let thread_tags = ThreadTags {
+        root_event_id: origin.root_event_id.clone(),
+        parent_event_id: origin.parent_event_id.clone(),
+        mentioned_pubkeys: Vec::new(),
+    };
+    let status = completed.status;
+    let content = match &completed.summary {
+        Some(summary) => format!("Delegation `{}` {status}: {summary}", completed.name),
+        None => format!("Delegation `{}` {status}.", completed.name),
+    };
+    post_failure_notice(rest, channel_id, &thread_tags, &content).await;
 }
 
 /// Best-effort: remove a reaction via a signed kind:5 (NIP-09) deletion event.
