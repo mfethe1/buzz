@@ -4898,6 +4898,37 @@ fn spawn_failure_notice(
     }
 }
 
+/// Spawn delivery of finished delegation reports to their originating threads.
+///
+/// Delegations are asynchronous: the agent reports completion on a later
+/// `session/update`, long after the requesting turn returned. Each completed
+/// record carries the origin thread captured at spawn time, so delivery does
+/// not depend on which turn happened to observe the completion frame.
+///
+/// Best-effort by design — a relay failure must not stall the pool loop, so
+/// delivery runs detached and is never retried.
+fn spawn_delegation_results(
+    rest_client: Option<&relay::RestClient>,
+    completed: Vec<subagent::CompletedSubagent>,
+) {
+    if completed.is_empty() {
+        return;
+    }
+    let Some(rest) = rest_client else {
+        tracing::debug!(
+            count = completed.len(),
+            "delegation results dropped — no relay client configured"
+        );
+        return;
+    };
+    let rest = rest.clone();
+    tokio::spawn(async move {
+        for record in completed {
+            pool::post_delegation_result(&rest, &record).await;
+        }
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
     pool: &mut AgentPool,
@@ -4912,6 +4943,13 @@ fn handle_prompt_result(
     observer: Option<observer::ObserverHandle>,
     rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
+    // Deliver any delegation that reached a terminal status during this turn.
+    // Drained here — the single chokepoint every returning turn passes through —
+    // so results land regardless of which turn (often an unrelated heartbeat)
+    // happened to observe the completion frame. Fire-and-forget: delivery must
+    // never delay returning the agent to the pool.
+    spawn_delegation_results(rest_client, result.agent.acp.take_completed_subagents());
+
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
     let successful_steer_deliveries = pool
