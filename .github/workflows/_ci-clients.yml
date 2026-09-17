@@ -126,6 +126,7 @@ jobs:
             ${{ runner.temp }}/mobile-tested-sha.txt
           if-no-files-found: error
           retention-days: 7
+      - name: Test mobile with push gateway override
         run: cd mobile && flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
       - name: Test mobile without push configuration
         run: cd mobile && flutter test test/shared/push/push_unconfigured_build_test.dart
