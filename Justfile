@@ -320,9 +320,21 @@ desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     fi
     echo "Both compiled states and the accepted/rejected demo-name boundary verified."
 
+# Compile the sidecar crates and bundle them over the stubs. Single definition —
+# stubs alone only satisfy Tauri's compile-time externalBin check, so a bundle
+# built without this ships 0-byte sidecars and every `buzz` call from the app
+# silently no-ops (exit 0, no output).
+_build-sidecars target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release --target {{target}} \
+      -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp \
+      -p git-credential-nostr -p buzz-cli
+    ./scripts/bundle-sidecars.sh {{target}}
+
 # Build the full desktop Tauri app locally (unsigned, for testing)
 # pnpm install is unconditional here: release builds must start from a clean dep tree.
-desktop-release-build target="aarch64-apple-darwin": (_ensure-sidecar-stubs target)
+desktop-release-build target="aarch64-apple-darwin": (_ensure-sidecar-stubs target) (_build-sidecars target)
     #!/usr/bin/env bash
     set -euo pipefail
     pnpm install
@@ -343,10 +355,7 @@ desktop-demo-build demo_name target="aarch64-apple-darwin":
     DMG_VOLUME_NAME="$(read_config dmgVolumeName)"
     DMG_FILE_STEM="$(read_config dmgFileStem)"
     DEMO_SLUG="$(read_config slug)"
-    cargo build --release --target "$TARGET" \
-      -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp \
-      -p git-credential-nostr -p buzz-cli
-    ./scripts/bundle-sidecars.sh "$TARGET"
+    {{just_executable()}} _build-sidecars "$TARGET"
     pnpm install
     cd {{desktop_dir}}
     BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG" pnpm tauri build --features mesh-llm --target "$TARGET" --bundles app --config "$CONFIG_PATH"
