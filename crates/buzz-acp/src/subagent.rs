@@ -530,6 +530,43 @@ mod tests {
         assert_eq!(done[0].summary.as_deref(), Some("first"));
     }
 
+    /// The same invariant, reached the way production reaches it: purely
+    /// through `observe_update`.
+    ///
+    /// `same_call_retired_twice_delivers_once_even_if_payload_differs` drives
+    /// the private `push_completed` directly, so it cannot show the guard is
+    /// reachable at all. An agent that re-announces a tool call it already
+    /// finished — a reconnect replaying its `session/update` stream — re-tracks
+    /// the id (retirement removed it from `tasks`, so the spawn-dedupe in
+    /// `on_tool_call` does not fire) and retires it a second time. Carrying a
+    /// *different* summary makes the two pending entries unequal by value, so
+    /// only the id key suppresses the duplicate: revert it to
+    /// `contains(&entry)` and the author receives the same delegation twice.
+    #[test]
+    fn replayed_tool_call_stream_delivers_one_result_per_call() {
+        let summarized = |id: &str, text: &str| {
+            json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": id,
+                "status": "completed",
+                "content": [{"content": {"text": text}}],
+            })
+        };
+
+        let mut tracker = SubagentTracker::new();
+        tracker.set_origin(Some(origin("chan-a")));
+        spawn(&mut tracker, "t1", "worker");
+        tracker.observe_update(&summarized("t1", "first"));
+        // Reconnect: the agent replays the same call, then re-reports it with a
+        // revised summary.
+        spawn(&mut tracker, "t1", "worker");
+        tracker.observe_update(&summarized("t1", "revised"));
+
+        let done = tracker.take_completed();
+        assert_eq!(done.len(), 1, "one call owes exactly one delivery");
+        assert_eq!(done[0].summary.as_deref(), Some("first"));
+    }
+
     /// Two delegations to the SAME subagent, spawned concurrently from the same
     /// thread, both finishing with no summary, are value-identical as pending
     /// entries — but they are two real results and both are owed to the author.
