@@ -12,6 +12,8 @@ on:
         required: true
         type: string
     outputs:
+      server_cross_compile_result:
+        value: ${{ jobs.results.outputs.server_cross_compile_result }}
       rust_lint_result:
         value: ${{ jobs.results.outputs.rust_lint_result }}
       unit_tests_result:
@@ -221,6 +223,7 @@ jobs:
     timeout-minutes: 5
     permissions: {}
     outputs:
+      server_cross_compile_result: ${{ needs.server-cross-compile.result }}
       rust_lint_result: ${{ needs.rust-lint.result }}
       unit_tests_result: ${{ needs.unit-tests.result }}
       windows_rust_result: ${{ needs.windows-rust.result }}
