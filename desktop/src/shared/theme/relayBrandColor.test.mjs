@@ -197,6 +197,108 @@ test("applyRelayBrandColorFromInfo clears first and ignores aborted stale respon
   await jsonStarted;
   controller.abort();
   resolveJson({ buzz_brand_color: "#123abc" });
-  await applyPromise;
+  assert.equal(await applyPromise, null);
+  assert.equal(root.props.has(BRAND_COLOR_CSS_VAR), false);
+});
+
+test("applyRelayBrandColorFromInfo returns the applied color so callers can adopt it", async () => {
+  const root = styleStub();
+  assert.equal(
+    await applyRelayBrandColorFromInfo(root, "wss://tenant.example", {
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => ({ buzz_brand_color: "#123abc" }),
+      }),
+    }),
+    "#123abc",
+  );
+  assert.equal(root.props.get(BRAND_COLOR_CSS_VAR), "#123abc");
+
+  // A relay advertising no color must report null, not the previous value.
+  assert.equal(
+    await applyRelayBrandColorFromInfo(root, "wss://other.example", {
+      fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
+    }),
+    null,
+  );
+  assert.equal(root.props.has(BRAND_COLOR_CSS_VAR), false);
+});
+
+test("a non-2xx response is never parsed — the body of an error page is not a brand color", async () => {
+  // Kills the mutant that drops `!response.ok`: a 500 whose body happens to
+  // carry a well-formed color must still yield null, and json() must not run.
+  let jsonCalls = 0;
+  assert.equal(
+    await fetchRelayBrandColor("wss://tenant.example", {
+      fetchImpl: async () => ({
+        ok: false,
+        json: async () => {
+          jsonCalls += 1;
+          return { buzz_brand_color: "#ff8800" };
+        },
+      }),
+    }),
+    null,
+  );
+  assert.equal(jsonCalls, 0, "a non-2xx body must never be parsed");
+});
+
+test("each abort guard independently blocks a stale color — neither is redundant", async () => {
+  // Two guards bracket the awaits in fetchRelayBrandColor. A mutant deleting
+  // either one alone must fail, so each is exercised in isolation: abort is
+  // observed at exactly one await point per case.
+  const controller = new AbortController();
+
+  // (1) aborted while the response is in flight, before `json()`.
+  assert.equal(
+    await fetchRelayBrandColor("wss://tenant.example", {
+      signal: controller.signal,
+      fetchImpl: async () => {
+        controller.abort();
+        return {
+          ok: true,
+          json: async () => ({ buzz_brand_color: "#ff8800" }),
+        };
+      },
+    }),
+    null,
+    "abort observed before json() must not yield a color",
+  );
+
+  // (2) aborted only while `json()` is being parsed.
+  const later = new AbortController();
+  assert.equal(
+    await fetchRelayBrandColor("wss://tenant.example", {
+      signal: later.signal,
+      fetchImpl: async () => ({
+        ok: true,
+        json: async () => {
+          later.abort();
+          return { buzz_brand_color: "#ff8800" };
+        },
+      }),
+    }),
+    null,
+    "abort observed during json() must not yield a color",
+  );
+});
+
+test("a null/absent relayUrl short-circuits without ever touching the network", async () => {
+  // The signed-out / no-community path: nothing to brand, so no request.
+  for (const relayUrl of [null, undefined, "", "   ", "not a url"]) {
+    assert.equal(
+      await fetchRelayBrandColor(relayUrl, {
+        fetchImpl: () => {
+          throw new Error(`fetch must not run for ${JSON.stringify(relayUrl)}`);
+        },
+      }),
+      null,
+    );
+  }
+
+  // And it still clears, so signing out drops the previous tenant's brand.
+  const root = styleStub();
+  applyBrandColor(root, "#ff8800");
+  assert.equal(await applyRelayBrandColorFromInfo(root, null), null);
   assert.equal(root.props.has(BRAND_COLOR_CSS_VAR), false);
 });

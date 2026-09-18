@@ -318,38 +318,50 @@ async fn execute_relay_admin_command(
             );
         }
 
-        // Empty or missing icon tag clears the workspace icon.
-        let icon = extract_tag_value(event, "icon").unwrap_or_default();
-        validate_workspace_icon(&icon)?;
+        // 9033 is a PARTIAL update, not a whole-profile replace: a field is
+        // written only when its own tag is present. An empty value clears that
+        // field; an absent tag leaves the stored value untouched. This matters
+        // now that the command carries two independent scalars — the desktop
+        // icon editor publishes only an `icon` tag, so replace semantics would
+        // silently wipe the brand color on every icon save (and a future
+        // color-only publisher would wipe the icon).
+        let icon = extract_tag_value(event, "icon");
+        let brand_color = extract_tag_value(event, "brand_color");
 
-        // Empty or missing brand_color tag clears the brand color. Validated
-        // before EITHER write so a malformed color cannot land a partial
-        // profile update (icon stored, color rejected).
-        let brand_color = extract_tag_value(event, "brand_color").unwrap_or_default();
-        validate_brand_color(&brand_color)?;
+        // Validate both before either write: a malformed color must not land a
+        // half-applied profile. The writes themselves are separate statements,
+        // so a mid-sequence database failure can still leave the first applied
+        // — validation removes the only input-driven path to that state.
+        if let Some(icon) = icon.as_deref() {
+            validate_workspace_icon(icon)?;
+        }
+        if let Some(brand_color) = brand_color.as_deref() {
+            validate_brand_color(brand_color)?;
+        }
 
-        state
-            .db
-            .set_community_icon(
-                tenant.community(),
-                (!icon.is_empty()).then_some(icon.as_str()),
-            )
-            .await
-            .map_err(|e| format!("failed to store workspace icon: {e}"))?;
+        if let Some(icon) = icon.as_deref() {
+            state
+                .db
+                .set_community_icon(tenant.community(), (!icon.is_empty()).then_some(icon))
+                .await
+                .map_err(|e| format!("failed to store workspace icon: {e}"))?;
+        }
 
-        state
-            .db
-            .set_community_brand_color(
-                tenant.community(),
-                (!brand_color.is_empty()).then_some(brand_color.as_str()),
-            )
-            .await
-            .map_err(|e| format!("failed to store brand color: {e}"))?;
+        if let Some(brand_color) = brand_color.as_deref() {
+            state
+                .db
+                .set_community_brand_color(
+                    tenant.community(),
+                    (!brand_color.is_empty()).then_some(brand_color),
+                )
+                .await
+                .map_err(|e| format!("failed to store brand color: {e}"))?;
+        }
 
         info!(
             sender = %sender_hex,
-            icon_len = icon.len(),
-            brand_color_set = !brand_color.is_empty(),
+            icon_len = icon.as_deref().map(str::len),
+            brand_color_set = brand_color.as_deref().map(|c| !c.is_empty()),
             "workspace profile updated"
         );
         return Ok(());
@@ -856,6 +868,139 @@ mod postgres_tests {
             .get_community_icon(tenant.community())
             .await
             .expect("read icon")
+    }
+
+    /// Sign a kind:9033 carrying an arbitrary tag set — lets a test publish an
+    /// icon-only, color-only, or both-fields command.
+    async fn submit_9033_tags(
+        state: &Arc<AppState>,
+        tenant: &TenantContext,
+        keys: &Keys,
+        tags: &[(&str, &str)],
+    ) -> Result<(), RelayAdminError> {
+        let event = EventBuilder::new(Kind::Custom(9033), "")
+            .tags(
+                tags.iter()
+                    .map(|(n, v)| Tag::parse([*n, *v]).expect("tag"))
+                    .collect::<Vec<_>>(),
+            )
+            .sign_with_keys(keys)
+            .expect("sign 9033");
+        handle_relay_admin_event(tenant, state, &event).await
+    }
+
+    async fn stored_brand_color(state: &Arc<AppState>, tenant: &TenantContext) -> Option<String> {
+        state
+            .db
+            .get_community_brand_color(tenant.community())
+            .await
+            .expect("read brand color")
+    }
+
+    /// Regression: 9033 is a PARTIAL update. An absent tag must leave that
+    /// field untouched; only an explicitly empty tag clears it.
+    ///
+    /// Discriminating: under the whole-profile-replace semantics this file
+    /// shipped with, saving an icon (the only thing the desktop publishes)
+    /// silently wiped an already-set brand color, and vice versa. Both
+    /// cross-field assertions below fail on that code.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workspace_profile_9033_updates_only_the_tags_present() {
+        let host = format!("profile-merge-{}.example", uuid::Uuid::new_v4().simple());
+        let (state, tenant) = workspace_profile_test_state(&host, true).await;
+        let admin = Keys::generate();
+        state
+            .db
+            .add_relay_member(
+                tenant.community(),
+                &admin.public_key().to_hex(),
+                "admin",
+                None,
+            )
+            .await
+            .expect("seed admin");
+
+        // Seed both fields with one command.
+        submit_9033_tags(
+            &state,
+            &tenant,
+            &admin,
+            &[
+                ("icon", "https://example.com/a.png"),
+                ("brand_color", "#ff8800"),
+            ],
+        )
+        .await
+        .expect("set both fields");
+
+        // Icon-only save — what the shipped desktop icon editor publishes.
+        submit_9033_tags(
+            &state,
+            &tenant,
+            &admin,
+            &[("icon", "https://example.com/b.png")],
+        )
+        .await
+        .expect("icon-only update");
+        assert_eq!(
+            stored_icon(&state, &tenant).await.as_deref(),
+            Some("https://example.com/b.png"),
+            "icon must be updated"
+        );
+        assert_eq!(
+            stored_brand_color(&state, &tenant).await.as_deref(),
+            Some("#ff8800"),
+            "an icon-only 9033 must NOT clear the brand color"
+        );
+
+        // Color-only save — the symmetric direction.
+        submit_9033_tags(&state, &tenant, &admin, &[("brand_color", "#0011ee")])
+            .await
+            .expect("color-only update");
+        assert_eq!(
+            stored_brand_color(&state, &tenant).await.as_deref(),
+            Some("#0011ee"),
+            "brand color must be updated"
+        );
+        assert_eq!(
+            stored_icon(&state, &tenant).await.as_deref(),
+            Some("https://example.com/b.png"),
+            "a color-only 9033 must NOT clear the icon"
+        );
+
+        // An explicitly empty tag still clears — that is how a field is unset.
+        submit_9033_tags(&state, &tenant, &admin, &[("brand_color", "")])
+            .await
+            .expect("explicit clear");
+        assert_eq!(
+            stored_brand_color(&state, &tenant).await,
+            None,
+            "an empty brand_color tag must clear the field"
+        );
+        assert_eq!(
+            stored_icon(&state, &tenant).await.as_deref(),
+            Some("https://example.com/b.png"),
+            "clearing the color must not disturb the icon"
+        );
+
+        // A rejected color must not land the icon that rode along with it.
+        let refused = submit_9033_tags(
+            &state,
+            &tenant,
+            &admin,
+            &[
+                ("icon", "https://example.com/never.png"),
+                ("brand_color", "rgb(255,0,0)"),
+            ],
+        )
+        .await;
+        assert!(refused.is_err(), "invalid brand color must be refused");
+        assert_eq!(
+            stored_icon(&state, &tenant).await.as_deref(),
+            Some("https://example.com/b.png"),
+            "validation must precede both writes"
+        );
     }
 
     /// Open relay (`require_relay_membership = false`): a rosterless

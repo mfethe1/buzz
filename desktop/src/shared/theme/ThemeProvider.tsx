@@ -535,6 +535,10 @@ export function ThemeProvider({
   const [systemIsDark, setSystemIsDark] = useState<boolean>(() => {
     return window.matchMedia("(prefers-color-scheme: dark)").matches;
   });
+  // The active community's relay-advertised brand color, or null when the
+  // relay advertises none / is unreachable. Held in state (not just as a CSS
+  // property) because it overrides the personal accent swatch.
+  const [brandColor, setBrandColor] = useState<string | null>(null);
 
   // Resolve the effective theme based on follow-system preference
   const effectiveTheme = (() => {
@@ -632,9 +636,12 @@ export function ThemeProvider({
   // changes. applyTheme already applies the (Buzz-neutral-aware) accent in the
   // same synchronous batch as the theme vars — the flicker fix — so this effect
   // is idempotent on theme changes and simply covers accent-only changes.
+  // A community brand color, once fetched, outranks the personal swatch.
   useEffect(() => {
-    applyAccentColor(resolveEffectiveAccent(effectiveTheme, accentColor));
-  }, [accentColor, effectiveTheme]);
+    applyAccentColor(
+      brandColor ?? resolveEffectiveAccent(effectiveTheme, accentColor),
+    );
+  }, [accentColor, effectiveTheme, brandColor]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -642,6 +649,10 @@ export function ThemeProvider({
 
     void applyRelayBrandColorFromInfo(root, relayUrl, {
       signal: controller.signal,
+    }).then((color) => {
+      // The abort path resolves null, so a superseded community can never
+      // install its accent over the one that replaced it.
+      if (!controller.signal.aborted) setBrandColor(color);
     });
 
     return () => controller.abort();

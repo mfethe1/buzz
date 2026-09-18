@@ -147,12 +147,15 @@ export async function applyRelayBrandColorFromInfo(
   root: BrandColorRoot,
   relayUrl: string | null | undefined,
   options: RelayBrandFetchOptions = {},
-): Promise<void> {
+): Promise<BrandColor | null> {
   // Clear first, synchronously, so a community transition never carries the
   // previous tenant's color while the new relay's `/info` request is pending.
   applyBrandColor(root, null);
   const color = await fetchRelayBrandColor(relayUrl, options);
-  if (!options.signal?.aborted) {
-    applyBrandColor(root, color);
-  }
+  // An aborted fetch belongs to a community we already navigated away from:
+  // return null so the caller cannot adopt a stale tenant's accent, and leave
+  // the cleared property alone for the successor effect to fill.
+  if (options.signal?.aborted) return null;
+  applyBrandColor(root, color);
+  return color;
 }
