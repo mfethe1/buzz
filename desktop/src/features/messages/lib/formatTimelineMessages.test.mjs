@@ -786,7 +786,7 @@ const VOICE_NOTE_IMETA = [
   "imeta",
   "url https://blossom.example/voice-note-1.wav",
   "m audio/wav",
-  "x " + "c".repeat(64),
+  `x ${"c".repeat(64)}`,
   "size 4096",
   "filename voice-note-1.wav",
   "duration 12",
