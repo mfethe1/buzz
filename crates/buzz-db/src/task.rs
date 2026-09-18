@@ -159,7 +159,7 @@ pub struct TaskFilter {
     /// Restrict to tasks originating from one harness reference.
     ///
     /// Exact equality only. `source_ref` is opaque TEXT (see
-    /// `migrations/0046_task_system.sql`), so no parsing or prefix matching is
+    /// `migrations/0048_task_system.sql`), so no parsing or prefix matching is
     /// applied here.
     pub source_ref: Option<String>,
     /// Include archived tasks. Archived tasks are hidden by default.

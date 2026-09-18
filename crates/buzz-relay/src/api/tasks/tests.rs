@@ -25,7 +25,7 @@ fn source_ref_survives_verbatim_into_the_signed_path() {
 
 #[test]
 fn source_ref_is_parsed_as_an_opaque_optional_string() {
-    // Opaque TEXT by design (migrations/0046_task_system.sql): the relay
+    // Opaque TEXT by design (migrations/0048_task_system.sql): the relay
     // must not validate it as an event id, and its absence must stay
     // distinct from a present value.
     fn parse(query: &str) -> TasksQuery {

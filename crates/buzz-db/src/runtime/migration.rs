@@ -704,13 +704,13 @@ mod postgres_tests {
 
         // upstream carries 45 (0032-0034 and 0040 adopted from our PRs; 0045
         // push revocation tombstones synced 2026-09-16); fork adds
-        // 0046_task_system (PR #6425 pending upstream),
-        // 0047_agent_machine_homes (AGENT-HOMES-001 PR-3), and 0049 structured
+        // 0047_agent_machine_homes (AGENT-HOMES-001 PR-3),
+        // 0048_task_system (PR #6425 pending upstream), and 0049 structured
         // task history. All stay additive for existing deployments.
         assert_eq!(migrations.len(), 48);
         assert_eq!(migrations[44].version, 45);
-        assert_eq!(migrations[45].version, 46);
-        assert_eq!(migrations[46].version, 47);
+        assert_eq!(migrations[45].version, 47);
+        assert_eq!(migrations[46].version, 48);
         assert_eq!(migrations[47].version, 49);
         let task_changes = migrations[47].sql.as_str();
         assert!(task_changes.contains("ALTER TABLE task_events ADD COLUMN changes JSONB"));
@@ -1397,7 +1397,7 @@ mod postgres_tests {
         assert!(!desired_schema.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
     }
 
-    /// 0041 introduces the task system. The load-bearing properties are that it
+    /// 0048 introduces the task system. The load-bearing properties are that it
     /// is purely additive (no existing table is altered, so brownfield
     /// checksums are untouched), that both tables are tenant-scoped with
     /// `community_id`-leading keys, that both are explicitly attached to the
@@ -1410,8 +1410,8 @@ mod postgres_tests {
 
         let task_migration = migrations
             .iter()
-            .find(|migration| migration.version == 46)
-            .expect("task-system migration 0046");
+            .find(|migration| migration.version == 48)
+            .expect("task-system migration 0048");
         let sql = task_migration.sql.as_str();
         assert!(sql.contains("CREATE TABLE tasks"));
         assert!(sql.contains("CREATE TABLE task_events"));
