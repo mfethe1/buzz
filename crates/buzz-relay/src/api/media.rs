@@ -20,7 +20,7 @@ use axum::{
 use base64::Engine;
 use buzz_audit::{AuditAction, NewAuditEntry};
 use buzz_core::tenant::TenantContext;
-use buzz_media::{BlobDescriptor, MediaError, UploadAttribution, UploadNetworkInfo};
+use buzz_media::{BlobDescriptor, MediaConfig, MediaError, UploadAttribution, UploadNetworkInfo};
 
 use crate::state::AppState;
 
@@ -50,6 +50,48 @@ enum UploadRouteMode {
 fn should_stream_as_video(sniff: &[u8]) -> bool {
     infer::get(sniff).is_some_and(|kind| kind.mime_type() == "video/mp4")
         || buzz_media::looks_like_iso_bmff(sniff)
+}
+
+/// Bytes probed from the head of an upload body to decide its pipeline,
+/// without trusting the client's Content-Type.
+const SNIFF_BYTES: usize = 4096;
+
+/// Which non-video pipeline a body will take, decided from the bounded sniff
+/// prefix that `upload_blob` has already collected.
+///
+/// This exists so the request body can be buffered against the cap that
+/// actually governs it instead of the union of every cap. `infer` matches the
+/// four raster formats on magic bytes within the first 12 bytes, so the
+/// classification from the sniff prefix is identical to the classification
+/// from the full body (pinned by
+/// `non_video_classification_matches_full_body_sniff`).
+///
+/// The sniff only selects a cap and a pipeline. It never widens what is
+/// accepted: `validate_content` / `validate_file_content` still re-derive the
+/// MIME from the full body inside `buzz-media`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NonVideoKind {
+    Gif,
+    Image,
+    File,
+}
+
+fn classify_non_video(sniff: &[u8]) -> NonVideoKind {
+    match infer::get(sniff).map(|kind| kind.mime_type()) {
+        Some("image/gif") => NonVideoKind::Gif,
+        Some("image/jpeg" | "image/png" | "image/webp") => NonVideoKind::Image,
+        _ => NonVideoKind::File,
+    }
+}
+
+/// The configured cap that governs this body, i.e. the largest size that can
+/// possibly be accepted once it is read.
+fn non_video_cap(kind: NonVideoKind, config: &MediaConfig) -> u64 {
+    match kind {
+        NonVideoKind::Gif => config.max_gif_bytes,
+        NonVideoKind::Image => config.max_image_bytes,
+        NonVideoKind::File => config.max_file_bytes,
+    }
 }
 
 fn upload_route_mode(path: &str) -> Result<UploadRouteMode, MediaError> {
@@ -338,7 +380,6 @@ pub async fn upload_blob(
     // for the bounded probe and replay them into the selected pipeline so the
     // stored/hash-verified body remains byte-identical.
     use futures_util::StreamExt;
-    const SNIFF_BYTES: usize = 4096;
     let mut source = body.into_data_stream();
     let mut replay_chunks = Vec::new();
     let mut sniff = Vec::with_capacity(SNIFF_BYTES);
@@ -376,28 +417,44 @@ pub async fn upload_blob(
                 )
                 .await?
             } else {
-                // Non-video path: buffer the body (bounded by the larger of the image
-                // and generic-file caps), then decide image-vs-generic by sniffed MIME.
-                // Images go through the thumbnailing pipeline; non-media attachments
-                // (docs, archives, text, data) take the generic file path and are
-                // served as downloads. Recognized audio/video cannot fall through it.
-                let max = state
-                    .config
-                    .media
-                    .max_image_bytes
-                    .max(state.config.media.max_file_bytes);
+                // Non-video path: the sniff prefix already collected above
+                // decides which pipeline this body takes, so buffer it against
+                // the cap that actually governs it rather than the union of
+                // every cap. `validate_content`/`validate_file_content` still
+                // re-derive the MIME from the full body, so this only picks a
+                // cap and a pipeline — it can never widen what is accepted.
+                // Images go through the thumbnailing pipeline; non-media
+                // attachments (docs, archives, text, data) take the generic
+                // file path and are served as downloads. Recognized
+                // audio/video cannot fall through it.
+                let kind = classify_non_video(&sniff);
+
+                // Legacy /media/upload accepts images only: reject before the
+                // body is read instead of after buffering it.
+                if kind == NonVideoKind::File && auth.route_mode == UploadRouteMode::LegacyMedia {
+                    return Err(MediaError::DisallowedContentType(
+                        infer::get(&sniff)
+                            .map(|kind| kind.mime_type().to_string())
+                            .unwrap_or_else(|| "application/octet-stream".to_string()),
+                    ));
+                }
+
+                let max = non_video_cap(kind, &state.config.media);
+                // `to_bytes` rejects strictly above the limit, so pass `max` as
+                // given: a body of exactly `max` bytes is still accepted by the
+                // downstream validators.
                 let bytes =
                     axum::body::to_bytes(axum::body::Body::from_stream(replay), max as usize)
                         .await
-                        .map_err(|_| MediaError::FileTooLarge { size: 0, max })?;
+                        .map_err(|_| MediaError::FileTooLarge {
+                            // The body was truncated at the limit, so the real
+                            // size is unknown but provably greater than `max`.
+                            size: max.saturating_add(1),
+                            max,
+                        })?;
 
-                let is_image = matches!(
-                    infer::get(&bytes).map(|t| t.mime_type()),
-                    Some("image/jpeg" | "image/png" | "image/gif" | "image/webp")
-                );
-
-                if is_image {
-                    buzz_media::process_upload(
+                if kind == NonVideoKind::File {
+                    buzz_media::process_file_upload(
                         &state.media_storage,
                         &state.config.media,
                         &auth.tenant,
@@ -406,13 +463,8 @@ pub async fn upload_blob(
                         attribution,
                     )
                     .await?
-                } else if auth.route_mode == UploadRouteMode::LegacyMedia {
-                    let mime = infer::get(&bytes)
-                        .map(|kind| kind.mime_type().to_string())
-                        .unwrap_or_else(|| "application/octet-stream".to_string());
-                    return Err(MediaError::DisallowedContentType(mime));
                 } else {
-                    buzz_media::process_file_upload(
+                    buzz_media::process_upload(
                         &state.media_storage,
                         &state.config.media,
                         &auth.tenant,
@@ -1128,6 +1180,124 @@ mod tests {
         let bytes = b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00isommp42";
         assert!(infer::get(bytes).is_none());
         assert!(should_stream_as_video(bytes));
+    }
+
+    fn raster_fixture(mime: &str) -> Vec<u8> {
+        match mime {
+            "image/png" => vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+            "image/jpeg" => vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F'],
+            "image/gif" => b"GIF89a".to_vec(),
+            "image/webp" => {
+                let mut webp = Vec::from(*b"RIFF");
+                webp.extend_from_slice(&[0, 0, 0, 0]);
+                webp.extend_from_slice(b"WEBP");
+                webp
+            }
+            other => panic!("unsupported fixture {other}"),
+        }
+    }
+
+    fn cap_config(gif: u64, image: u64, file: u64) -> MediaConfig {
+        let mut config = crate::config::Config::from_env()
+            .expect("default config loads")
+            .media;
+        config.max_gif_bytes = gif;
+        config.max_image_bytes = image;
+        config.max_file_bytes = file;
+        config
+    }
+
+    /// The whole premise of sizing the buffer from the sniff prefix: the
+    /// classification taken from the first 4 KiB must be the same one the old
+    /// code took from the fully buffered body. If `infer` ever needs bytes
+    /// past the prefix for these formats, this fails and the cap selection is
+    /// wrong.
+    #[test]
+    fn non_video_classification_matches_full_body_sniff() {
+        for mime in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
+            let header = raster_fixture(mime);
+            let mut full = header.clone();
+            full.extend(std::iter::repeat_n(0u8, 32 * 1024));
+            let sniff = &full[..SNIFF_BYTES.min(full.len())];
+
+            let from_sniff = classify_non_video(sniff);
+            let from_full = classify_non_video(&full);
+            assert_eq!(from_sniff, from_full, "{mime} must classify identically");
+
+            // And it agrees with the old post-buffer `is_image` predicate.
+            let was_image = matches!(
+                infer::get(&full).map(|t| t.mime_type()),
+                Some("image/jpeg" | "image/png" | "image/gif" | "image/webp")
+            );
+            assert_eq!(
+                was_image,
+                from_sniff != NonVideoKind::File,
+                "{mime} must route to the same pipeline as before"
+            );
+        }
+    }
+
+    #[test]
+    fn non_video_kinds_cover_gif_image_and_generic_file() {
+        assert_eq!(
+            classify_non_video(&raster_fixture("image/gif")),
+            NonVideoKind::Gif
+        );
+        for mime in ["image/png", "image/jpeg", "image/webp"] {
+            assert_eq!(
+                classify_non_video(&raster_fixture(mime)),
+                NonVideoKind::Image,
+                "{mime}"
+            );
+        }
+        // Unsniffable, hostile, short and empty prefixes all take the generic
+        // file path — the same fall-through the old `is_image == false` arm
+        // took, so nothing newly reaches the image pipeline.
+        for generic in [
+            &b"plain text with no magic bytes"[..],
+            &b"%PDF-1.7"[..],
+            &b"<svg xmlns=\"...\"><script>alert(1)</script></svg>"[..],
+            &b"\x89PN"[..],
+            &b""[..],
+        ] {
+            assert_eq!(classify_non_video(generic), NonVideoKind::File);
+        }
+    }
+
+    /// The defect this change exists to fix: the buffer must be sized by the
+    /// cap that actually governs the body, never the union of every cap.
+    #[test]
+    fn non_video_cap_is_the_governing_cap_not_the_union() {
+        let config = cap_config(10_485_760, 52_428_800, 104_857_600);
+        assert_eq!(non_video_cap(NonVideoKind::Gif, &config), 10_485_760);
+        assert_eq!(non_video_cap(NonVideoKind::Image, &config), 52_428_800);
+        assert_eq!(non_video_cap(NonVideoKind::File, &config), 104_857_600);
+
+        let union = config.max_image_bytes.max(config.max_file_bytes);
+        assert!(
+            non_video_cap(NonVideoKind::Gif, &config) < union
+                && non_video_cap(NonVideoKind::Image, &config) < union,
+            "gif and image bodies must no longer be buffered against the union cap"
+        );
+
+        // The cap is read from config, not hardcoded: an operator lowering the
+        // GIF cap must actually lower the buffer.
+        let tightened = cap_config(1024, 52_428_800, 104_857_600);
+        assert_eq!(non_video_cap(NonVideoKind::Gif, &tightened), 1024);
+    }
+
+    /// `max_gif_bytes <= max_image_bytes <= (any) max_file_bytes` is not
+    /// guaranteed by config validation for the file cap, so a generic file may
+    /// legitimately be capped below an image. The selection must stay
+    /// per-kind rather than assuming an ordering.
+    #[test]
+    fn non_video_cap_does_not_assume_cap_ordering() {
+        let inverted = cap_config(1024, 52_428_800, 4096);
+        assert_eq!(non_video_cap(NonVideoKind::File, &inverted), 4096);
+        assert!(
+            non_video_cap(NonVideoKind::File, &inverted)
+                < non_video_cap(NonVideoKind::Image, &inverted)
+        );
     }
 
     async fn test_state() -> Arc<AppState> {
