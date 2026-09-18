@@ -779,6 +779,28 @@ test("verified agent owner may publish a suppression edit", () => {
 
 const CHANNEL = { id: CHANNEL_ID };
 
+const HEX64_C =
+  "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+const VOICE_NOTE_IMETA = [
+  "imeta",
+  "url https://blossom.example/voice-note-1.wav",
+  "m audio/wav",
+  "x " + "c".repeat(64),
+  "size 4096",
+  "filename voice-note-1.wav",
+  "duration 12",
+];
+
+/** A real voice note: a message whose imeta tags carry an audio attachment. */
+function voiceNoteMessage(overrides = {}) {
+  return streamMessage({
+    content: "![audio](https://blossom.example/voice-note-1.wav)",
+    tags: [["h", CHANNEL_ID], VOICE_NOTE_IMETA],
+    ...overrides,
+  });
+}
+
 function transcriptEvent(overrides = {}) {
   return {
     id: HEX64_B,
@@ -797,7 +819,7 @@ function transcriptEvent(overrides = {}) {
 
 test("a transcript overlay attaches to the voice note it anchors", () => {
   const [message] = formatTimelineMessages(
-    [streamMessage(), transcriptEvent()],
+    [voiceNoteMessage(), transcriptEvent()],
     CHANNEL,
     undefined,
     null,
@@ -808,7 +830,7 @@ test("a transcript overlay attaches to the voice note it anchors", () => {
 
 test("the transcript event does not itself render as a timeline row", () => {
   const out = formatTimelineMessages(
-    [streamMessage(), transcriptEvent()],
+    [voiceNoteMessage(), transcriptEvent()],
     CHANNEL,
     undefined,
     null,
@@ -819,7 +841,7 @@ test("the transcript event does not itself render as a timeline row", () => {
 
 test("a message with no transcript leaves the field absent", () => {
   const [message] = formatTimelineMessages(
-    [streamMessage()],
+    [voiceNoteMessage()],
     CHANNEL,
     undefined,
     null,
@@ -830,7 +852,7 @@ test("a message with no transcript leaves the field absent", () => {
 test("a transcript scoped to another channel is not attached", () => {
   const [message] = formatTimelineMessages(
     [
-      streamMessage(),
+      voiceNoteMessage(),
       transcriptEvent({
         tags: [
           ["e", HEX64_A, "", "mention"],
@@ -843,6 +865,103 @@ test("a transcript scoped to another channel is not attached", () => {
     null,
   );
   assert.equal(message.transcript, undefined);
+});
+
+// Anchor eligibility. Channel scoping alone does not make a transcript safe:
+// every member is in the channel, so a member-signed 40009 aimed at somebody
+// else's PLAIN TEXT message would otherwise render attacker text inside that
+// author's row. Only audio-bearing messages may be transcribed.
+test("a transcript anchored to a plain-text message is denied (text injection)", () => {
+  const [message] = formatTimelineMessages(
+    [
+      streamMessage(),
+      transcriptEvent({ content: "I hereby authorize the wire transfer." }),
+    ],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  assert.equal(message.transcript, undefined);
+  assert.equal(message.body, "hello world");
+});
+
+test("a transcript anchored to a non-audio attachment (image) is denied", () => {
+  const imageNote = streamMessage({
+    content: "![img](https://blossom.example/pic.png)",
+    tags: [
+      ["h", CHANNEL_ID],
+      [
+        "imeta",
+        "url https://blossom.example/pic.png",
+        "m image/png",
+        `x ${"d".repeat(64)}`,
+        "size 2048",
+        "filename pic.png",
+      ],
+    ],
+  });
+  const [message] = formatTimelineMessages(
+    [imageNote, transcriptEvent()],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  assert.equal(message.transcript, undefined);
+});
+
+test("a voice note published as video/mp4 still accepts a transcript", () => {
+  // iOS-recorded voice notes arrive as video/mp4; isAudioAttachment already
+  // treats a voice-note-*.mp4 as audio, so eligibility must follow that rule
+  // rather than a narrower mime check of its own.
+  const mp4Note = voiceNoteMessage({
+    tags: [
+      ["h", CHANNEL_ID],
+      [
+        "imeta",
+        "url https://blossom.example/voice-note-2.mp4",
+        "m video/mp4",
+        `x ${"e".repeat(64)}`,
+        "size 8192",
+        "filename voice-note-2.mp4",
+        "duration 9",
+      ],
+    ],
+  });
+  const [message] = formatTimelineMessages(
+    [mp4Note, transcriptEvent()],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  assert.equal(message.transcript.text, "spoken words");
+});
+
+test("an ineligible anchor in the feed does not suppress a real voice note", () => {
+  // The denial must be scoped to the ineligible anchor only: a spoofed 40009
+  // aimed at a plain-text message must not disturb resolution for a genuine
+  // voice note carried in the same format pass.
+  const out = formatTimelineMessages(
+    [
+      streamMessage(),
+      transcriptEvent({ content: "injected" }),
+      voiceNoteMessage({ id: HEX64_C, created_at: 1_700_000_200 }),
+      transcriptEvent({
+        id: "f".repeat(64),
+        created_at: 1_700_000_300,
+        tags: [
+          ["e", HEX64_C, "", "mention"],
+          ["h", CHANNEL_ID],
+        ],
+      }),
+    ],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  const plain = out.find((row) => row.id === HEX64_A);
+  const note = out.find((row) => row.id === HEX64_C);
+  assert.equal(plain.transcript, undefined);
+  assert.equal(note.transcript.text, "spoken words");
 });
 
 test("the resolver filters on the shared kind constant", () => {

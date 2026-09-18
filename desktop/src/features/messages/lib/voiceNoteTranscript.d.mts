@@ -25,6 +25,14 @@ export type ResolvedTranscript = {
 export const MAX_TRANSCRIPT_LENGTH: number;
 
 /**
+ * True when an event's NIP-92 tags carry at least one audio attachment, i.e.
+ * the event is eligible to be the anchor of a transcript.
+ */
+export function hasAudioAttachment(
+  tags: ReadonlyArray<ReadonlyArray<string>> | undefined,
+): boolean;
+
+/**
  * Resolve `kind:40009` transcript overlays, first-writer-wins per anchored
  * voice-note id. Transcripts whose `h` tag does not match the channel of the
  * note they claim to transcribe are dropped.

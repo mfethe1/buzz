@@ -18,6 +18,8 @@
  */
 
 import { KIND_VOICE_NOTE_TRANSCRIPT } from "../../../shared/constants/kinds.ts";
+import { parseImetaTags } from "../../../shared/ui/markdown/parseImeta.ts";
+import { isAudioAttachment } from "./audioAttachment.ts";
 
 /**
  * Defensive read-side ceiling on rendered transcript text. There is no
@@ -28,6 +30,23 @@ import { KIND_VOICE_NOTE_TRANSCRIPT } from "../../../shared/constants/kinds.ts";
 export const MAX_TRANSCRIPT_LENGTH = 8000;
 
 const ANCHOR_MARKER = "mention";
+
+/**
+ * True when an event carries at least one audio/voice-note NIP-92 attachment.
+ *
+ * Anchor eligibility, not decoration: a transcript is only meaningful for audio,
+ * and without this any channel member could sign a `kind:40009` anchored to
+ * somebody else's plain-text message and have their own text rendered inside
+ * that author's row. Reuses `isAudioAttachment` so "what counts as audio" has a
+ * single definition shared with the player.
+ */
+export function hasAudioAttachment(tags) {
+  if (!Array.isArray(tags)) return false;
+  for (const entry of parseImetaTags(tags).values()) {
+    if (isAudioAttachment(entry)) return true;
+  }
+  return false;
+}
 
 /**
  * The anchor is the first `e` tag carrying the `mention` marker. A transcript

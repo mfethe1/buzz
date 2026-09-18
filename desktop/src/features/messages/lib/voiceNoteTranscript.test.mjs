@@ -4,6 +4,7 @@ import test from "node:test";
 // Imports the exact source the timeline renderer uses. No inlined copy → no
 // drift risk between test expectations and production behaviour.
 import {
+  hasAudioAttachment,
   MAX_TRANSCRIPT_LENGTH,
   resolveVoiceNoteTranscripts,
 } from "./voiceNoteTranscript.mjs";
@@ -208,4 +209,34 @@ test("oversized transcripts are clamped instead of rejected", () => {
   const long = transcript({ content: "x".repeat(MAX_TRANSCRIPT_LENGTH + 500) });
   const got = resolveVoiceNoteTranscripts([long], channelOfNote);
   assert.equal(got.get(NOTE).text.length, MAX_TRANSCRIPT_LENGTH);
+});
+
+test("hasAudioAttachment tolerates absent and malformed tags", () => {
+  assert.equal(hasAudioAttachment(undefined), false);
+  assert.equal(hasAudioAttachment([]), false);
+  assert.equal(hasAudioAttachment("not-an-array"), false);
+  assert.equal(hasAudioAttachment([["imeta"]]), false);
+  assert.equal(
+    hasAudioAttachment([
+      ["imeta", "url"],
+      ["h", "chan"],
+    ]),
+    false,
+  );
+  assert.equal(hasAudioAttachment([[null, undefined]]), false);
+});
+
+test("hasAudioAttachment recognises an audio imeta attachment", () => {
+  assert.equal(
+    hasAudioAttachment([
+      ["h", "chan"],
+      [
+        "imeta",
+        "url https://blossom.example/voice-note-1.wav",
+        "m audio/wav",
+        `x ${"c".repeat(64)}`,
+      ],
+    ]),
+    true,
+  );
 });
