@@ -1036,7 +1036,7 @@ version = "0.1.0"
 dependencies = [
  "buzz-core",
  "chrono",
- "nostr",
+ "nostr 0.44.7",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
