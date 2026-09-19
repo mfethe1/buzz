@@ -17,6 +17,14 @@ use crate::{handlers::push_lease::Subscription, state::AppState};
 
 const CLAIM_SECS: i64 = 30;
 const EVENT_USEFUL_SECS: i64 = 3600;
+/// How long a terminal/expired wake-outbox row is kept before the leader's
+/// retention sweep deletes it.
+///
+/// Derived from [`EVENT_USEFUL_SECS`] rather than picked: a wake is
+/// functionally dead at most one useful-life after its event, so 24x that
+/// keeps a full day of delivery history for operator triage of push
+/// complaints while staying far tighter than the 30-day invite window.
+pub const WAKE_OUTBOX_RETENTION_SECS: i64 = 24 * EVENT_USEFUL_SECS;
 const MAX_ATTEMPTS: i32 = 8;
 /// Upper bound on one claimed matcher batch. Bounded well under
 /// `get_events_by_ids`' 500-id batch-fetch contract.

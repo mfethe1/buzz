@@ -1739,6 +1739,19 @@ async fn run_usage_metrics_tick(
                 warn!(error = %error, "failed to reap expired relay invites");
             }
         }
+        let wake_retention_cutoff = chrono::Utc::now()
+            - chrono::Duration::seconds(buzz_relay::push_runtime::WAKE_OUTBOX_RETENTION_SECS);
+        match state.db.prune_push_wake_outbox(wake_retention_cutoff).await {
+            Ok(deleted) if deleted > 0 => {
+                info!(deleted, "pruned push wake outbox");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                // Retention cleanup is best-effort: a failure must not demote
+                // the leader, unlike the metrics collection above.
+                warn!(error = %error, "failed to prune push wake outbox");
+            }
+        }
         run_storage_sweep_tick(state, emission_scope, &host_map).await;
     }
 
