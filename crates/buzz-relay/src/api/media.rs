@@ -147,24 +147,36 @@ where
 
 /// Buffer a non-video body against the cap that governs its kind.
 ///
-/// `to_bytes` rejects strictly above the limit, so a body of exactly the cap is
-/// still accepted by the downstream validators. On rejection the real size is
-/// unknown but provably greater than the cap, hence `max + 1`.
+/// A body of exactly the cap is accepted; the first byte past it aborts. The
+/// two failure modes are kept DISTINCT: a body that outgrows its cap is
+/// `FileTooLarge` (413), while a transport error mid-body is `Io` — the same
+/// classification [`sniff_prefix`] already makes for the probe window. Folding
+/// a dropped connection into `FileTooLarge` would report a 413 with a size the
+/// server never observed.
+///
+/// Accumulating chunk-by-chunk also bounds peak memory at `cap + one chunk`
+/// instead of handing the whole limit to a body-level helper.
 async fn buffer_non_video<S>(
     kind: NonVideoKind,
     config: &MediaConfig,
     replay: S,
 ) -> Result<bytes::Bytes, MediaError>
 where
-    S: futures_util::Stream<Item = Result<bytes::Bytes, axum::Error>> + Send + 'static,
+    S: futures_util::Stream<Item = Result<bytes::Bytes, axum::Error>>,
 {
+    use futures_util::StreamExt;
     let max = non_video_cap(kind, config);
-    axum::body::to_bytes(axum::body::Body::from_stream(replay), max as usize)
-        .await
-        .map_err(|_| MediaError::FileTooLarge {
-            size: max.saturating_add(1),
-            max,
-        })
+    let mut replay = std::pin::pin!(replay);
+    let mut buffered = bytes::BytesMut::new();
+    while let Some(chunk) = replay.next().await {
+        let chunk = chunk.map_err(|error| MediaError::Io(error.to_string()))?;
+        let size = buffered.len() as u64 + chunk.len() as u64;
+        if size > max {
+            return Err(MediaError::FileTooLarge { size, max });
+        }
+        buffered.extend_from_slice(&chunk);
+    }
+    Ok(buffered.freeze())
 }
 
 fn upload_route_mode(path: &str) -> Result<UploadRouteMode, MediaError> {
@@ -1459,6 +1471,55 @@ mod tests {
             MediaError::FileTooLarge { size, max } => {
                 assert_eq!(max, 64, "the reported cap must be the governing one");
                 assert!(size > max, "reported size must exceed the cap");
+            }
+            other => panic!("expected FileTooLarge, got {other:?}"),
+        }
+    }
+
+    /// EDGE 11 (negative, real defect found this stage) — a transport error
+    /// AFTER the sniff window must stay an `Io` failure. The previous
+    /// `to_bytes` implementation folded every error into `FileTooLarge`, so a
+    /// client that dropped its connection mid-upload was served a 413 with a
+    /// size the server had never observed — a false oversize signal in both
+    /// the response and the rejection metrics.
+    #[tokio::test]
+    async fn buffer_non_video_propagates_transport_error_as_io_not_oversize() {
+        let config = cap_config(64, 52_428_800, 104_857_600);
+        let stream = futures_util::stream::iter(vec![
+            Ok(bytes::Bytes::from_static(b"partial")),
+            Err(axum::Error::new(std::io::Error::other("peer reset"))),
+        ]);
+
+        let error = buffer_non_video(NonVideoKind::Gif, &config, stream)
+            .await
+            .expect_err("a mid-body transport error must abort the upload");
+
+        assert!(
+            matches!(error, MediaError::Io(_)),
+            "a dropped connection must not be reported as oversize, got {error:?}"
+        );
+    }
+
+    /// EDGE 12 (boundary) — the cap is enforced across chunk boundaries, not
+    /// per chunk. Two under-cap chunks whose SUM exceeds the cap must be
+    /// rejected, and the reported size must be the real observed size rather
+    /// than a synthesised `cap + 1`.
+    #[tokio::test]
+    async fn buffer_non_video_enforces_the_cap_across_chunk_boundaries() {
+        let config = cap_config(64, 52_428_800, 104_857_600);
+        let half = vec![0u8; 40];
+        let error = buffer_non_video(
+            NonVideoKind::Gif,
+            &config,
+            body_stream(ok_chunks(&[&half, &half])),
+        )
+        .await
+        .expect_err("40 + 40 bytes must not slip past a 64-byte cap");
+
+        match error {
+            MediaError::FileTooLarge { size, max } => {
+                assert_eq!(max, 64);
+                assert_eq!(size, 80, "the observed size must be reported, not cap + 1");
             }
             other => panic!("expected FileTooLarge, got {other:?}"),
         }
