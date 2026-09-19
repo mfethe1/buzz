@@ -705,14 +705,17 @@ mod postgres_tests {
         // upstream carries 45 (0032-0034 and 0040 adopted from our PRs; 0045
         // push revocation tombstones synced 2026-09-16); fork adds
         // 0046_task_system (PR #6425 pending upstream),
-        // 0047_agent_machine_homes (AGENT-HOMES-001 PR-3), and 0049 structured
-        // task history. All stay additive for existing deployments.
-        assert_eq!(migrations.len(), 48);
+        // 0047_agent_machine_homes (AGENT-HOMES-001 PR-3),
+        // 0048_community_brand_color (REG-10; renumbered from 0037, which is
+        // upstream-owned relay_admin_action_lease), and 0049 structured task
+        // history. All stay additive for existing deployments.
+        assert_eq!(migrations.len(), 49);
         assert_eq!(migrations[44].version, 45);
         assert_eq!(migrations[45].version, 46);
         assert_eq!(migrations[46].version, 47);
-        assert_eq!(migrations[47].version, 49);
-        let task_changes = migrations[47].sql.as_str();
+        assert_eq!(migrations[47].version, 48);
+        assert_eq!(migrations[48].version, 49);
+        let task_changes = migrations[48].sql.as_str();
         assert!(task_changes.contains("ALTER TABLE task_events ADD COLUMN changes JSONB"));
         assert!(task_changes.contains("ALTER COLUMN created_at SET DEFAULT clock_timestamp()"));
         assert!(!migrations[44].sql.as_str().contains("ADD COLUMN changes"));
@@ -1454,6 +1457,21 @@ mod postgres_tests {
         // Deletion must not silently skip the new tenant tables.
         assert!(crate::deletion::EXPECTED_SCOPED_TABLES.contains(&"tasks"));
         assert!(crate::deletion::EXPECTED_SCOPED_TABLES.contains(&"task_events"));
+    }
+
+    #[test]
+    fn community_brand_color_is_additive_and_mirrored_in_desired_state() {
+        let mut migrations: Vec<_> = MIGRATOR.iter().collect();
+        migrations.sort_by_key(|migration| migration.version);
+
+        let migration = migrations
+            .iter()
+            .find(|migration| migration.version == 48)
+            .expect("embedded migration 0048");
+        let sql = migration.sql.as_str();
+        assert!(sql.contains("ALTER TABLE communities ADD COLUMN brand_color TEXT"));
+        assert!(!migrations[0].sql.as_str().contains("brand_color"));
+        assert!(include_str!("../../../../schema/schema.sql").contains("brand_color     TEXT"));
     }
 
     #[test]
