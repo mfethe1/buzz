@@ -94,6 +94,79 @@ fn non_video_cap(kind: NonVideoKind, config: &MediaConfig) -> u64 {
     }
 }
 
+/// The MIME `infer` derives from a sniff prefix, or the generic octet-stream
+/// fallback when nothing matches. Used for the legacy-alias rejection message.
+fn sniffed_mime(sniff: &[u8]) -> String {
+    infer::get(sniff)
+        .map(|kind| kind.mime_type().to_string())
+        .unwrap_or_else(|| "application/octet-stream".to_string())
+}
+
+/// The legacy `/media/upload` alias accepts images only. Deciding this from the
+/// sniff prefix lets the request be rejected before the body is buffered.
+fn legacy_alias_rejects(kind: NonVideoKind, route_mode: UploadRouteMode) -> bool {
+    kind == NonVideoKind::File && route_mode == UploadRouteMode::LegacyMedia
+}
+
+/// Read at most [`SNIFF_BYTES`] from the head of the body, retaining every
+/// chunk consumed so the body can be replayed byte-identically into whichever
+/// pipeline the sniff selects.
+///
+/// A short body yields a short prefix (no padding, no error); an empty body
+/// yields an empty prefix. A transport error during the probe aborts the
+/// upload rather than classifying a truncated body.
+async fn sniff_prefix<S>(
+    mut source: S,
+) -> Result<
+    (
+        Vec<u8>,
+        impl futures_util::Stream<Item = Result<bytes::Bytes, axum::Error>>,
+    ),
+    MediaError,
+>
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, axum::Error>> + Unpin,
+{
+    use futures_util::StreamExt;
+    let mut replay_chunks = Vec::new();
+    let mut sniff = Vec::with_capacity(SNIFF_BYTES);
+    while sniff.len() < SNIFF_BYTES {
+        match source.next().await {
+            Some(Ok(chunk)) => {
+                let needed = SNIFF_BYTES - sniff.len();
+                sniff.extend_from_slice(&chunk[..chunk.len().min(needed)]);
+                replay_chunks.push(chunk);
+            }
+            Some(Err(error)) => return Err(MediaError::Io(error.to_string())),
+            None => break,
+        }
+    }
+    let replay = futures_util::stream::iter(replay_chunks.into_iter().map(Ok)).chain(source);
+    Ok((sniff, replay))
+}
+
+/// Buffer a non-video body against the cap that governs its kind.
+///
+/// `to_bytes` rejects strictly above the limit, so a body of exactly the cap is
+/// still accepted by the downstream validators. On rejection the real size is
+/// unknown but provably greater than the cap, hence `max + 1`.
+async fn buffer_non_video<S>(
+    kind: NonVideoKind,
+    config: &MediaConfig,
+    replay: S,
+) -> Result<bytes::Bytes, MediaError>
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, axum::Error>> + Send + 'static,
+{
+    let max = non_video_cap(kind, config);
+    axum::body::to_bytes(axum::body::Body::from_stream(replay), max as usize)
+        .await
+        .map_err(|_| MediaError::FileTooLarge {
+            size: max.saturating_add(1),
+            max,
+        })
+}
+
 fn upload_route_mode(path: &str) -> Result<UploadRouteMode, MediaError> {
     match path {
         "/upload" => Ok(UploadRouteMode::Upload),
@@ -379,22 +452,7 @@ pub async fn upload_blob(
     // Probe actual bytes without trusting Content-Type. Keep the chunks used
     // for the bounded probe and replay them into the selected pipeline so the
     // stored/hash-verified body remains byte-identical.
-    use futures_util::StreamExt;
-    let mut source = body.into_data_stream();
-    let mut replay_chunks = Vec::new();
-    let mut sniff = Vec::with_capacity(SNIFF_BYTES);
-    while sniff.len() < SNIFF_BYTES {
-        match source.next().await {
-            Some(Ok(chunk)) => {
-                let needed = SNIFF_BYTES - sniff.len();
-                sniff.extend_from_slice(&chunk[..chunk.len().min(needed)]);
-                replay_chunks.push(chunk);
-            }
-            Some(Err(error)) => return Err(MediaError::Io(error.to_string())),
-            None => break,
-        }
-    }
-    let replay = futures_util::stream::iter(replay_chunks.into_iter().map(Ok)).chain(source);
+    let (sniff, replay) = sniff_prefix(body.into_data_stream()).await?;
 
     serving_write.verify().await.map_err(serving_lease_lost)?;
 
@@ -431,27 +489,11 @@ pub async fn upload_blob(
 
                 // Legacy /media/upload accepts images only: reject before the
                 // body is read instead of after buffering it.
-                if kind == NonVideoKind::File && auth.route_mode == UploadRouteMode::LegacyMedia {
-                    return Err(MediaError::DisallowedContentType(
-                        infer::get(&sniff)
-                            .map(|kind| kind.mime_type().to_string())
-                            .unwrap_or_else(|| "application/octet-stream".to_string()),
-                    ));
+                if legacy_alias_rejects(kind, auth.route_mode) {
+                    return Err(MediaError::DisallowedContentType(sniffed_mime(&sniff)));
                 }
 
-                let max = non_video_cap(kind, &state.config.media);
-                // `to_bytes` rejects strictly above the limit, so pass `max` as
-                // given: a body of exactly `max` bytes is still accepted by the
-                // downstream validators.
-                let bytes =
-                    axum::body::to_bytes(axum::body::Body::from_stream(replay), max as usize)
-                        .await
-                        .map_err(|_| MediaError::FileTooLarge {
-                            // The body was truncated at the limit, so the real
-                            // size is unknown but provably greater than `max`.
-                            size: max.saturating_add(1),
-                            max,
-                        })?;
+                let bytes = buffer_non_video(kind, &state.config.media, replay).await?;
 
                 if kind == NonVideoKind::File {
                     buzz_media::process_file_upload(
@@ -1297,6 +1339,256 @@ mod tests {
         assert!(
             non_video_cap(NonVideoKind::File, &inverted)
                 < non_video_cap(NonVideoKind::Image, &inverted)
+        );
+    }
+
+    // ---- hardening: edge-case matrix for the sniff/cap path ----------------
+
+    fn body_stream(
+        chunks: Vec<Result<bytes::Bytes, axum::Error>>,
+    ) -> impl futures_util::Stream<Item = Result<bytes::Bytes, axum::Error>> + Unpin {
+        Box::pin(futures_util::stream::iter(chunks))
+    }
+
+    fn ok_chunks(parts: &[&[u8]]) -> Vec<Result<bytes::Bytes, axum::Error>> {
+        parts
+            .iter()
+            .map(|p| Ok(bytes::Bytes::copy_from_slice(p)))
+            .collect()
+    }
+
+    async fn drain(
+        stream: impl futures_util::Stream<Item = Result<bytes::Bytes, axum::Error>>,
+    ) -> Vec<u8> {
+        use futures_util::StreamExt;
+        let mut out = Vec::new();
+        let mut stream = Box::pin(stream);
+        while let Some(chunk) = stream.next().await {
+            out.extend_from_slice(&chunk.expect("chunk"));
+        }
+        out
+    }
+
+    /// EDGE 1 — empty / zero-length body. Must not error, must yield an empty
+    /// prefix, must classify as the generic file path, and must replay nothing.
+    #[tokio::test]
+    async fn sniff_prefix_handles_empty_body() {
+        let (sniff, replay) = sniff_prefix(body_stream(vec![])).await.expect("empty ok");
+        assert!(sniff.is_empty());
+        assert_eq!(classify_non_video(&sniff), NonVideoKind::File);
+        assert!(drain(replay).await.is_empty());
+    }
+
+    /// EDGE 2 — body shorter than the 4096-byte sniff prefix. The loop must
+    /// terminate on stream end rather than waiting for a full prefix, and the
+    /// short body must replay byte-identically.
+    #[tokio::test]
+    async fn sniff_prefix_accepts_body_shorter_than_prefix() {
+        let png = raster_fixture("image/png");
+        let (sniff, replay) = sniff_prefix(body_stream(ok_chunks(&[&png])))
+            .await
+            .expect("short ok");
+        assert_eq!(sniff.len(), png.len());
+        assert!(sniff.len() < SNIFF_BYTES);
+        assert_eq!(classify_non_video(&sniff), NonVideoKind::Image);
+        assert_eq!(drain(replay).await, png, "short body must replay intact");
+    }
+
+    /// EDGE 3 — body longer than the prefix, split across chunk boundaries.
+    /// The prefix must be capped at exactly SNIFF_BYTES while the replay still
+    /// yields every original byte (this is what keeps the stored hash valid).
+    #[tokio::test]
+    async fn sniff_prefix_caps_at_limit_and_replays_every_byte() {
+        let mut first = raster_fixture("image/jpeg");
+        first.extend(std::iter::repeat_n(0xABu8, 3000));
+        let second = vec![0xCDu8; 5000];
+        let expected: Vec<u8> = first.iter().chain(second.iter()).copied().collect();
+
+        let (sniff, replay) = sniff_prefix(body_stream(ok_chunks(&[&first, &second])))
+            .await
+            .expect("long ok");
+        assert_eq!(sniff.len(), SNIFF_BYTES);
+        assert_eq!(&sniff[..], &expected[..SNIFF_BYTES]);
+        assert_eq!(
+            drain(replay).await,
+            expected,
+            "no byte may be lost or dupe'd"
+        );
+    }
+
+    /// EDGE 4 (negative) — transport error mid-probe must abort the upload as
+    /// an IO failure, never classify a truncated body.
+    #[tokio::test]
+    async fn sniff_prefix_propagates_transport_error() {
+        let chunks = vec![
+            Ok(bytes::Bytes::from_static(b"GIF89a")),
+            Err(axum::Error::new(std::io::Error::other("peer reset"))),
+        ];
+        let error = sniff_prefix(body_stream(chunks))
+            .await
+            .err()
+            .expect("transport error must abort");
+        assert!(matches!(error, MediaError::Io(_)), "got {error:?}");
+    }
+
+    /// EDGE 5 — cap boundary. A body of exactly `cap` bytes is accepted;
+    /// `cap + 1` is rejected as FileTooLarge with the governing cap reported.
+    #[tokio::test]
+    async fn buffer_non_video_accepts_cap_and_rejects_cap_plus_one() {
+        let config = cap_config(64, 52_428_800, 104_857_600);
+
+        let at_cap = vec![0u8; 64];
+        let bytes = buffer_non_video(
+            NonVideoKind::Gif,
+            &config,
+            body_stream(ok_chunks(&[&at_cap])),
+        )
+        .await
+        .expect("a body of exactly the cap must be accepted");
+        assert_eq!(bytes.len(), 64);
+
+        let over_cap = vec![0u8; 65];
+        let error = buffer_non_video(
+            NonVideoKind::Gif,
+            &config,
+            body_stream(ok_chunks(&[&over_cap])),
+        )
+        .await
+        .expect_err("cap + 1 must be rejected");
+        match error {
+            MediaError::FileTooLarge { size, max } => {
+                assert_eq!(max, 64, "the reported cap must be the governing one");
+                assert!(size > max, "reported size must exceed the cap");
+            }
+            other => panic!("expected FileTooLarge, got {other:?}"),
+        }
+    }
+
+    /// EDGE 6 (negative, the defect's whole point) — a GIF that fits under the
+    /// union of all caps but exceeds the GIF cap must be rejected. Under the
+    /// old union-sized buffer it would have been fully buffered first.
+    #[tokio::test]
+    async fn oversized_gif_is_rejected_by_the_gif_cap_not_the_union() {
+        let config = cap_config(32, 52_428_800, 104_857_600);
+        let mut gif = raster_fixture("image/gif");
+        gif.extend(std::iter::repeat_n(0u8, 1024));
+        assert!(
+            (gif.len() as u64) < config.max_image_bytes.max(config.max_file_bytes),
+            "fixture must fit under the union cap, else the test proves nothing"
+        );
+
+        let kind = classify_non_video(&gif);
+        assert_eq!(kind, NonVideoKind::Gif);
+        let error = buffer_non_video(kind, &config, body_stream(ok_chunks(&[&gif])))
+            .await
+            .expect_err("oversized gif must be rejected");
+        assert!(
+            matches!(error, MediaError::FileTooLarge { max: 32, .. }),
+            "got {error:?}"
+        );
+    }
+
+    /// EDGE 7 — sniff-vs-full-body disagreement at the boundary: a body whose
+    /// magic bytes say GIF but whose tail is arbitrary must still be capped as
+    /// a GIF. The sniff decides the cap; the full body is re-validated
+    /// downstream, so the sniff can never widen what is accepted.
+    #[tokio::test]
+    async fn disagreeing_tail_does_not_escape_the_sniffed_cap() {
+        let config = cap_config(4096, 8, 8);
+        let mut gif = raster_fixture("image/gif");
+        gif.extend_from_slice(&raster_fixture("image/png"));
+        gif.extend(std::iter::repeat_n(0u8, 100));
+
+        let kind = classify_non_video(&gif[..SNIFF_BYTES.min(gif.len())]);
+        assert_eq!(kind, NonVideoKind::Gif, "the head decides, not the tail");
+        let bytes = buffer_non_video(kind, &config, body_stream(ok_chunks(&[&gif])))
+            .await
+            .expect("within the gif cap");
+        assert_eq!(
+            &bytes[..],
+            &gif[..],
+            "body must reach the validator unmodified"
+        );
+    }
+
+    /// EDGE 8 (negative, authz) — the legacy `/media/upload` alias must reject
+    /// a generic file from the sniff prefix alone, before the body is buffered,
+    /// while the standard `/upload` route accepts it. Images pass on both.
+    #[test]
+    fn legacy_alias_rejects_generic_files_before_buffering() {
+        let generic = &b"%PDF-1.7"[..];
+        let kind = classify_non_video(generic);
+        assert_eq!(kind, NonVideoKind::File);
+
+        assert!(legacy_alias_rejects(kind, UploadRouteMode::LegacyMedia));
+        assert!(!legacy_alias_rejects(kind, UploadRouteMode::Upload));
+
+        for mime in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
+            let image_kind = classify_non_video(&raster_fixture(mime));
+            assert!(
+                !legacy_alias_rejects(image_kind, UploadRouteMode::LegacyMedia),
+                "{mime} must remain accepted on the legacy alias"
+            );
+        }
+    }
+
+    /// EDGE 9 — the rejection message derives from the sniffed bytes, and an
+    /// unsniffable body falls back to octet-stream rather than panicking or
+    /// echoing a client-supplied Content-Type.
+    #[test]
+    fn sniffed_mime_falls_back_to_octet_stream() {
+        assert_eq!(sniffed_mime(&raster_fixture("image/png")), "image/png");
+        assert_eq!(sniffed_mime(b""), "application/octet-stream");
+        assert_eq!(
+            sniffed_mime(b"not a known magic"),
+            "application/octet-stream"
+        );
+    }
+
+    /// EDGE 10 — concurrent uploaders. Each body is buffered against its own
+    /// governing cap with no shared state, so a saturating generic-file upload
+    /// cannot raise (or lower) the cap another concurrent GIF upload is held
+    /// to. Run as real concurrent tasks, not sequentially.
+    #[tokio::test]
+    async fn concurrent_uploads_are_capped_independently() {
+        let config = Arc::new(cap_config(32, 52_428_800, 104_857_600));
+
+        let gif_config = config.clone();
+        let gif_task = tokio::spawn(async move {
+            let mut gif = raster_fixture("image/gif");
+            gif.extend(std::iter::repeat_n(0u8, 4096));
+            buffer_non_video(
+                NonVideoKind::Gif,
+                &gif_config,
+                body_stream(ok_chunks(&[&gif])),
+            )
+            .await
+        });
+
+        let file_config = config.clone();
+        let file_task = tokio::spawn(async move {
+            let blob = vec![0u8; 512 * 1024];
+            buffer_non_video(
+                NonVideoKind::File,
+                &file_config,
+                body_stream(ok_chunks(&[&blob])),
+            )
+            .await
+        });
+
+        let gif_result = gif_task.await.expect("gif task");
+        let file_result = file_task.await.expect("file task");
+
+        assert!(
+            matches!(gif_result, Err(MediaError::FileTooLarge { max: 32, .. })),
+            "the concurrent generic upload must not relax the gif cap"
+        );
+        assert_eq!(
+            file_result
+                .expect("generic upload within its own cap")
+                .len(),
+            512 * 1024,
+            "the rejected gif must not fail an unrelated concurrent upload"
         );
     }
 
