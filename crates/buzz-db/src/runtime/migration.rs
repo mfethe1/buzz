@@ -716,6 +716,38 @@ mod postgres_tests {
         assert_eq!(migrations[47].version, 48);
         assert_eq!(migrations[48].version, 49);
         let task_changes = migrations[48].sql.as_str();
+
+        // Slot 46 is CHECKSUM-FROZEN to the fork's task system.
+        //
+        // Upstream independently took 0046 for `storage_accounting_snapshots`
+        // (block/buzz 6b1e45d2f6). Live fork relays have already applied OUR
+        // 0046, so sqlx has its checksum recorded in `_sqlx_migrations`.
+        // Swapping the file behind version 46 — or renumbering ours to free the
+        // slot — changes that checksum and makes sqlx refuse to boot with
+        // VersionMismatch, which needs manual DB repair to undo.
+        //
+        // So: never renumber our 0046. Any upstream sync that wants slot 46
+        // must move ITS migration to a free version instead. This assertion is
+        // the tripwire that makes such a sync fail here, loudly, in CI rather
+        // than at relay startup in production.
+        let frozen_46 = &migrations[45];
+        assert_eq!(
+            &*frozen_46.description, "task system",
+            "migration 46 must stay the fork's task system: it is already \
+             applied on live relays and its checksum is frozen"
+        );
+        assert!(
+            frozen_46.sql.as_str().contains("CREATE TABLE tasks"),
+            "migration 46 must still create the tasks table"
+        );
+        assert!(
+            !frozen_46
+                .sql
+                .as_str()
+                .contains("storage_accounting_snapshots"),
+            "upstream's storage accounting migration must NOT occupy slot 46 \
+             (renumber it to a free version when syncing block/buzz)"
+        );
         assert!(task_changes.contains("ALTER TABLE task_events ADD COLUMN changes JSONB"));
         assert!(task_changes.contains("ALTER COLUMN created_at SET DEFAULT clock_timestamp()"));
         assert!(!migrations[44].sql.as_str().contains("ADD COLUMN changes"));
