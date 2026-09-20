@@ -120,6 +120,10 @@ jobs:
         run: scripts/test-ci-required-context-isolation.sh
       - name: CI path selection regression tests
         run: node --test scripts/ci-selection.test.mjs
+      - name: Product DCO regressions
+        run: node --test .github/scripts/product-dco.test.js
+      - name: Product qualification regressions
+        run: python3 scripts/test-product-qualification.py
       - name: File size policy
         run: just file-size-check
 
