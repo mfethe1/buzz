@@ -276,8 +276,9 @@ one.
   directives. Any revive-on-abnormal-death policy carries a universal
   precondition: the supervisor can distinguish intent from accident only
   if the harness formally promises *clean exit = exit code 0* on every
-  intentional path and nonzero otherwise, pinned by test. At `28ae6cd21`
-  that property is emergent, not defended (Known Defect 6);
+  intentional path and nonzero otherwise, pinned by test. That contract
+  now exists and is pinned (`buzz-acp/src/exit.rs`; Known Defect 6
+  resolved);
   restart-on-failure before the pinned contract is how a refactor
   silently converts every clean stop into a restart loop with no failing
   test. Ordering is normative: exit-code contract first,
@@ -1438,8 +1439,8 @@ is conforming iff:
    swallows the signal conforms to nothing.
 4. Intentional termination (owner `!shutdown`, inactivity reap) exits
    through the harness's graceful path under the **pinned clean-exit
-   contract** (intentional exit ⇒ exit code 0 — Known Defect 6 until the
-   contract lands).
+   contract** (intentional exit ⇒ exit code 0 — `buzz-acp/src/exit.rs`,
+   Known Defect 6 resolved).
 5. Any supervisor the launcher configures **never restarts an intentional
    clean exit** (I5). `Restart=always` and equivalents are non-conforming
    at this layer no matter what the substrate calls them.
@@ -1640,19 +1641,25 @@ Desktop- and harness-side, discovered during this design:
    description, until the deploy command performs
    resolve-once → stage-and-digest → `info` → explicit-version check →
    `deploy`, both invocations running the staged bytes.
-6. **The clean-exit contract is emergent, not defended** (harness code
-   prerequisite; gates `OnFailure`). At `28ae6cd21`: the graceful path
-   returns `Ok(())` (`lib.rs:2723`), and owner `!shutdown` (`:2045`),
-   Ctrl-C (`:1635`), and
-   SIGTERM (`:1644`) all route into the same shutdown channel — so clean
-   stops exit 0 *today*, but no distinguished exit code exists and no test
-   pins "intentional exit ⇒ 0"; every `process::exit(1)` in the crate is a
-   startup failure. Until a
-   pinned, tested exit-code contract lands, no supervisor restart policy
-   (`restartPolicy: OnFailure`, systemd `Restart=on-failure`) may be
-   deployed against the harness: a refactor returning `Err` from a drain
-   timeout would silently convert every clean stop into a restart loop —
-   I5 defeated with no failing test (I5 ordering rule).
+6. **RESOLVED** (was: the clean-exit contract is emergent, not defended;
+   gated `OnFailure`). The contract now exists and is defended:
+   `crates/buzz-acp/src/exit.rs` defines `Disposition` with `EXIT_CLEAN = 0`
+   and `EXIT_FAILURE = 1`, `run()` returns `Result<exit::Disposition>`, and
+   both entrypoints that own a process exit — `buzz-acp` (`main.rs`) and the
+   `sprig` multicall binary that the container image runs (`sprig/src/main.rs`)
+   — map it through `ExitCode`, so neither can regress independently.
+   `finish_intentional_stop` (`lib.rs`) absorbs graceful-tail failures by
+   construction: the stop is classified *before* best-effort cleanup runs, so
+   a future `?` in the tail cannot convert a clean stop into a restart loop.
+   Pinned by `exit::tests` (disposition/code mapping), `clean_exit_tests`
+   (tail-failure absorption), and `tests/clean_exit_contract.rs` (spawns the
+   real binary and asserts distinguishable observed codes).
+   The tail-absorption test is mutation-verified: reintroducing the bug makes
+   `a_failing_graceful_tail_still_exits_clean` fail.
+   **`OnFailure` is now unblocked at the harness layer.** Flipping
+   `RESTART_POLICY` (`buzz-backend-kubernetes/src/pod.rs`, and its
+   `restart_policy_is_never` test) is a separate, now-permitted change; it
+   still requires I5's reaper semantics to hold end-to-end.
 7. **The shutdown tail overruns the declared grace budget at default
    config** (harness code prerequisite). At `28ae6cd21`: the post-drain
    reap segment
@@ -1701,7 +1708,7 @@ Desktop- and harness-side, discovered during this design:
 | Presence publish / offline-on-exit | `crates/buzz-acp/src/lib.rs` (`publish_presence`, shutdown path) |
 | `!shutdown` owner check | `crates/buzz-acp/src/lib.rs` (main loop) |
 | Graceful shutdown path (budget enforcement *to be added* — Known Defect 7) | `crates/buzz-acp/src/lib.rs` (pool shutdown, then drain / reap / presence / relay close) |
-| Clean-exit exit-code contract | *to be added*: `crates/buzz-acp` distinguished exit codes + pinning test (Known Defect 6; gates `OnFailure`) |
+| Clean-exit exit-code contract | `crates/buzz-acp/src/exit.rs` (`Disposition`, `EXIT_CLEAN`/`EXIT_FAILURE`), `lib.rs` `finish_intentional_stop`, `buzz-acp/src/main.rs` + `sprig/src/main.rs` `ExitCode` mapping; pinned by `exit::tests`, `clean_exit_tests`, `tests/clean_exit_contract.rs` (Known Defect 6 resolved; unblocks `OnFailure`) |
 | Auto-stop flag | *to be added*: `crates/buzz-acp/src/config.rs` + a pool-independent timer (NOT the `pool_ready`-gated maintenance tick — Known Defect 4) + `RESERVED_ENV_KEYS` entry |
 | Kubernetes binding | *to be added*: `crates/buzz-backend-kubernetes` |
 | Sprig image | *to be added*: `Dockerfile.sprig` + workflow |

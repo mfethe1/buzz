@@ -3,6 +3,7 @@
 mod acp;
 mod config;
 mod engram_fetch;
+pub mod exit;
 mod filter;
 mod observer;
 mod pool;
@@ -2608,13 +2609,20 @@ mod replay_floor_tests {
     }
 }
 
-pub fn run() -> Result<()> {
+/// Run the harness to completion.
+///
+/// `Ok(Disposition::IntentionalStop)` means the process stopped because it was
+/// told to (owner `!shutdown`, SIGTERM/SIGINT) or because it reached the
+/// inactivity bound its owner declared. Callers MUST map that to exit code 0
+/// so a supervisor does not restart it — see [`exit`] and
+/// `docs/remote-agents.md` Known Defect 6.
+pub fn run() -> Result<exit::Disposition> {
     config::propagate_legacy_env_vars();
     tokio_main()
 }
 
 #[tokio::main]
-async fn tokio_main() -> Result<()> {
+async fn tokio_main() -> Result<exit::Disposition> {
     // Install the ring crypto provider for rustls (required for wss:// connections).
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -2628,7 +2636,10 @@ async fn tokio_main() -> Result<()> {
             .map(|(_, a)| a)
             .collect();
         let args = ModelsArgs::parse_from(&filtered);
-        return run_models(args).await;
+        // A subcommand that ran to completion is an intentional stop.
+        return run_models(args)
+            .await
+            .map(|()| exit::Disposition::IntentionalStop);
     }
 
     if is_subcommand("auth-methods") {
@@ -2638,7 +2649,10 @@ async fn tokio_main() -> Result<()> {
             .map(|(_, a)| a)
             .collect();
         let args = AuthMethodsArgs::parse_from(&filtered);
-        return run_auth_methods(args).await;
+        // A subcommand that ran to completion is an intentional stop.
+        return run_auth_methods(args)
+            .await
+            .map(|()| exit::Disposition::IntentionalStop);
     }
 
     if is_subcommand("authenticate") {
@@ -2648,7 +2662,10 @@ async fn tokio_main() -> Result<()> {
             .map(|(_, a)| a)
             .collect();
         let args = AuthenticateArgs::parse_from(&filtered);
-        return run_authenticate(args).await;
+        // A subcommand that ran to completion is an intentional stop.
+        return run_authenticate(args)
+            .await
+            .map(|()| exit::Disposition::IntentionalStop);
     }
 
     tracing_subscriber::fmt()
@@ -2669,7 +2686,10 @@ async fn tokio_main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("setup payload error: {e}"))?
     {
         tracing::info!("buzz-acp: setup payload present, entering setup-listener mode");
-        return setup_mode::run_setup_listener(config, payload).await;
+        // Setup mode runs to completion and exits; that is intentional.
+        return setup_mode::run_setup_listener(config, payload)
+            .await
+            .map(|()| exit::Disposition::IntentionalStop);
     }
 
     tracing::info!("buzz-acp starting: {}", config.summary());
@@ -4404,8 +4424,55 @@ async fn tokio_main() -> Result<()> {
     // for the background task to finish, rather than aborting immediately (#40).
     relay.shutdown().await;
 
+    // The stop was intentional; the graceful tail above is best-effort and
+    // must not change the exit code (I5).
+    Ok(finish_intentional_stop(Ok(())))
+}
+
+/// Finish an intentional stop.
+///
+/// The graceful tail (drain, reap, presence `offline`, relay close) is
+/// best-effort cleanup that runs *after* the decision to stop. Its failures
+/// are logged, never propagated: converting a cleanup failure into a nonzero
+/// exit would tell the supervisor the agent crashed, and `OnFailure` would
+/// restart an agent its owner deliberately stopped (`docs/remote-agents.md`
+/// Known Defect 6, invariant I5).
+///
+/// Routing the tail through this function makes that guarantee structural
+/// rather than conventional: a future refactor that returns `Err` from
+/// cleanup still exits 0.
+fn finish_intentional_stop(tail: Result<()>) -> exit::Disposition {
+    if let Err(error) = tail {
+        tracing::warn!(
+            %error,
+            "graceful shutdown step failed; exiting cleanly anyway because \
+             the stop was intentional (I5)"
+        );
+    }
     tracing::info!("buzz-acp stopped");
-    Ok(())
+    exit::Disposition::IntentionalStop
+}
+
+#[cfg(test)]
+mod clean_exit_tests {
+    use super::*;
+
+    // The regression pin. Before the clean-exit contract, the graceful tail's
+    // outcome reached `main` and a failing drain would exit nonzero, causing
+    // `restartPolicy: OnFailure` to restart a deliberately stopped agent.
+    #[test]
+    fn a_failing_graceful_tail_still_exits_clean() {
+        let disposition = finish_intentional_stop(Err(anyhow::anyhow!("drain timed out")));
+        assert_eq!(disposition, exit::Disposition::IntentionalStop);
+        assert_eq!(disposition.exit_code(), exit::EXIT_CLEAN);
+        assert!(!disposition.supervisor_may_restart());
+    }
+
+    #[test]
+    fn a_successful_graceful_tail_exits_clean() {
+        let disposition = finish_intentional_stop(Ok(()));
+        assert_eq!(disposition.exit_code(), exit::EXIT_CLEAN);
+    }
 }
 
 #[derive(PartialEq)]
