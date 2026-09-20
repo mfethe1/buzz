@@ -46,6 +46,7 @@ void main() {
     expect(find.bySemanticsLabel('Home'), findsOneWidget);
     expect(find.bySemanticsLabel('Activity'), findsOneWidget);
     expect(find.bySemanticsLabel('Search'), findsOneWidget);
+    expect(find.bySemanticsLabel('Tasks'), findsOneWidget);
 
     final quickAction = find.byTooltip('Create or start conversation');
     expect(quickAction, findsOneWidget);
