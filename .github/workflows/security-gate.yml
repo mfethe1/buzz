@@ -6,7 +6,7 @@ name: Security Gate
 # never checks out with write-token privileges against untrusted fork code.
 on:
   push:
-    branches: [main]
+    branches: [main, product/main]
   pull_request:
 
 concurrency:
