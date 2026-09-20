@@ -55,6 +55,7 @@ pub const CONTROL_PLANE_TABLES: &[&str] = &[
 /// approval and again before PostgreSQL purge. A new tenant table therefore
 /// blocks deletion until this manifest is intentionally updated.
 pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
+    "agent_capability_grants",
     "api_tokens",
     "archived_identities",
     "audit_log",
@@ -89,6 +90,7 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
 
 /// Foreign-key-safe child-before-parent order for the PostgreSQL purge.
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
+    "agent_capability_grants",
     "workflow_approvals",
     "scheduled_workflow_fires",
     "workflow_runs",
