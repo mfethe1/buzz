@@ -489,6 +489,7 @@ mod postgres_tests {
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "storage_accounting_snapshots",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -709,12 +710,19 @@ mod postgres_tests {
         // 0048_community_brand_color (REG-10; renumbered from 0037, which is
         // upstream-owned relay_admin_action_lease), and 0049 structured task
         // history. All stay additive for existing deployments.
-        assert_eq!(migrations.len(), 49);
+        assert_eq!(migrations.len(), 50);
         assert_eq!(migrations[44].version, 45);
         assert_eq!(migrations[45].version, 46);
         assert_eq!(migrations[46].version, 47);
         assert_eq!(migrations[47].version, 48);
         assert_eq!(migrations[48].version, 49);
+        // Upstream's storage accounting migration, renumbered 0046 -> 0051 on
+        // sync (slot 46 is frozen below; 0050 is reserved by feat/HW-017).
+        assert_eq!(migrations[49].version, 51);
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE storage_accounting_snapshots"));
         let task_changes = migrations[48].sql.as_str();
 
         // Slot 46 is CHECKSUM-FROZEN to the fork's task system.
@@ -1330,6 +1338,11 @@ mod postgres_tests {
         // The restored exclusion function must NOT list any NIP-FI relation.
         assert!(!ledger_removal.contains("'authorization_operation_receipts'"));
         assert!(!ledger_removal.contains("'identity_bindings'"));
+        assert_eq!(migrations[45].version, 46);
+        assert!(migrations[45]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE storage_accounting_snapshots"));
         // schema.sql exclusion list must match the restored (pre-0041) body.
         assert!(
             desired_schema.contains("'rate_limit_violations'\n    ]::TEXT[])"),
