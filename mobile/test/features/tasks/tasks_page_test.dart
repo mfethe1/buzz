@@ -79,10 +79,7 @@ void main() {
         relayConfigProvider.overrideWith(_TestRelayConfig.new),
         tasksHttpClientProvider.overrideWithValue(client),
       ],
-      child: MaterialApp(
-        theme: AppTheme.light(),
-        home: const TasksPage(),
-      ),
+      child: MaterialApp(theme: AppTheme.light(), home: const TasksPage()),
     );
   }
 
@@ -92,8 +89,7 @@ void main() {
       buildTasks(
         requested: requested,
         tasks: [
-          _task('t-1', 'Ship the push gateway', 'in_progress',
-              assignee: 'ada'),
+          _task('t-1', 'Ship the push gateway', 'in_progress', assignee: 'ada'),
           _task('t-2', 'Renumber the migration', 'open'),
           _task('t-3', 'Archive the old fixtures', 'done'),
         ],

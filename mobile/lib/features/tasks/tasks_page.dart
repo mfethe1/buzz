@@ -89,9 +89,10 @@ class TasksPage extends HookConsumerWidget {
                 : 'Could not load tasks',
             onRetry: () => ref.invalidate(communityTasksProvider),
           ),
-          AsyncValue(:final value?) => value.isEmpty
-              ? _TasksEmpty(filter: filter)
-              : _TaskList(tasks: value, scrollController: scrollController),
+          AsyncValue(:final value?) =>
+            value.isEmpty
+                ? _TasksEmpty(filter: filter)
+                : _TaskList(tasks: value, scrollController: scrollController),
           _ => const Center(child: BuzzLoadingIndicator()),
         },
       ),
@@ -244,23 +245,19 @@ String _formatRelative(DateTime value) {
   return _formatDate(value);
 }
 
-(IconData, Color) _statusVisual(BuildContext context, TaskStatus status) =>
-    switch (status) {
-      TaskStatus.todo => (LucideIcons.circle, context.colors.onSurfaceVariant),
-      TaskStatus.inProgress => (
-        LucideIcons.circleDashed,
-        context.colors.primary,
-      ),
-      TaskStatus.blocked => (LucideIcons.circleAlert, context.colors.error),
-      TaskStatus.done => (
-        LucideIcons.circleCheck,
-        context.colors.onSurfaceVariant,
-      ),
-      TaskStatus.cancelled => (
-        LucideIcons.circleSlash,
-        context.colors.onSurfaceVariant,
-      ),
-    };
+(IconData, Color) _statusVisual(
+  BuildContext context,
+  TaskStatus status,
+) => switch (status) {
+  TaskStatus.todo => (LucideIcons.circle, context.colors.onSurfaceVariant),
+  TaskStatus.inProgress => (LucideIcons.circleDashed, context.colors.primary),
+  TaskStatus.blocked => (LucideIcons.circleAlert, context.colors.error),
+  TaskStatus.done => (LucideIcons.circleCheck, context.colors.onSurfaceVariant),
+  TaskStatus.cancelled => (
+    LucideIcons.circleSlash,
+    context.colors.onSurfaceVariant,
+  ),
+};
 
 class _TasksEmpty extends StatelessWidget {
   const _TasksEmpty({required this.filter});
