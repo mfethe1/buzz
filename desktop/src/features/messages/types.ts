@@ -49,4 +49,16 @@ export type TimelineMessage = {
   kind?: number;
   tags?: string[][];
   reactions?: TimelineReaction[];
+  /**
+   * Resolved `kind:40009` transcript for a voice note, when one has been
+   * published for this message. Absent means "not transcribed", never "empty".
+   */
+  transcript?: {
+    /** Event id of the winning transcript (first writer per note). */
+    id: string;
+    createdAt: number;
+    /** Signer of the transcript — not necessarily the voice note's author. */
+    pubkey: string;
+    text: string;
+  };
 };

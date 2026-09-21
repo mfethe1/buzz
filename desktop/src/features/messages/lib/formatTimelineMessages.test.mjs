@@ -14,6 +14,7 @@ import {
   CHANNEL_TIMELINE_CONTENT_KINDS,
   KIND_HUDDLE_ENDED,
   KIND_HUDDLE_STARTED,
+  KIND_VOICE_NOTE_TRANSCRIPT,
 } from "@/shared/constants/kinds";
 
 const HEX64_A =
@@ -772,4 +773,208 @@ test("verified agent owner may publish a suppression edit", () => {
     message.tags.some((tag) => tag[0] === "link-preview"),
     true,
   );
+});
+
+// --- voice-note transcripts (kind:40009 overlays) ---------------------------
+
+const CHANNEL = { id: CHANNEL_ID };
+
+const HEX64_C =
+  "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+const VOICE_NOTE_IMETA = [
+  "imeta",
+  "url https://blossom.example/voice-note-1.wav",
+  "m audio/wav",
+  `x ${"c".repeat(64)}`,
+  "size 4096",
+  "filename voice-note-1.wav",
+  "duration 12",
+];
+
+/** A real voice note: a message whose imeta tags carry an audio attachment. */
+function voiceNoteMessage(overrides = {}) {
+  return streamMessage({
+    content: "![audio](https://blossom.example/voice-note-1.wav)",
+    tags: [["h", CHANNEL_ID], VOICE_NOTE_IMETA],
+    ...overrides,
+  });
+}
+
+function transcriptEvent(overrides = {}) {
+  return {
+    id: HEX64_B,
+    pubkey: PUBKEY_B,
+    kind: 40009,
+    created_at: 1_700_000_100,
+    content: "spoken words",
+    tags: [
+      ["e", HEX64_A, "", "mention"],
+      ["h", CHANNEL_ID],
+    ],
+    sig: "sig",
+    ...overrides,
+  };
+}
+
+test("a transcript overlay attaches to the voice note it anchors", () => {
+  const [message] = formatTimelineMessages(
+    [voiceNoteMessage(), transcriptEvent()],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  assert.equal(message.transcript.text, "spoken words");
+  assert.equal(message.transcript.pubkey, PUBKEY_B);
+});
+
+test("the transcript event does not itself render as a timeline row", () => {
+  const out = formatTimelineMessages(
+    [voiceNoteMessage(), transcriptEvent()],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  assert.equal(out.length, 1);
+  assert.equal(out[0].id, HEX64_A);
+});
+
+test("a message with no transcript leaves the field absent", () => {
+  const [message] = formatTimelineMessages(
+    [voiceNoteMessage()],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  assert.equal(message.transcript, undefined);
+});
+
+test("a transcript scoped to another channel is not attached", () => {
+  const [message] = formatTimelineMessages(
+    [
+      voiceNoteMessage(),
+      transcriptEvent({
+        tags: [
+          ["e", HEX64_A, "", "mention"],
+          ["h", "00000000-0000-0000-0000-000000000000"],
+        ],
+      }),
+    ],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  assert.equal(message.transcript, undefined);
+});
+
+// Anchor eligibility. Channel scoping alone does not make a transcript safe:
+// every member is in the channel, so a member-signed 40009 aimed at somebody
+// else's PLAIN TEXT message would otherwise render attacker text inside that
+// author's row. Only audio-bearing messages may be transcribed.
+test("a transcript anchored to a plain-text message is denied (text injection)", () => {
+  const [message] = formatTimelineMessages(
+    [
+      streamMessage(),
+      transcriptEvent({ content: "I hereby authorize the wire transfer." }),
+    ],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  assert.equal(message.transcript, undefined);
+  assert.equal(message.body, "hello world");
+});
+
+test("a transcript anchored to a non-audio attachment (image) is denied", () => {
+  const imageNote = streamMessage({
+    content: "![img](https://blossom.example/pic.png)",
+    tags: [
+      ["h", CHANNEL_ID],
+      [
+        "imeta",
+        "url https://blossom.example/pic.png",
+        "m image/png",
+        `x ${"d".repeat(64)}`,
+        "size 2048",
+        "filename pic.png",
+      ],
+    ],
+  });
+  const [message] = formatTimelineMessages(
+    [imageNote, transcriptEvent()],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  assert.equal(message.transcript, undefined);
+});
+
+test("a voice note published as video/mp4 still accepts a transcript", () => {
+  // iOS-recorded voice notes arrive as video/mp4; isAudioAttachment already
+  // treats a voice-note-*.mp4 as audio, so eligibility must follow that rule
+  // rather than a narrower mime check of its own.
+  const mp4Note = voiceNoteMessage({
+    tags: [
+      ["h", CHANNEL_ID],
+      [
+        "imeta",
+        "url https://blossom.example/voice-note-2.mp4",
+        "m video/mp4",
+        `x ${"e".repeat(64)}`,
+        "size 8192",
+        "filename voice-note-2.mp4",
+        "duration 9",
+      ],
+    ],
+  });
+  const [message] = formatTimelineMessages(
+    [mp4Note, transcriptEvent()],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  assert.equal(message.transcript.text, "spoken words");
+});
+
+test("an ineligible anchor in the feed does not suppress a real voice note", () => {
+  // The denial must be scoped to the ineligible anchor only: a spoofed 40009
+  // aimed at a plain-text message must not disturb resolution for a genuine
+  // voice note carried in the same format pass.
+  const out = formatTimelineMessages(
+    [
+      streamMessage(),
+      transcriptEvent({ content: "injected" }),
+      voiceNoteMessage({ id: HEX64_C, created_at: 1_700_000_200 }),
+      transcriptEvent({
+        id: "f".repeat(64),
+        created_at: 1_700_000_300,
+        tags: [
+          ["e", HEX64_C, "", "mention"],
+          ["h", CHANNEL_ID],
+        ],
+      }),
+    ],
+    CHANNEL,
+    undefined,
+    null,
+  );
+  const plain = out.find((row) => row.id === HEX64_A);
+  const note = out.find((row) => row.id === HEX64_C);
+  assert.equal(plain.transcript, undefined);
+  assert.equal(note.transcript.text, "spoken words");
+});
+
+test("the resolver filters on the shared kind constant", () => {
+  // The resolver imports KIND_VOICE_NOTE_TRANSCRIPT rather than hardcoding the
+  // number; this pins the constant's value so a renumber is a loud failure.
+  assert.equal(KIND_VOICE_NOTE_TRANSCRIPT, 40009);
+  assert.equal(transcriptEvent().kind, KIND_VOICE_NOTE_TRANSCRIPT);
+});
+
+test("transcripts are an aux overlay kind, never a timeline row kind", () => {
+  assert.ok(CHANNEL_AUX_EVENT_KINDS.includes(KIND_VOICE_NOTE_TRANSCRIPT));
+  assert.ok(
+    !CHANNEL_TIMELINE_CONTENT_KINDS.includes(KIND_VOICE_NOTE_TRANSCRIPT),
+  );
+  assert.equal(isTimelineContentEvent(transcriptEvent()), false);
 });
