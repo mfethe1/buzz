@@ -330,6 +330,24 @@ pub const KIND_REPORT: u32 = 1984;
 /// deployment feedback table, and never stored or fanned out as an event.
 pub const KIND_PRODUCT_FEEDBACK: u32 = 42000;
 
+/// Speech-to-text transcript for an already-published voice note.
+///
+/// A voice note is a signed event: once it is out, its `imeta alt` can no
+/// longer be amended, so a transcript cannot be attached in place. This kind
+/// carries the transcript as a separate, independently signed overlay event
+/// anchored to the voice note it describes:
+///
+/// - `content` — the transcript text.
+/// - `["e", <voice-note-event-id>, "", "mention"]` — the transcript-of anchor.
+/// - `["h", <channel>]` — inherits the voice note's channel scoping, so the
+///   transcript is visible to exactly the readers of the note it transcribes.
+///
+/// Publishing requires no new authority: the transcriber signs as itself and
+/// must already hold post rights in the channel. Readers resolve overlays
+/// first-writer-wins per anchored event id, since signed events cannot be
+/// amended and a second transcript is a competing claim, not a correction.
+pub const KIND_VOICE_NOTE_TRANSCRIPT: u32 = 40009;
+
 // NIP-29 group admin events
 /// NIP-29: Add a user to a group.
 pub const KIND_NIP29_PUT_USER: u32 = 9000;
@@ -709,6 +727,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PRIVATE_MANAGED_AGENT,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
+    KIND_VOICE_NOTE_TRANSCRIPT,
     KIND_NIP29_PUT_USER,
     KIND_NIP29_REMOVE_USER,
     KIND_NIP29_EDIT_METADATA,
@@ -957,6 +976,17 @@ mod tests {
         for &k in ALL_KINDS {
             assert!(seen.insert(k), "duplicate kind value: {k}");
         }
+    }
+
+    #[test]
+    fn voice_note_transcript_is_a_stored_regular_kind() {
+        // The whole point of the overlay is durability: a transcript must be
+        // persisted and refetchable long after the transcriber disconnects.
+        // An ephemeral or replaceable number would silently break that.
+        assert!(!is_ephemeral(KIND_VOICE_NOTE_TRANSCRIPT));
+        assert!(!is_replaceable(KIND_VOICE_NOTE_TRANSCRIPT));
+        assert!(!is_parameterized_replaceable(KIND_VOICE_NOTE_TRANSCRIPT));
+        assert!(!is_relay_only_kind(KIND_VOICE_NOTE_TRANSCRIPT));
     }
 
     #[test]
