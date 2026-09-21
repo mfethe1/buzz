@@ -357,6 +357,11 @@ impl Db {
         community_id: CommunityId,
         brand_color: Option<&str>,
     ) -> Result<()> {
+        let mut connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
         sqlx::query(
             r#"
             UPDATE communities
@@ -366,7 +371,7 @@ impl Db {
         )
         .bind(community_id.as_uuid())
         .bind(brand_color)
-        .execute(&self.pool)
+        .execute(&mut *connection)
         .await?;
         Ok(())
     }
