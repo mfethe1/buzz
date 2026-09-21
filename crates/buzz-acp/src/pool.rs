@@ -2450,6 +2450,22 @@ pub async fn run_prompt_task(
         None => PromptSource::Heartbeat,
     };
     let observer_channel_id = source.channel_id();
+    // Stamp delegations spawned during this turn with the thread that asked for
+    // them. The turn that *observes* a delegation finishing is usually a later
+    // turn (often the channel-less idle heartbeat), so the originating thread
+    // must be captured here, at spawn time, or the result has nowhere to go.
+    agent.acp.set_delegation_origin(batch.as_ref().map(|b| {
+        let thread_tags = b
+            .events
+            .last()
+            .map(|be| crate::queue::parse_thread_tags(&be.event))
+            .unwrap_or_default();
+        crate::subagent::DelegationOrigin {
+            channel_id: b.channel_id.to_string(),
+            root_event_id: thread_tags.root_event_id,
+            parent_event_id: thread_tags.parent_event_id,
+        }
+    }));
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
@@ -5699,6 +5715,66 @@ pub(crate) async fn post_failure_notice(
     }
 }
 
+/// Post one finished delegation's report back into the thread that requested it.
+///
+/// Delegations outlive the turn that spawned them: the agent process reports
+/// completion on a later `session/update`, which is usually observed by an idle
+/// heartbeat turn with no channel of its own. Without the origin captured at
+/// spawn time there is no thread to answer, and the result is silently dropped —
+/// the requester waits forever for a delegation that already finished.
+///
+/// Best-effort and non-fatal: a delivery failure is logged, never retried, and
+/// never blocks the agent returning to the pool.
+pub(crate) async fn post_delegation_result(
+    rest: &crate::relay::RestClient,
+    completed: &crate::subagent::CompletedSubagent,
+) {
+    // No origin means the spawning turn had no channel (e.g. a heartbeat):
+    // there is no thread waiting on the answer, so there is nothing to deliver.
+    let Some(origin) = completed.origin.as_ref() else {
+        return;
+    };
+    let Ok(channel_id) = Uuid::parse_str(&origin.channel_id) else {
+        tracing::warn!(
+            channel = %origin.channel_id,
+            "delegation result: unparsable origin channel — dropping"
+        );
+        return;
+    };
+    let thread_tags = ThreadTags {
+        root_event_id: origin.root_event_id.clone(),
+        parent_event_id: origin.parent_event_id.clone(),
+        mentioned_pubkeys: Vec::new(),
+    };
+    let content = delegation_result_content(completed);
+    // `post_failure_notice` is the shared signed kind:9 thread-post path; its
+    // name reflects its first caller, not a constraint on the content. Reusing
+    // it keeps delivery on the one audited publish path (build → sign → submit,
+    // 5s timeout, errors swallowed) instead of forking a second one.
+    post_failure_notice(rest, channel_id, &thread_tags, &content).await;
+}
+
+/// Render the message body for a finished delegation.
+///
+/// Pure so the wording is testable without a relay. The summary goes on its own
+/// paragraph: summaries are multi-line agent reports, and inlining them after a
+/// colon made the status line unreadable in the client.
+pub(crate) fn delegation_result_content(completed: &crate::subagent::CompletedSubagent) -> String {
+    let status = completed.status;
+    let name = &completed.name;
+    // A whitespace-only summary is treated as absent: emitting the header plus
+    // dangling blank lines reads as a rendering bug to the user.
+    match completed
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(summary) => format!("Delegation `{name}` {status}.\n\n{summary}"),
+        None => format!("Delegation `{name}` {status}, with no summary reported."),
+    }
+}
+
 /// Best-effort: remove a reaction via a signed kind:5 (NIP-09) deletion event.
 ///
 /// Queries kind:7 reactions by our pubkey targeting the event, finds the matching
@@ -5887,6 +5963,52 @@ mod tests {
             "an accepted ack has nothing to explain"
         );
         assert_eq!(event.pubkey, keys.public_key());
+    }
+
+    fn completed(
+        status: &'static str,
+        summary: Option<&str>,
+    ) -> crate::subagent::CompletedSubagent {
+        crate::subagent::CompletedSubagent {
+            tool_call_id: "tool-call-1".to_string(),
+            name: "reviewer".to_string(),
+            status,
+            summary: summary.map(str::to_string),
+            origin: None,
+        }
+    }
+
+    #[test]
+    fn delegation_result_puts_the_summary_on_its_own_paragraph() {
+        // Summaries are multi-line agent reports; inlining them after a colon
+        // made the status line unreadable in the client.
+        let content = delegation_result_content(&completed("complete", Some("line one\nline two")));
+        assert_eq!(
+            content,
+            "Delegation `reviewer` complete.\n\nline one\nline two"
+        );
+    }
+
+    #[test]
+    fn delegation_result_without_a_summary_says_so_rather_than_trailing_off() {
+        // A bare "Delegation `x` failed." reads like the message was truncated;
+        // the absence of a summary is itself information the user needs.
+        let content = delegation_result_content(&completed("failed", None));
+        assert_eq!(
+            content,
+            "Delegation `reviewer` failed, with no summary reported."
+        );
+    }
+
+    #[test]
+    fn delegation_result_treats_a_blank_summary_as_no_summary() {
+        // A Some("   ") from a chatty-but-empty agent must not render as a
+        // header followed by dangling blank lines.
+        let content = delegation_result_content(&completed("complete", Some("  \n ")));
+        assert_eq!(
+            content,
+            "Delegation `reviewer` complete, with no summary reported."
+        );
     }
 
     #[test]

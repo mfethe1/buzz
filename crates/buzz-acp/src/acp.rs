@@ -600,6 +600,22 @@ impl AcpClient {
         self.observer.clone()
     }
 
+    /// Stamp delegations spawned from now on with the thread of the running
+    /// turn, so their results can be routed back to the waiting author rather
+    /// than surfacing in whichever turn happens to observe completion.
+    pub(crate) fn set_delegation_origin(
+        &mut self,
+        origin: Option<crate::subagent::DelegationOrigin>,
+    ) {
+        self.subagent_tracker.set_origin(origin);
+    }
+
+    /// Drain delegation results that reached a terminal status and have not
+    /// been delivered to their originating thread yet.
+    pub(crate) fn take_completed_subagents(&mut self) -> Vec<crate::subagent::CompletedSubagent> {
+        self.subagent_tracker.take_completed()
+    }
+
     /// Return the pool slot index for this agent process.
     pub(crate) fn observer_agent_index(&self) -> Option<usize> {
         self.observer_agent_index
