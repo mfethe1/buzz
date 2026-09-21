@@ -58,6 +58,27 @@ pub enum Startup {
     /// Still recoverable in the *never delete* sense — this only changes what
     /// we report and how long we wait.
     NeverStartedPullFailing(PullFailure),
+    /// The harness started, died abnormally, and the kubelet is reviving it
+    /// under `restartPolicy: OnFailure` (§Pod shape, indefinite lifetime).
+    ///
+    /// This is its own row because it satisfies no other: the pod sits in
+    /// phase `Running` with `state.waiting{reason: CrashLoopBackOff}` and
+    /// `restartCount > 0` — not deletion-marked, not `Terminated` (the
+    /// kubelet keeps restarting it), not `Started` (`state.running` is
+    /// false), and emphatically not never-started (it started, repeatedly).
+    ///
+    /// Without this row a crash-looping harness falls through the waiting
+    /// arm's catch-all to [`Startup::NeverStartedRecoverable`], whose
+    /// intent-matching branch returns [`Action::Observe`] — the reconciler
+    /// would wait out its deadline on a pod the kubelet is actively
+    /// reviving, and report "still coming up" for a harness that cannot
+    /// stay up. That silent misread is why `OnFailure` was gated on this
+    /// classification and not on the exit-code contract alone.
+    CrashLooping {
+        /// `restartCount` as reported by the kubelet — evidence the harness
+        /// started before it died, and the operator's loop-severity signal.
+        restarts: i32,
+    },
 }
 
 /// A pod that passed identity and ownership verification: label-selected,
@@ -98,6 +119,16 @@ pub enum Action {
     /// Surface an actionable condition immediately rather than burning the
     /// deadline on a failure that will not self-heal.
     Report { name: String, failure: PullFailure },
+    /// Surface a crash-looping harness immediately (§Pod shape, `OnFailure`).
+    ///
+    /// Distinct from [`Action::Report`], which is typed to pull failures: a
+    /// crash loop is a *started-then-died* condition, so widening `Report`
+    /// would erase the very distinction this row exists to make. Like
+    /// `Report` it carries **no delete authority** — the kubelet owns the
+    /// restart, and a backoff-delayed container may still come up; deleting
+    /// here would race the kubelet and destroy the crash evidence (logs,
+    /// `lastState.terminated`) the operator needs.
+    ReportCrashLoop { name: String, restarts: i32 },
 }
 
 /// Apply the spec's ordered rules to one verified observation.
@@ -152,6 +183,23 @@ pub fn classify(observed: Option<&VerifiedPod>, desired: &Fingerprint) -> Action
             failure: *failure,
         },
 
+        // Row: started, then died abnormally, and the kubelet is reviving it
+        // (`OnFailure` only). Reported immediately rather than consuming the
+        // 600s deadline, for the same reason a non-self-healing pull is: the
+        // condition is actionable now and waiting adds nothing. No delete
+        // authority — see `Action::ReportCrashLoop`.
+        //
+        // Deliberately *not* split on create-intent divergence, unlike the
+        // never-started row. Divergence there means "the user changed config
+        // and is waiting on it"; here the pod demonstrably started, so a
+        // fenced replace would discard a running-then-crashing workload's
+        // evidence to apply a config change the crash may be unrelated to.
+        // The user's Start is the intent that replaces it.
+        Startup::CrashLooping { restarts } => Action::ReportCrashLoop {
+            name: pod.name.clone(),
+            restarts: *restarts,
+        },
+
         // Row: never started, recoverable — split on create-intent
         // divergence. Divergence is evidence of a config change the user is
         // waiting on, and it is the *only* thing that replaces a
@@ -192,6 +240,38 @@ mod tests {
             startup,
             recorded_intent: intent,
         }
+    }
+
+    /// The row that gates `OnFailure`: a crash loop is reported, never
+    /// deleted and never silently observed. Deleting would race the kubelet
+    /// and destroy the crash evidence; observing would burn the deadline and
+    /// report "still coming up" for a harness that cannot stay up.
+    #[test]
+    fn crash_looping_is_reported_not_deleted_or_observed() {
+        let p = pod(Startup::CrashLooping { restarts: 4 }, Some(fp("a")));
+        assert_eq!(
+            classify(Some(&p), &fp("a")),
+            Action::ReportCrashLoop {
+                name: p.name.clone(),
+                restarts: 4,
+            }
+        );
+    }
+
+    /// Unlike the never-started row, a crash loop is *not* split on intent
+    /// divergence: the pod demonstrably started, so a fenced replace would
+    /// discard a crashing workload's evidence for a config change the crash
+    /// may be unrelated to.
+    #[test]
+    fn crash_looping_ignores_intent_divergence() {
+        let p = pod(Startup::CrashLooping { restarts: 2 }, Some(fp("old")));
+        assert_eq!(
+            classify(Some(&p), &fp("new")),
+            Action::ReportCrashLoop {
+                name: p.name.clone(),
+                restarts: 2,
+            }
+        );
     }
 
     #[test]

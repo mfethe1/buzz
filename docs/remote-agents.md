@@ -984,8 +984,8 @@ the container's signal-receiving process (PID 1 or the signal target) — is
 §K8s Entrypoint's `exec` rule and §Pod shape ([L3], L1 item 3 for the
 universal form).
 With the supervisor policy that matches the lifetime policy (this
-binding's [L3] mapping — bounded → `Never`, indefinite → `OnFailure`
-after both prerequisites, §Pod shape; the universal rule is I5's),
+binding's [L3] mapping — bounded → `Never`, indefinite → `OnFailure`,
+§Pod shape; the universal rule is I5's),
 harness exit completes the pod on every intentional path — turning
 agent-level I5 into substrate-level I5.
 
@@ -1131,25 +1131,37 @@ regardless of `HOME`.
     reconciler's terminated arm re-creates. That sequence is
     rescheduling-after-accident gated on a fresh owner intent — apt for an
     agent whose owner already accepted "not running" as its default state.
-  - **Indefinite lifetime (`inactivity_seconds: 0`): `OnFailure`** — once
-    the harness exit-code contract is pinned (I5 ordering rule; until
-    then the provider MUST refuse the combination rather than ship
-    `OnFailure` against an undefended exit convention). `OnFailure`
+  - **Indefinite lifetime (`inactivity_seconds: 0`): `OnFailure`** —
+    **shipped.** Both prerequisites have landed. `OnFailure`
     restarts the *in-place* abnormal deaths — process crash, container
     OOM-kill — and honors the intentional ones (clean exit completes the
-    pod): I5's intent-vs-accident distinction, realized. **Second
-    prerequisite — reconciler classification:** `OnFailure` introduces a
-    pod state the deploy state machine's rows do not cover — a
+    pod): I5's intent-vs-accident distinction, realized. The first
+    prerequisite, the harness exit-code contract, is pinned (I5, Known
+    Defect 6 resolved): an intentional stop is exit 0 even when its
+    graceful tail fails, so `OnFailure` cannot mistake a deliberate stop
+    for a crash. **Second prerequisite — reconciler classification:**
+    `OnFailure` introduces a
+    pod state the deploy state machine's rows did not cover — a
     crash-looping harness sits in phase `Running` with
     `state.waiting{reason: CrashLoopBackOff}`, `restartCount > 0`: not
     deletion-marked, not terminated (the kubelet keeps restarting it),
     not "live and started" (`state.running` is false), and not
     never-started (it started, repeatedly) — and it fails the startup
-    success criterion while the kubelet is actively reviving it. Before
-    the binding ships `OnFailure`, the state machine MUST gain a
-    crash-loop classification row and the started-criterion's treatment
-    of `restartCount > 0` MUST be specified; the exit-code contract alone
-    is *not* the green light. **Honest
+    success criterion while the kubelet is actively reviving it. That row
+    now exists as `Startup::CrashLooping { restarts }` →
+    `Action::ReportCrashLoop`, which reports rather than deletes (the
+    kubelet owns the restart; deleting would race it and destroy the
+    crash evidence) and rather than observes (which would burn the
+    deploy deadline reporting "still coming up" for a harness that
+    cannot stay up). `restartCount`, not the reason string, is the
+    discriminator: `CrashLoopBackOff` with `restartCount == 0` is a
+    first-start failure and stays never-started. The
+    started-criterion is specified as `state.running` *independent* of
+    `restartCount` — a revived harness that is serving again is started,
+    since under `OnFailure` a healthy indefinite agent accumulates
+    restarts over its lifetime, and a pod restarting *now* has no
+    `state.running` and is claimed by the crash-loop row instead.
+    **Honest
     limit:** `restartPolicy` is
     kubelet-level and cannot survive *node-level* loss — a drain or
     API-initiated eviction deletes a bare pod outright, and no
@@ -1505,10 +1517,10 @@ The realization the two lists above require, in this binding's vocabulary:
 2. The deployed invocation realizes the lifetime policy the owner chose
    (I5) through this binding's `inactivity_seconds` field: `> 0` →
    a working inactivity bound and `restartPolicy: Never`; `0` (the
-   blessed indefinite opt-in) → no bound and `restartPolicy: OnFailure`,
-   **only after both prerequisites land** — the pinned exit-code contract
+   blessed indefinite opt-in) → no bound and `restartPolicy: OnFailure`.
+   Both prerequisites have landed — the pinned exit-code contract
    (I5 ordering rule) *and* the crash-loop classification row (§Pod
-   shape); until then the provider MUST refuse the combination.
+   shape) — so the provider now accepts the combination.
 3. The harness is the deployed container's **signal-receiving process**
    (PID 1 or the target of the pod's termination signal — §K8s
    Entrypoint's `exec` rule), and `terminationGracePeriodSeconds` carries
@@ -1656,10 +1668,10 @@ Desktop- and harness-side, discovered during this design:
    real binary and asserts distinguishable observed codes).
    The tail-absorption test is mutation-verified: reintroducing the bug makes
    `a_failing_graceful_tail_still_exits_clean` fail.
-   **`OnFailure` is now unblocked at the harness layer.** Flipping
-   `RESTART_POLICY` (`buzz-backend-kubernetes/src/pod.rs`, and its
-   `restart_policy_is_never` test) is a separate, now-permitted change; it
-   still requires I5's reaper semantics to hold end-to-end.
+   **`OnFailure` has since shipped.** `restart_policy_for`
+   (`buzz-backend-kubernetes/src/pod.rs`) selects it from the configured
+   lifetime, the config layer accepts `inactivity_seconds: 0`, and the
+   reconciler gained the crash-loop row the flip required.
 7. **The shutdown tail overruns the declared grace budget at default
    config** (harness code prerequisite). At `28ae6cd21`: the post-drain
    reap segment
@@ -1709,6 +1721,7 @@ Desktop- and harness-side, discovered during this design:
 | `!shutdown` owner check | `crates/buzz-acp/src/lib.rs` (main loop) |
 | Graceful shutdown path (budget enforcement *to be added* — Known Defect 7) | `crates/buzz-acp/src/lib.rs` (pool shutdown, then drain / reap / presence / relay close) |
 | Clean-exit exit-code contract | `crates/buzz-acp/src/exit.rs` (`Disposition`, `EXIT_CLEAN`/`EXIT_FAILURE`), `lib.rs` `finish_intentional_stop`, `buzz-acp/src/main.rs` + `sprig/src/main.rs` `ExitCode` mapping; pinned by `exit::tests`, `clean_exit_tests`, `tests/clean_exit_contract.rs` (Known Defect 6 resolved; unblocks `OnFailure`) |
+| Lifetime-derived `restartPolicy` + crash-loop classification | `buzz-backend-kubernetes/src/pod.rs` `restart_policy_for` (bounded → `Never`, indefinite → `OnFailure`), `config.rs` `RESTART_POLICY_AUTO_STOP`/`RESTART_POLICY_INDEFINITE` and the `inactivity_seconds: 0` → `None` decode, `observe.rs` `Startup::CrashLooping` (discriminated on `restartCount`, not the reason string), `classify.rs` `Action::ReportCrashLoop`; the policy is in the intent digest via `IntentTemplate::new`. Pinned by `restart_policy_is_never_for_auto_stop`, `restart_policy_is_on_failure_for_indefinite`, `lifetime_change_changes_the_fingerprint`, `crash_looping_container_is_its_own_state`, `crash_loop_reason_without_restarts_is_never_started`, `running_with_restarts_is_still_started`, `crash_looping_is_reported_not_deleted_or_observed`, `crash_looping_ignores_intent_divergence`, `accepts_indefinite_lifetime` — mutation-verified (deleting the crash-loop arm, dropping the `restartCount` guard, and pinning the policy back to `Never` each fail a test) |
 | Auto-stop flag | *to be added*: `crates/buzz-acp/src/config.rs` + a pool-independent timer (NOT the `pool_ready`-gated maintenance tick — Known Defect 4) + `RESERVED_ENV_KEYS` entry |
 | Kubernetes binding | *to be added*: `crates/buzz-backend-kubernetes` |
 | Sprig image | *to be added*: `Dockerfile.sprig` + workflow |

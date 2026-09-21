@@ -105,11 +105,19 @@ impl IntentTemplate {
     /// constants, so the fingerprint cannot describe a pod shape different
     /// from the one actually created. Threading them through as arguments
     /// would make that agreement a thing to test instead of a thing that holds.
+    ///
+    /// `restart_policy` is the exception: it is no longer fixed but derived
+    /// from the configured lifetime, so it *must* be passed in from the same
+    /// `pod::restart_policy_for` the builder uses. It belongs in the digest
+    /// because switching an agent between auto-stop and indefinite changes the
+    /// pod's restart behaviour, and a pod whose policy no longer matches its
+    /// intent has to be replaced rather than adopted.
     pub fn new(
         namespace: &str,
         image: &ImageRef,
         resources: &crate::config::Resources,
         service_account: Option<&str>,
+        restart_policy: &'static str,
         env_keys: impl IntoIterator<Item = String>,
     ) -> Self {
         let mut env_keys: Vec<String> = env_keys.into_iter().collect();
@@ -123,7 +131,7 @@ impl IntentTemplate {
             cpu_limit: resources.cpu_limit.clone(),
             memory_limit: resources.memory_limit.clone(),
             service_account: service_account.map(str::to_string),
-            restart_policy: crate::config::RESTART_POLICY,
+            restart_policy,
             termination_grace_period_seconds: crate::config::TERMINATION_GRACE_SECONDS,
             env_keys,
             env_from_secret: SECRET_PLACEHOLDER,
@@ -153,6 +161,7 @@ mod tests {
             &image('a'),
             &Resources::default(),
             None,
+            crate::config::RESTART_POLICY_AUTO_STOP,
             ["BUZZ_RELAY_URL".to_string(), "GOOSE_MODE".to_string()],
         )
     }
@@ -178,6 +187,7 @@ mod tests {
             &image('a'),
             &Resources::default(),
             None,
+            crate::config::RESTART_POLICY_AUTO_STOP,
             ["A".to_string(), "B".to_string(), "C".to_string()],
         );
         let b = IntentTemplate::new(
@@ -185,6 +195,7 @@ mod tests {
             &image('a'),
             &Resources::default(),
             None,
+            crate::config::RESTART_POLICY_AUTO_STOP,
             ["C".to_string(), "A".to_string(), "B".to_string()],
         );
         assert_eq!(a.fingerprint(), b.fingerprint());

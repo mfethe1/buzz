@@ -399,13 +399,23 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
     assert!(!community_production.contains(".fetch_one(&self.pool)"));
     assert!(!community_production.contains(".fetch_all(&self.pool)"));
     assert!(!community_production.contains(".execute(&self.pool)"));
-    assert_eq!(
-        community_production
-            .matches(".fetch_optional(&self.pool)")
-            .count(),
-        1,
-        "only the out-of-scope NIP-11 metadata read may retain a raw pool checkout"
-    );
+    // Only the NIP-11 presentation scalars are exempt from attributed checkout:
+    // they are unauthenticated public-metadata reads, outside the P0 set. Naming
+    // them beats counting them — a count says how many raw checkouts are tolerated
+    // but not which, so adding one to a real P0 path reads as the same failure as
+    // adding a fourth colour field.
+    const NIP11_METADATA_READS: [&str; 2] = ["get_community_icon", "get_community_brand_color"];
+    for method in community_production.split("    pub async fn ").skip(1) {
+        let name = method
+            .split_once(['(', '<'])
+            .expect("method header must name a function")
+            .0;
+        assert!(
+            !method.contains("(&self.pool)") || NIP11_METADATA_READS.contains(&name),
+            "{name} takes a raw pool checkout; P0 paths must acquire an attributed \
+             connection, and only {NIP11_METADATA_READS:?} are exempt"
+        );
+    }
 
     let thread_summary = thread
         .split_once("pub async fn get_thread_summary(")

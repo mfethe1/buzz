@@ -81,31 +81,63 @@ pub fn decode_startup(pod: &Pod) -> StartupObservation {
         .and_then(|s| s.container_statuses.as_ref())
         .and_then(|cs| cs.iter().find(|c| c.name == CONTAINER_NAME));
 
-    if let Some(state) = container.and_then(|c| c.state.as_ref()) {
-        if state.running.is_some() {
-            return Resolved(Startup::Started);
-        }
-        if state.terminated.is_some() {
-            return Resolved(Startup::Terminated);
-        }
-        if let Some(waiting) = state.waiting.as_ref() {
-            let reason = waiting.reason.as_deref().unwrap_or_default();
-            let message = waiting.message.as_deref().unwrap_or_default();
-            return match reason {
-                // Structurally invalid reference: no retry can fix it.
-                "InvalidImageName" => Resolved(Startup::NeverStartedProvablyBroken),
-                "ErrImagePull" | "ImagePullBackOff" => match classify_pull_failure(message) {
-                    Some(failure) => Resolved(Startup::NeverStartedPullFailing(failure)),
-                    None => Resolved(Startup::NeverStartedRecoverable),
-                },
-                "CreateContainerConfigError" => match referenced_secret(pod) {
-                    Some(secret_name) => {
-                        StartupObservation::ConfigErrorPendingSecretCheck { secret_name }
+    if let Some(container) = container {
+        if let Some(state) = container.state.as_ref() {
+            // The started criterion is `state.running`, deliberately
+            // *independent* of `restartCount` (§Pod shape, `OnFailure`
+            // prerequisite 2). Under `OnFailure` a healthy indefinite agent
+            // accumulates restarts over its lifetime — a harness that
+            // crashed once, was revived, and is now serving is started by
+            // any useful definition, and gating "live" on a zero restart
+            // count would make every recovered agent permanently unstartable
+            // and strand the deploy on its deadline.
+            //
+            // A pod that is restarting *right now* does not reach here: it
+            // has no `state.running`, it has `state.waiting`, and the
+            // `CrashLoopBackOff` arm below claims it. So "running with
+            // restarts" and "looping between restarts" stay distinguishable
+            // without consulting the count on this edge.
+            if state.running.is_some() {
+                return Resolved(Startup::Started);
+            }
+            if state.terminated.is_some() {
+                return Resolved(Startup::Terminated);
+            }
+            if let Some(waiting) = state.waiting.as_ref() {
+                let reason = waiting.reason.as_deref().unwrap_or_default();
+                let message = waiting.message.as_deref().unwrap_or_default();
+                return match reason {
+                    // Structurally invalid reference: no retry can fix it.
+                    "InvalidImageName" => Resolved(Startup::NeverStartedProvablyBroken),
+                    "ErrImagePull" | "ImagePullBackOff" => match classify_pull_failure(message) {
+                        Some(failure) => Resolved(Startup::NeverStartedPullFailing(failure)),
+                        None => Resolved(Startup::NeverStartedRecoverable),
+                    },
+                    "CreateContainerConfigError" => match referenced_secret(pod) {
+                        Some(secret_name) => {
+                            StartupObservation::ConfigErrorPendingSecretCheck { secret_name }
+                        }
+                        None => Resolved(Startup::NeverStartedRecoverable),
+                    },
+                    // Waiting *between restarts* under `OnFailure`: the
+                    // harness started before, so this is neither
+                    // never-started nor terminated. Must precede the
+                    // catch-all, which would otherwise read a crash loop as
+                    // `NeverStartedRecoverable` and observe it until the
+                    // deadline (§Pod shape).
+                    //
+                    // `restartCount` is the discriminator, not the reason
+                    // string alone: the kubelet also reports
+                    // `CrashLoopBackOff` for a container that failed its
+                    // very first start, which is genuinely never-started.
+                    "CrashLoopBackOff" if container.restart_count > 0 => {
+                        Resolved(Startup::CrashLooping {
+                            restarts: container.restart_count,
+                        })
                     }
-                    None => Resolved(Startup::NeverStartedRecoverable),
-                },
-                _ => Resolved(Startup::NeverStartedRecoverable),
-            };
+                    _ => Resolved(Startup::NeverStartedRecoverable),
+                };
+            }
         }
     }
 
@@ -324,6 +356,20 @@ mod tests {
         pod
     }
 
+    fn with_container_state_restarts(mut pod: Pod, state: ContainerState, restarts: i32) -> Pod {
+        pod.status = Some(PodStatus {
+            phase: Some("Running".into()),
+            container_statuses: Some(vec![ContainerStatus {
+                name: CONTAINER_NAME.into(),
+                state: Some(state),
+                restart_count: restarts,
+                ..Default::default()
+            }]),
+            ..Default::default()
+        });
+        pod
+    }
+
     fn waiting(reason: &str, message: &str) -> ContainerState {
         ContainerState {
             waiting: Some(ContainerStateWaiting {
@@ -332,6 +378,60 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn crash_looping_container_is_its_own_state() {
+        let id = identity();
+        let pod = with_container_state_restarts(
+            base_pod(&id),
+            waiting(
+                "CrashLoopBackOff",
+                "back-off 40s restarting failed container",
+            ),
+            3,
+        );
+        assert_eq!(
+            decode_startup(&pod),
+            StartupObservation::Resolved(Startup::CrashLooping { restarts: 3 })
+        );
+    }
+
+    /// The kubelet also reports `CrashLoopBackOff` for a container that failed
+    /// its *first* start. That never ran, so it stays never-started —
+    /// `restartCount`, not the reason string, is the discriminator.
+    #[test]
+    fn crash_loop_reason_without_restarts_is_never_started() {
+        let id = identity();
+        let pod = with_container_state_restarts(
+            base_pod(&id),
+            waiting("CrashLoopBackOff", "back-off restarting failed container"),
+            0,
+        );
+        assert_eq!(
+            decode_startup(&pod),
+            StartupObservation::Resolved(Startup::NeverStartedRecoverable)
+        );
+    }
+
+    /// Prerequisite 2: a revived harness that is serving again is started.
+    /// Gating "live" on a zero restart count would stranded every recovered
+    /// indefinite agent on its deploy deadline.
+    #[test]
+    fn running_with_restarts_is_still_started() {
+        let id = identity();
+        let pod = with_container_state_restarts(
+            base_pod(&id),
+            ContainerState {
+                running: Some(ContainerStateRunning::default()),
+                ..Default::default()
+            },
+            7,
+        );
+        assert_eq!(
+            decode_startup(&pod),
+            StartupObservation::Resolved(Startup::Started)
+        );
     }
 
     #[test]
