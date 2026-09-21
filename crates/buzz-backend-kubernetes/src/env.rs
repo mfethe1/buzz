@@ -153,8 +153,9 @@ pub struct AuthoritativeInputs<'a> {
     /// The attempt's generation token — also the Secret's name suffix, so the
     /// lifecycle correlator and the Secret generation are one identity.
     pub generation: &'a str,
-    /// Resolved from `provider_config.inactivity_seconds`; `None` when the
-    /// indefinite opt-in was chosen (which this version refuses elsewhere).
+    /// Resolved from `provider_config.inactivity_seconds`; `None` selects the
+    /// indefinite lifetime, which omits `BUZZ_ACP_EXIT_AFTER_INACTIVITY` and
+    /// so leaves the harness's inactivity self-termination disabled.
     pub inactivity_seconds: Option<u64>,
 }
 

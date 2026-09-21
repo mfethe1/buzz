@@ -401,8 +401,21 @@ pub async fn deploy(
                 ))
             }
 
-            Action::AwaitDisappearance { name } => await_disappearance(substrate, &name).await?,
+            // Started, then died abnormally, and the kubelet is reviving it
+            // (`OnFailure` only). Report now rather than spend the remaining
+            // deadline watching a harness that cannot stay up. No delete
+            // authority: the kubelet owns the restart, and deleting here
+            // would race it and destroy the crash evidence.
+            Action::ReportCrashLoop { name, restarts } => {
+                return Err(format!(
+                    "{name} started but keeps crashing ({restarts} restarts): {}. \
+                     The harness exits abnormally on startup; check the agent's \
+                     configuration and logs.",
+                    latest_condition(substrate, identity).await
+                ))
+            }
 
+            Action::AwaitDisappearance { name } => await_disappearance(substrate, &name).await?,
             Action::Delete { name, fence } => {
                 // This call already made its own attempt, and that attempt is
                 // what the classification wants replaced: it terminated (the
