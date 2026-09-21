@@ -236,6 +236,14 @@ pub struct ReliableMeshStream {
     fenced: FencedHeader,
     stream: MeshStream,
     community_id: Option<CommunityId>,
+    /// Raw frame read off the transport but not yet fence-validated. Staging
+    /// the read separately from the async Redis validation makes
+    /// `recv_validated` cancellation-safe: dropping the future between the
+    /// read and the validation no longer loses the frame — it is re-validated
+    /// on the next call instead of being read a second time off the wire.
+    /// Boxed to keep `ReliableMeshStream` small (it is embedded in the
+    /// `ReliableJoin::Forwarded` enum).
+    pending: Option<Box<MeshStreamFrame>>,
 }
 
 impl ReliableMeshStream {
@@ -245,6 +253,7 @@ impl ReliableMeshStream {
             fenced,
             stream,
             community_id: None,
+            pending: None,
         }
     }
 
@@ -333,28 +342,51 @@ impl ReliableMeshStream {
         &mut self,
         directory: &SessionDirectory,
     ) -> Result<Option<ReliableFrame>, ReliableStreamError> {
-        let Some(frame) = self.stream.recv_frame().await? else {
-            return Ok(None);
-        };
-
-        match frame {
-            MeshStreamFrame::Data { fenced, payload } => {
-                let frame = ReliableWireFrame::decode(&payload)?;
-                let community_id = frame.community_id();
-                self.validate_frame_fence(directory, community_id, &fenced)
-                    .await?;
-                match frame {
-                    ReliableWireFrame::Data { payload, .. } => {
-                        Ok(Some(ReliableFrame::Data(payload)))
-                    }
-                    ReliableWireFrame::Goodbye { reason, .. } => {
-                        Ok(Some(ReliableFrame::Goodbye(reason)))
-                    }
+        // Stage the raw frame read separately from the async fence validation
+        // (Redis round trip). `recv_validated` futures are raced against
+        // timers in `tokio::select!` call sites; dropping the future mid-poll
+        // must not lose a frame that was already read off the transport. With
+        // the frame staged in `self.pending`, a drop between the read and the
+        // completion of validation leaves it re-validated on the next call.
+        if self.pending.is_none() {
+            let Some(frame) = self.stream.recv_frame().await? else {
+                return Ok(None);
+            };
+            self.pending = Some(Box::new(frame));
+        }
+        let MeshStreamFrame::Data { fenced, .. } =
+            self.pending.as_deref().expect("pending guaranteed Some")
+        else {
+            // Non-Data frames don't need the async Redis check; consume them
+            // directly (they terminate this stream anyway).
+            let frame = *self.pending.take().expect("pending still Some");
+            return match frame {
+                MeshStreamFrame::Goodbye { .. } => {
+                    Err(ReliableStreamError::UnexpectedFrame("goodbye"))
                 }
-            }
-            MeshStreamFrame::Goodbye { .. } => Err(ReliableStreamError::UnexpectedFrame("goodbye")),
-            MeshStreamFrame::Hello(_) => Err(ReliableStreamError::UnexpectedFrame("hello")),
-            MeshStreamFrame::Gossip { .. } => Err(ReliableStreamError::UnexpectedFrame("gossip")),
+                MeshStreamFrame::Hello(_) => Err(ReliableStreamError::UnexpectedFrame("hello")),
+                MeshStreamFrame::Gossip { .. } => {
+                    Err(ReliableStreamError::UnexpectedFrame("gossip"))
+                }
+                MeshStreamFrame::Data { .. } => unreachable!(),
+            };
+        };
+        // FencedHeader is Copy: snapshot the fence and decode the payload
+        // before any await so a mid-validation drop cannot lose progress.
+        let fenced = *fenced;
+        let payload = match self.pending.as_deref() {
+            Some(MeshStreamFrame::Data { payload, .. }) => payload.clone(),
+            _ => unreachable!("Data matched above"),
+        };
+        let frame = ReliableWireFrame::decode(&payload)?;
+        self.validate_frame_fence(directory, frame.community_id(), &fenced)
+            .await?;
+
+        // Validation succeeded: safe to consume the staged frame now.
+        self.pending = None;
+        match frame {
+            ReliableWireFrame::Data { payload, .. } => Ok(Some(ReliableFrame::Data(payload))),
+            ReliableWireFrame::Goodbye { reason, .. } => Ok(Some(ReliableFrame::Goodbye(reason))),
         }
     }
 
