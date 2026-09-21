@@ -55,11 +55,18 @@ pub const WORKSPACE_PATH: &str = "/home/agent";
 /// (§Pod shape). Kubernetes' default 30s would SIGKILL the harness mid-drain.
 pub const TERMINATION_GRACE_SECONDS: i64 = 60;
 
-/// The only restart policy v1 ships. `OnFailure` is double-gated on the
-/// harness exit-code contract *and* a crash-loop classification row the state
-/// machine does not have (`:1121-1139`); until both land the provider refuses
-/// the combination rather than shipping against an undefended convention.
-pub const RESTART_POLICY: &str = "Never";
+/// Restart policy for an auto-stopping agent. A clean exit is the *expected*
+/// terminal state — the harness stopped because it idled out — so reviving it
+/// would defeat auto-stop entirely.
+pub const RESTART_POLICY_AUTO_STOP: &str = "Never";
+
+/// Restart policy for an indefinite agent (`inactivity_seconds: 0`). The pod
+/// is a durable home: a crash must be survived, not fatal. `OnFailure` revives
+/// on a nonzero exit and leaves a clean exit (an intentional stop) alone —
+/// which is only sound because the harness's exit-code contract guarantees an
+/// intentional stop is exit 0 even when its graceful tail fails, and because
+/// the state machine can now classify the resulting crash loop.
+pub const RESTART_POLICY_INDEFINITE: &str = "OnFailure";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderConfig {
@@ -146,22 +153,16 @@ pub fn parse(cfg: &serde_json::Value) -> Result<ProviderConfig, String> {
     };
 
     // `inactivity_seconds: 0` is a legal, blessed value in the spec (§Auto-Stop)
-    // meaning "no auto-stop" — but it selects `restartPolicy: OnFailure`, which
-    // §Pod shape forbids until the harness exit-code contract is pinned AND the
-    // state machine gains a crash-loop row. Refusing the *combination* is what
-    // the spec asks for; silently downgrading to `Never` would ship an
-    // indefinite agent that dies on its first crash.
+    // meaning "no auto-stop". It selects `restartPolicy: OnFailure`, which
+    // §Pod shape double-gated on (1) the harness exit-code contract and (2) a
+    // crash-loop classification row plus a specified started-criterion. Both
+    // have landed — the contract in `buzz-acp`'s `exit` module, the row as
+    // `Startup::CrashLooping` / `Action::ReportCrashLoop` — so the
+    // combination is now supported rather than refused.
     let inactivity_seconds = match optional_u64(cfg, "inactivity_seconds")? {
         None => Some(DEFAULT_INACTIVITY_SECONDS),
-        Some(0) => {
-            return Err(
-                "provider_config.inactivity_seconds: 0 (indefinite lifetime) is not \
-                 supported in this version: it requires restartPolicy OnFailure, \
-                 which is gated on the harness exit-code contract. Set a positive \
-                 number of seconds."
-                    .to_string(),
-            )
-        }
+        // Indefinite lifetime: no auto-stop, and the pod restarts on crash.
+        Some(0) => None,
         Some(n) => Some(n),
     };
 
@@ -304,19 +305,16 @@ mod tests {
         );
     }
 
-    /// Indefinite lifetime selects `OnFailure`, which is gated. Refuse rather
-    /// than silently downgrade — a downgraded agent dies on its first crash
-    /// while the user believes they asked for indefinite.
+    /// Indefinite lifetime (`0` = no auto-stop) is now accepted: it selects
+    /// `OnFailure`, whose two gates — the harness exit-code contract and the
+    /// crash-loop classification row — have both landed. It decodes to `None`
+    /// rather than `Some(0)` so "no auto-stop" is a state in the type, not a
+    /// magic number every consumer has to remember to special-case.
     #[test]
-    fn refuses_indefinite_lifetime() {
+    fn accepts_indefinite_lifetime() {
         let mut cfg = minimal();
         cfg["inactivity_seconds"] = serde_json::json!(0);
-        let err = parse(&cfg).unwrap_err();
-        assert!(err.contains("inactivity_seconds"), "got: {err}");
-        assert!(
-            err.contains("OnFailure"),
-            "error should name the gate: {err}"
-        );
+        assert_eq!(parse(&cfg).unwrap().inactivity_seconds, None);
     }
 
     #[test]

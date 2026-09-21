@@ -4,8 +4,8 @@
 //! no I/O, so every normative field is a unit assertion.
 
 use crate::config::{
-    ProviderConfig, RESTART_POLICY, RUN_AS_GID, RUN_AS_UID, TERMINATION_GRACE_SECONDS,
-    WORKSPACE_PATH,
+    ProviderConfig, RESTART_POLICY_AUTO_STOP, RESTART_POLICY_INDEFINITE, RUN_AS_GID, RUN_AS_UID,
+    TERMINATION_GRACE_SECONDS, WORKSPACE_PATH,
 };
 use crate::intent::{Fingerprint, IntentTemplate};
 use crate::naming::{
@@ -19,6 +19,20 @@ use k8s_openapi::api::core::v1::{
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use std::collections::BTreeMap;
+
+/// `restartPolicy` follows the lifetime, not a global constant (§Pod shape).
+///
+/// The two cases have opposite requirements for the *same* clean exit: an
+/// auto-stopping agent that exits 0 has finished its job and must stay down,
+/// while an indefinite agent must be revived from a crash but left down on an
+/// intentional stop. `OnFailure` expresses exactly that, and is only sound
+/// because the harness pins exit 0 to intentional stops.
+fn restart_policy_for(cfg: &ProviderConfig) -> &'static str {
+    match cfg.inactivity_seconds {
+        None => RESTART_POLICY_INDEFINITE,
+        Some(_) => RESTART_POLICY_AUTO_STOP,
+    }
+}
 
 /// Volume name for the agent's writable workspace.
 const WORKSPACE_VOLUME: &str = "workspace";
@@ -151,7 +165,7 @@ pub fn build_pod(
         },
         spec: Some(PodSpec {
             containers: vec![container],
-            restart_policy: Some(RESTART_POLICY.to_string()),
+            restart_policy: Some(restart_policy_for(cfg).to_string()),
             termination_grace_period_seconds: Some(TERMINATION_GRACE_SECONDS),
             // The agent runs prompted, untrusted code while holding an nsec;
             // an ambient ServiceAccount token would be an API-stealable
@@ -192,6 +206,7 @@ pub fn intent_template(
         &cfg.image,
         &cfg.resources,
         cfg.service_account.as_deref(),
+        restart_policy_for(cfg),
         env_keys,
     )
 }
@@ -279,13 +294,47 @@ mod tests {
         }
     }
 
-    /// `Never` only. `OnFailure` is gated on the harness exit-code contract
-    /// *and* a crash-loop classification row (`:1121-1139`); the config layer
-    /// refuses `inactivity_seconds: 0` so this arm is unreachable, and the
-    /// assertion keeps it that way.
+    /// An auto-stopping agent keeps `Never`: its clean exit is the *expected*
+    /// terminal state, and reviving it would defeat auto-stop.
     #[test]
-    fn restart_policy_is_never() {
+    fn restart_policy_is_never_for_auto_stop() {
         assert_eq!(spec(&pod()).restart_policy.as_deref(), Some("Never"));
+    }
+
+    /// An indefinite agent (`inactivity_seconds: 0`) is a durable home: a
+    /// crash must be survived. `OnFailure` revives on a nonzero exit and
+    /// leaves the harness's intentional exit-0 stop alone.
+    #[test]
+    fn restart_policy_is_on_failure_for_indefinite() {
+        let cfg = ProviderConfig {
+            inactivity_seconds: None,
+            ..provider_config()
+        };
+        let p = build_pod(
+            &identity(),
+            &cfg,
+            "gen00001",
+            &intent_template(&cfg, ["BUZZ_RELAY_URL".to_string()]).fingerprint(),
+        );
+        assert_eq!(spec(&p).restart_policy.as_deref(), Some("OnFailure"));
+    }
+
+    /// The restart policy is part of the deploy intent: switching an agent
+    /// between auto-stop and indefinite must be seen as a config change, or
+    /// the reconciler would adopt a pod whose restart behaviour no longer
+    /// matches what was asked for.
+    #[test]
+    fn lifetime_change_changes_the_fingerprint() {
+        let auto = provider_config();
+        let indefinite = ProviderConfig {
+            inactivity_seconds: None,
+            ..provider_config()
+        };
+        let keys = || ["BUZZ_RELAY_URL".to_string()];
+        assert_ne!(
+            intent_template(&auto, keys()).fingerprint(),
+            intent_template(&indefinite, keys()).fingerprint()
+        );
     }
 
     /// 60s, not Kubernetes' default 30s — which would SIGKILL the harness
