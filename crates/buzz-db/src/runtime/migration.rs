@@ -489,6 +489,7 @@ mod postgres_tests {
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "storage_accounting_snapshots",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -707,14 +708,31 @@ mod postgres_tests {
         // 0046_task_system (PR #6425 pending upstream),
         // 0047_agent_machine_homes (AGENT-HOMES-001 PR-3),
         // 0048_community_brand_color (REG-10; renumbered from 0037, which is
-        // upstream-owned relay_admin_action_lease), and 0049 structured task
-        // history. All stay additive for existing deployments.
-        assert_eq!(migrations.len(), 49);
+        // upstream-owned relay_admin_action_lease), 0049 structured task
+        // history, and 0052_agent_capability_grants (AGENT-HOMES-001 PR-4,
+        // renumbered from 0048 because the fork already took that slot).
+        // All stay additive for existing deployments.
+        assert_eq!(migrations.len(), 51);
         assert_eq!(migrations[44].version, 45);
         assert_eq!(migrations[45].version, 46);
         assert_eq!(migrations[46].version, 47);
         assert_eq!(migrations[47].version, 48);
         assert_eq!(migrations[48].version, 49);
+        // Upstream's storage accounting migration, renumbered 0046 -> 0051 on
+        // sync (slot 46 is frozen below; 0050 is reserved by feat/HW-017).
+        assert_eq!(migrations[49].version, 51);
+        assert!(migrations[49]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE storage_accounting_snapshots"));
+        // Per-machine capability grants: authored as 0048 on the PR-4 branch,
+        // renumbered to 0052 because trunk had already shipped 0048 as the
+        // community brand color and 0050 is reserved by feat/HW-017.
+        assert_eq!(migrations[50].version, 52);
+        assert!(migrations[50]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE agent_capability_grants"));
         let task_changes = migrations[48].sql.as_str();
 
         // Slot 46 is CHECKSUM-FROZEN to the fork's task system.
@@ -1949,7 +1967,7 @@ mod postgres_tests {
         // here so the comparison below stays an exact equality: a new scoped
         // table that forgets its fence line still fails this test, and a fence
         // line for a table nobody registered here fails it too.
-        for post_0029_scoped_table in ["tasks", "task_events"] {
+        for post_0029_scoped_table in ["tasks", "task_events", "agent_capability_grants"] {
             expected_fences.insert(post_0029_scoped_table.to_owned());
         }
         assert_eq!(

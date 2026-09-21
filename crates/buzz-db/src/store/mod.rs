@@ -2,6 +2,8 @@
 
 /// Explicit deployment-global admin report reads.
 pub mod admin_moderation;
+/// Per-machine capability grants for agents (default deny).
+pub mod agent_capability_grants;
 /// Community-scoped authentication allowlist persistence.
 pub mod allowlist;
 /// API token storage and lookup.
@@ -46,6 +48,8 @@ pub mod relay_operators;
 pub mod reminder;
 /// Replaceable-event persistence and coordinate locking.
 pub mod replaceable;
+/// Durable completed snapshots from the isolated media-storage worker.
+pub mod storage_accounting;
 /// Thread metadata persistence.
 pub mod thread;
 /// Per-community usage rollup queries for Prometheus gauges.

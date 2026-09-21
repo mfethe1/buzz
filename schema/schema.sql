@@ -2017,3 +2017,44 @@ CREATE INDEX idx_relay_operator_audit_target
 
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('relay_operator_audit', 'deployment-global append-only roster mutation audit trail; no community_id intentionally');
+
+-- ── Storage accounting snapshot ─────────────────────────────────────────────
+-- Deployment-global singleton produced by the isolated S3 accounting worker.
+
+CREATE TABLE storage_accounting_snapshots (
+    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    snapshot JSONB NOT NULL CHECK (jsonb_typeof(snapshot) = 'object'),
+    completed_at TIMESTAMPTZ NOT NULL DEFAULT transaction_timestamp(),
+    duration_ms BIGINT NOT NULL CHECK (duration_ms >= 0),
+    max_objects BIGINT NOT NULL CHECK (max_objects > 0),
+    code_sha TEXT NOT NULL CHECK (octet_length(code_sha) BETWEEN 1 AND 128)
+);
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('storage_accounting_snapshots', 'deployment-global completed media accounting handoff');
+
+CREATE TABLE agent_capability_grants (
+    community_id  UUID        NOT NULL REFERENCES communities(id),
+    agent_pubkey  BYTEA       NOT NULL,
+    capability    VARCHAR(64) NOT NULL,
+    target        TEXT        NOT NULL,
+    granted_by    BYTEA       NOT NULL,
+    granted_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revoked_at    TIMESTAMPTZ,
+    revoked_by    BYTEA,
+    PRIMARY KEY (community_id, agent_pubkey, capability, target)
+);
+
+-- A revoked grant keeps its row; re-granting reuses it (see store::grant).
+CREATE INDEX idx_agent_capability_grants_active
+    ON agent_capability_grants (community_id, agent_pubkey, capability)
+    WHERE revoked_at IS NULL;
+
+COMMENT ON TABLE agent_capability_grants IS
+    'Per-machine capability grants. Default deny: no row (or revoked_at set) means denied.';
+COMMENT ON COLUMN agent_capability_grants.target IS
+    'Target machine_id (users.machine_id from PR-3), or "*" for any machine in the community.';
+COMMENT ON COLUMN agent_capability_grants.revoked_at IS
+    'Tombstone. Non-NULL means revoked; the row is retained so the audit trail survives.';
+
+SELECT attach_community_write_fence('agent_capability_grants');

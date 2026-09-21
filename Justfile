@@ -320,9 +320,21 @@ desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     fi
     echo "Both compiled states and the accepted/rejected demo-name boundary verified."
 
+# Compile the sidecar crates and bundle them over the stubs. Single definition —
+# stubs alone only satisfy Tauri's compile-time externalBin check, so a bundle
+# built without this ships 0-byte sidecars and every `buzz` call from the app
+# silently no-ops (exit 0, no output).
+_build-sidecars target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release --target {{target}} \
+      -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp \
+      -p git-credential-nostr -p buzz-cli
+    ./scripts/bundle-sidecars.sh {{target}}
+
 # Build the full desktop Tauri app locally (unsigned, for testing)
 # pnpm install is unconditional here: release builds must start from a clean dep tree.
-desktop-release-build target="aarch64-apple-darwin": (_ensure-sidecar-stubs target)
+desktop-release-build target="aarch64-apple-darwin": (_ensure-sidecar-stubs target) (_build-sidecars target)
     #!/usr/bin/env bash
     set -euo pipefail
     pnpm install
@@ -343,10 +355,7 @@ desktop-demo-build demo_name target="aarch64-apple-darwin":
     DMG_VOLUME_NAME="$(read_config dmgVolumeName)"
     DMG_FILE_STEM="$(read_config dmgFileStem)"
     DEMO_SLUG="$(read_config slug)"
-    cargo build --release --target "$TARGET" \
-      -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp \
-      -p git-credential-nostr -p buzz-cli
-    ./scripts/bundle-sidecars.sh "$TARGET"
+    {{just_executable()}} _build-sidecars "$TARGET"
     pnpm install
     cd {{desktop_dir}}
     BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG" pnpm tauri build --features mesh-llm --target "$TARGET" --bundles app --config "$CONFIG_PATH"
@@ -420,6 +429,12 @@ test-unit:
         # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
         # stray file in migrations/ or a broken lint ships green.
         cargo nextest run -p buzz-db --lib
+        # Storage accounting crosses three crates whose focused regression
+        # suites are otherwise absent from the infra-free unit lane.
+        cargo nextest run -p buzz-media --lib \
+            -E 'test(=bucket_index::tests::bucket_snapshot_json_round_trip_preserves_community_keys)'
+        cargo nextest run -p buzz-admin \
+            -E 'test(=storage_snapshot_tests::failed_fold_never_invokes_snapshot_persistence)'
         # Multi-tenant conformance gate (buzz-conformance): the independent
         # replay checker + golden fixtures. No infra — pure in-process trace
         # replay — so it belongs in the unit job. Run all targets (lib + the
@@ -494,7 +509,7 @@ test-unit:
         # the ~30s sqlx acquire timeout, so they do not belong in the infra-free
         # unit job either.
         cargo nextest run -p buzz-relay --lib \
-            -E '(test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/)'
+            -E '(test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)) + test(/^handlers::channel_authz::/) + test(/^handlers::moderation_authz::/) + test(/^handlers::side_effects::tests::/) + test(/^storage_sweep::tests::/)'
         # Real localhost HTTP tests for the startup storage admission deadline.
         # Keep them in the infra-free gate; the broader Git suite uses MinIO.
         cargo nextest run -p buzz-relay --lib \
