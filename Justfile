@@ -428,7 +428,11 @@ test-unit:
         # Postgres-backed buzz-db tests are
         # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
         # stray file in migrations/ or a broken lint ships green.
-        cargo nextest run -p buzz-db --lib
+        # `--test observability_source` is enumerated alongside `--lib` because
+        # neither `--lib` nor any other lane runs it: its P0 pool-attribution
+        # assertion sat red on trunk unnoticed while every check reported green.
+        # It parses source with include_str!, so it needs no infra either.
+        cargo nextest run -p buzz-db --lib --test observability_source
         # Storage accounting crosses three crates whose focused regression
         # suites are otherwise absent from the infra-free unit lane.
         cargo nextest run -p buzz-media --lib \
