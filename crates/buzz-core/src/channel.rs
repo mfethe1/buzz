@@ -206,6 +206,11 @@ pub enum ChannelWritePolicy {
 }
 
 impl ChannelWritePolicy {
+    /// Every variant, so exhaustiveness can be asserted against the database
+    /// enum (REG-8: both sides fail closed, so a value present on only one
+    /// side is an outage rather than a silent downgrade).
+    pub const ALL: [Self; 3] = [Self::AnyMember, Self::AdminsOnly, Self::HumanOnly];
+
     /// Canonical string representation (matches DB enum and Nostr tags).
     pub fn as_str(&self) -> &'static str {
         match self {

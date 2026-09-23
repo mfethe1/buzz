@@ -742,3 +742,59 @@ fn every_channel_record_select_projects_write_policy() {
         );
     }
 }
+
+/// REG-8: the Postgres `channel_write_policy` enum and `ChannelWritePolicy`'s
+/// `FromStr` must stay in lockstep. Both parsers now fail CLOSED on an
+/// unrecognized value, which is correct for a security gate but means a new
+/// enum value added by a migration alone would hard-error every read of a
+/// channel using it — a fail-closed outage, the mirror image of the fail-open
+/// this feature exists to fix. The schema is the source of truth, so this
+/// derives the expected set from it rather than restating a literal list.
+#[test]
+fn write_policy_enum_matches_the_rust_parser() {
+    let schema = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/schema.sql"),
+    )
+    .expect("schema.sql must be readable");
+
+    let decl_at = schema
+        .find("CREATE TYPE channel_write_policy AS ENUM")
+        .expect("channel_write_policy enum must exist in the schema");
+    let open = schema[decl_at..].find('(').expect("enum body") + decl_at;
+    let close = schema[open..].find(')').expect("enum body end") + open;
+    let mut sql_values: Vec<String> = schema[open + 1..close]
+        .split(',')
+        .map(|v| v.trim().trim_matches('\'').to_string())
+        .filter(|v| !v.is_empty())
+        .collect();
+    sql_values.sort();
+    assert!(
+        !sql_values.is_empty(),
+        "failed to parse the enum body; this guard is not checking anything"
+    );
+
+    for value in &sql_values {
+        let parsed = value.parse::<buzz_core::channel::ChannelWritePolicy>();
+        assert!(
+            parsed.is_ok(),
+            "schema.sql declares channel_write_policy value {value:?} but \
+             ChannelWritePolicy::from_str rejects it; every read of a channel \
+             using that policy would hard-error. Add it to the Rust enum."
+        );
+        assert_eq!(
+            parsed.expect("checked ok").to_string(),
+            *value,
+            "round-trip mismatch for {value:?}: Display must emit the exact \
+             stored value or writes will not round-trip"
+        );
+    }
+
+    // And the reverse: no Rust variant may be unstorable.
+    for variant in buzz_core::channel::ChannelWritePolicy::ALL {
+        assert!(
+            sql_values.contains(&variant.to_string()),
+            "ChannelWritePolicy::{variant:?} has no matching value in the \
+             schema's channel_write_policy enum; it can never be stored"
+        );
+    }
+}
