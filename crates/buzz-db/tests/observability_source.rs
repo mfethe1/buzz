@@ -637,13 +637,22 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
 }
 
 /// REG-8: the channel write policy is a security gate, so every SELECT whose
-/// row reaches `crate::channel::row_to_channel_record` must project
-/// `write_policy`. A query that omits it used to yield the permissive default,
-/// which silently re-opened every restricted channel; the parser now errors
-/// instead, and this guard catches the omission at build time rather than
-/// leaving it to a live-database integration run.
+/// row reaches a `row_to_channel_record` must project `write_policy`. A query
+/// that omits it used to yield the permissive default, which silently
+/// re-opened every restricted channel; the parser now errors instead, and this
+/// guard catches the omission at build time rather than leaving it to a
+/// live-database integration run.
+///
+/// Implementation notes, both learned from guards that passed while broken:
+///   * the anchor matches BOTH bare (`SELECT id, ...`) and table-aliased
+///     (`SELECT c.id, ...`) projections — an earlier version keyed on the bare
+///     form and so missed `get_accessible_channels`;
+///   * each query is identified by its `FROM channels` site rather than by the
+///     `SELECT` keyword, because nested SELECTs yield several overlapping
+///     windows over one query and a surviving window can mask a real omission.
 #[test]
 fn every_channel_record_select_projects_write_policy() {
+    let mut checked = 0usize;
     for (label, source) in [
         ("store/channel.rs", include_str!("../src/store/channel.rs")),
         (
@@ -651,24 +660,39 @@ fn every_channel_record_select_projects_write_policy() {
             include_str!("../src/store/channel_members.rs"),
         ),
     ] {
-        for (idx, fragment) in source
-            .match_indices("SELECT id, name, channel_type::text")
-            .map(|(i, _)| i)
-            .enumerate()
-        {
-            let tail = &source[fragment..];
-            let select_end = tail.find("FROM channels").unwrap_or_else(|| {
-                panic!("{label}: channel SELECT #{idx} has no FROM channels clause")
-            });
-            let select_list = &tail[..select_end];
+        // One entry per `FROM channels` occurrence => one entry per query.
+        for (from_at, _) in source.match_indices("FROM channels") {
+            let head = &source[..from_at];
+            // The select list is the text back to this query's own SELECT.
+            let Some(sel_at) = head.rfind("SELECT ") else {
+                continue;
+            };
+            let select_list = &source[sel_at..from_at];
+            // A channel-record projection always carries both enum casts; this
+            // filters out counts, id-only and unrelated projections.
+            if !(select_list.contains("channel_type::text")
+                && select_list.contains("visibility::text"))
+            {
+                continue;
+            }
+            let line = source[..sel_at].matches('\n').count() + 1;
+            checked += 1;
             assert!(
                 select_list.contains("write_policy::text AS write_policy"),
-                "{label}: channel SELECT #{idx} does not project write_policy; \
-                 row_to_channel_record would fail closed at runtime. Add \
-                 `write_policy::text AS write_policy` to the select list."
+                "{label}:{line}: channel-record SELECT does not project \
+                 write_policy; row_to_channel_record fails closed at runtime. \
+                 Add `write_policy::text AS write_policy` to the select list."
             );
         }
     }
+
+    // Guards the guard: if the anchor drifts, the loop above would vacuously
+    // pass. 5 in channel.rs + 2 in channel_members.rs.
+    assert_eq!(
+        checked, 7,
+        "expected 7 channel-record SELECTs; the anchor has drifted and this \
+         guard is no longer checking what it claims"
+    );
 
     // The parser must not reintroduce a permissive fallback.
     let channel_src = include_str!("../src/store/channel.rs");
