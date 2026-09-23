@@ -635,3 +635,45 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         }
     }
 }
+
+/// REG-8: the channel write policy is a security gate, so every SELECT whose
+/// row reaches `crate::channel::row_to_channel_record` must project
+/// `write_policy`. A query that omits it used to yield the permissive default,
+/// which silently re-opened every restricted channel; the parser now errors
+/// instead, and this guard catches the omission at build time rather than
+/// leaving it to a live-database integration run.
+#[test]
+fn every_channel_record_select_projects_write_policy() {
+    for (label, source) in [
+        ("store/channel.rs", include_str!("../src/store/channel.rs")),
+        (
+            "store/channel_members.rs",
+            include_str!("../src/store/channel_members.rs"),
+        ),
+    ] {
+        for (idx, fragment) in source
+            .match_indices("SELECT id, name, channel_type::text")
+            .map(|(i, _)| i)
+            .enumerate()
+        {
+            let tail = &source[fragment..];
+            let select_end = tail.find("FROM channels").unwrap_or_else(|| {
+                panic!("{label}: channel SELECT #{idx} has no FROM channels clause")
+            });
+            let select_list = &tail[..select_end];
+            assert!(
+                select_list.contains("write_policy::text AS write_policy"),
+                "{label}: channel SELECT #{idx} does not project write_policy; \
+                 row_to_channel_record would fail closed at runtime. Add \
+                 `write_policy::text AS write_policy` to the select list."
+            );
+        }
+    }
+
+    // The parser must not reintroduce a permissive fallback.
+    let channel_src = include_str!("../src/store/channel.rs");
+    assert!(
+        !channel_src.contains("Err(_) => ChannelWritePolicy::default()"),
+        "row_to_channel_record must not default write_policy on a read error"
+    );
+}

@@ -178,9 +178,189 @@ impl FromStr for MemberRole {
     }
 }
 
+/// Who may originate a message in a channel.
+///
+/// Channel access is otherwise membership-binary: a member of a channel may
+/// post in it. This axis is the missing "who may originate" dimension that
+/// [`ChannelType`] (functional shape) and [`MemberRole`] (a per-member grant)
+/// deliberately do not carry — see upstream issue #2497.
+///
+/// Enforced at relay ingest **after** the membership gate: a policy can only
+/// ever narrow who may post, never widen it. Reads and membership are
+/// untouched by every value.
+///
+/// [`Self::AnyMember`] is the default and reproduces the historic
+/// membership-binary behavior exactly, so a channel that never sets a policy
+/// behaves as it always has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChannelWritePolicy {
+    /// Any member may originate a message (historic behavior).
+    #[default]
+    AnyMember,
+    /// Only Owner/Admin may originate — announcement channels.
+    AdminsOnly,
+    /// Members whose role is not [`MemberRole::Bot`] may originate. Agents
+    /// keep read access, and relay-authored digests are unaffected because
+    /// they are not authored by a Bot member.
+    HumanOnly,
+}
+
+impl ChannelWritePolicy {
+    /// Canonical string representation (matches DB enum and Nostr tags).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AnyMember => "any_member",
+            Self::AdminsOnly => "admins_only",
+            Self::HumanOnly => "human_only",
+        }
+    }
+
+    /// Whether `role` may originate a message under this policy.
+    ///
+    /// This is the single decision function; ingest and any client preview
+    /// must both route through it so they can never disagree.
+    ///
+    /// Deliberately mirrors the `git_perms` treatment of Bot/Guest as one
+    /// "may not originate" class rather than minting new role semantics:
+    /// [`MemberRole::Guest`] is documented read-only and [`MemberRole::Bot`]
+    /// sits outside the hierarchy at level 0, so neither may originate under
+    /// any policy — including the permissive default, which matches the
+    /// existing `has_at_least(Member)` floor.
+    pub fn allows_post(self, role: MemberRole) -> bool {
+        match self {
+            Self::AnyMember => role.has_at_least(MemberRole::Member),
+            Self::AdminsOnly => role.has_at_least(MemberRole::Admin),
+            Self::HumanOnly => {
+                role.has_at_least(MemberRole::Member) && !matches!(role, MemberRole::Bot)
+            }
+        }
+    }
+}
+
+impl fmt::Display for ChannelWritePolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ChannelWritePolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "any_member" => Ok(Self::AnyMember),
+            "admins_only" => Ok(Self::AdminsOnly),
+            "human_only" => Ok(Self::HumanOnly),
+            other => Err(format!("unknown channel write policy: {other:?}")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::canonical_channel_name;
+    use super::{ChannelWritePolicy, MemberRole};
+    use std::str::FromStr;
+
+    /// The default MUST reproduce historic membership-binary behavior, or
+    /// every existing channel silently changes semantics on deploy.
+    #[test]
+    fn default_policy_is_any_member() {
+        assert_eq!(ChannelWritePolicy::default(), ChannelWritePolicy::AnyMember);
+    }
+
+    /// The full policy x role matrix. This is the authz contract; if a cell
+    /// changes, that change must be deliberate.
+    #[test]
+    fn allows_post_matrix() {
+        use ChannelWritePolicy::{AdminsOnly, AnyMember, HumanOnly};
+        use MemberRole::{Admin, Bot, Guest, Member, Owner};
+
+        // any_member: the historic floor is has_at_least(Member).
+        assert!(AnyMember.allows_post(Owner));
+        assert!(AnyMember.allows_post(Admin));
+        assert!(AnyMember.allows_post(Member));
+        assert!(!AnyMember.allows_post(Guest), "guest is read-only");
+        assert!(!AnyMember.allows_post(Bot), "bot is level 0");
+
+        // admins_only: announcement channels.
+        assert!(AdminsOnly.allows_post(Owner));
+        assert!(AdminsOnly.allows_post(Admin));
+        assert!(!AdminsOnly.allows_post(Member));
+        assert!(!AdminsOnly.allows_post(Guest));
+        assert!(!AdminsOnly.allows_post(Bot));
+
+        // human_only: the REG-8 headline. Humans post, agents do not.
+        assert!(HumanOnly.allows_post(Owner));
+        assert!(HumanOnly.allows_post(Admin));
+        assert!(HumanOnly.allows_post(Member));
+        assert!(!HumanOnly.allows_post(Guest));
+        assert!(!HumanOnly.allows_post(Bot), "the whole point of the policy");
+    }
+
+    /// A policy may only ever NARROW who can post relative to the default.
+    /// Stated as a property so a future value cannot accidentally widen.
+    #[test]
+    fn no_policy_widens_beyond_the_default() {
+        for policy in [
+            ChannelWritePolicy::AnyMember,
+            ChannelWritePolicy::AdminsOnly,
+            ChannelWritePolicy::HumanOnly,
+        ] {
+            for role in [
+                MemberRole::Owner,
+                MemberRole::Admin,
+                MemberRole::Member,
+                MemberRole::Guest,
+                MemberRole::Bot,
+            ] {
+                if policy.allows_post(role) {
+                    assert!(
+                        ChannelWritePolicy::AnyMember.allows_post(role),
+                        "{policy} allowed {role} whom the default denies — policies must only narrow"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Bot is denied under EVERY policy, including the permissive default.
+    /// REG-8's agent-summary carve-out therefore needs no allow-path grant:
+    /// the digest writer is the relay, not a Bot member.
+    #[test]
+    fn bot_may_never_originate_under_any_policy() {
+        for policy in [
+            ChannelWritePolicy::AnyMember,
+            ChannelWritePolicy::AdminsOnly,
+            ChannelWritePolicy::HumanOnly,
+        ] {
+            assert!(!policy.allows_post(MemberRole::Bot), "{policy}");
+        }
+    }
+
+    #[test]
+    fn write_policy_round_trips_through_its_canonical_string() {
+        for policy in [
+            ChannelWritePolicy::AnyMember,
+            ChannelWritePolicy::AdminsOnly,
+            ChannelWritePolicy::HumanOnly,
+        ] {
+            assert_eq!(
+                ChannelWritePolicy::from_str(policy.as_str()).unwrap(),
+                policy
+            );
+            assert_eq!(policy.to_string(), policy.as_str());
+        }
+    }
+
+    /// Unknown values are refused, never defaulted: a relay that silently
+    /// downgraded an unrecognized policy to `any_member` would fail OPEN.
+    #[test]
+    fn unknown_write_policy_is_refused_not_defaulted() {
+        for bad in ["", "AnyMember", "any member", "nobody", "human-only"] {
+            assert!(ChannelWritePolicy::from_str(bad).is_err(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn channel_names_trim_whitespace_and_drop_all_leading_hashes() {

@@ -16,7 +16,7 @@ use buzz_datastore_tracing::datastore_span;
 // Re-export the canonical enum definitions from buzz-core.
 // These live in core (zero I/O deps) so the SDK can share them
 // without pulling in sqlx/tokio.
-pub use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
+pub use buzz_core::channel::{ChannelType, ChannelVisibility, ChannelWritePolicy, MemberRole};
 
 // Keep the established channel module paths compatible while membership SQL
 // and invariants live in their dedicated store module.
@@ -61,6 +61,10 @@ pub struct ChannelRecord {
     pub channel_type: String,
     /// Visibility string (`"open"` or `"private"`).
     pub visibility: String,
+    /// Who may originate a message in this channel (REG-8 / upstream #2497).
+    /// Defaults to [`ChannelWritePolicy::AnyMember`], the historic
+    /// membership-binary behavior.
+    pub write_policy: ChannelWritePolicy,
     /// Optional channel description.
     pub description: Option<String>,
     /// Optional canvas (rich document) content.
@@ -170,7 +174,7 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, write_policy::text AS write_policy
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -270,7 +274,7 @@ pub async fn create_channel_with_id(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, write_policy::text AS write_policy
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -314,7 +318,7 @@ async fn get_channel_with_operation(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, write_policy::text AS write_policy
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -396,7 +400,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline
+                   ttl_seconds, ttl_deadline, write_policy::text AS write_policy
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL AND visibility::text = $2
             ORDER BY created_at DESC
@@ -416,7 +420,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline
+                   ttl_seconds, ttl_deadline, write_policy::text AS write_policy
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -457,11 +461,24 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
     let ttl_seconds: Option<i32> = row.try_get("ttl_seconds").unwrap_or(None);
     let ttl_deadline: Option<DateTime<Utc>> = row.try_get("ttl_deadline").unwrap_or(None);
 
+    // REG-8 (fail closed): `write_policy` decides who may write, so it must
+    // never fall back to the permissive default. An absent column propagates
+    // the sqlx error — a future SELECT that forgets the column then breaks
+    // loudly instead of silently re-opening every restricted channel — and an
+    // unrecognized stored value is surfaced as `DbError::InvalidData`.
+    let write_policy = match row.try_get::<String, _>("write_policy") {
+        Ok(raw) => raw
+            .parse::<ChannelWritePolicy>()
+            .map_err(DbError::InvalidData)?,
+        Err(err) => return Err(err.into()),
+    };
+
     Ok(ChannelRecord {
         id,
         name: row.try_get("name")?,
         channel_type: row.try_get("channel_type")?,
         visibility: row.try_get("visibility")?,
+        write_policy,
         description: row.try_get("description")?,
         canvas: row.try_get("canvas")?,
         created_by: row.try_get("created_by")?,
