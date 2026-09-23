@@ -728,17 +728,42 @@ fn every_channel_record_select_projects_write_policy() {
          the anchor has drifted and this guard no longer checks what it claims"
     );
 
-    // No `ChannelRecord` constructor may invent a policy instead of reading it.
+    // Every `write_policy` binding in the store layer must fail CLOSED.
+    // Banning known-bad spellings only enumerates the ones someone already
+    // thought of: `.ok().and_then(..).unwrap_or_default()` reintroduces the
+    // exact fail-open while containing none of them. Assert the property
+    // positively instead — the binding propagates with `?` and never launders
+    // the error into a permissive value.
     for (label, source) in &sources {
+        let mut at = 0usize;
+        let mut bindings = 0usize;
+        while let Some(off) = source[at..].find("let write_policy = ") {
+            let start = at + off;
+            let end = source[start..]
+                .find(";\n")
+                .map(|e| start + e)
+                .unwrap_or(source.len());
+            let stmt = &source[start..end];
+            at = end + 1;
+            bindings += 1;
+
+            assert!(
+                stmt.contains('?'),
+                "{label}: `write_policy` is bound without `?`, so a read or \
+                 parse failure cannot propagate. An unreadable policy must \
+                 deny writes, never yield the permissive default.\n{stmt}"
+            );
+            for laundering in [".unwrap_or_default()", ".unwrap_or(", ".ok()"] {
+                assert!(
+                    !stmt.contains(laundering),
+                    "{label}: `write_policy` binding uses `{laundering}`, which \
+                     turns an unreadable policy into a permissive one.\n{stmt}"
+                );
+            }
+        }
         assert!(
-            !source.contains("let write_policy = crate::channel::ChannelWritePolicy::default()"),
-            "{label}: a ChannelRecord parser hardcodes the permissive write \
-             policy; parse the projected column instead"
-        );
-        assert!(
-            !source.contains("Err(_) => ChannelWritePolicy::default()"),
-            "{label}: a write-policy read error must not fall back to the \
-             permissive default"
+            bindings > 0 || !source.contains("ChannelRecord {"),
+            "{label}: builds a ChannelRecord without binding write_policy"
         );
     }
 }
