@@ -637,33 +637,55 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
 }
 
 /// REG-8: the channel write policy is a security gate, so every SELECT whose
-/// row reaches a `row_to_channel_record` must project `write_policy`. A query
-/// that omits it used to yield the permissive default, which silently
-/// re-opened every restricted channel; the parser now errors instead, and this
-/// guard catches the omission at build time rather than leaving it to a
-/// live-database integration run.
+/// row becomes a `ChannelRecord` must project `write_policy`. A query that
+/// omits it used to yield the permissive default, which silently re-opened
+/// every restricted channel; the parsers now error instead, and this guard
+/// catches the omission at build time rather than leaving it to a
+/// live-database run.
 ///
-/// Implementation notes, both learned from guards that passed while broken:
+/// Three hardening lessons are encoded here, each from a guard that passed
+/// while broken:
 ///   * the anchor matches BOTH bare (`SELECT id, ...`) and table-aliased
-///     (`SELECT c.id, ...`) projections — an earlier version keyed on the bare
-///     form and so missed `get_accessible_channels`;
-///   * each query is identified by its `FROM channels` site rather than by the
-///     `SELECT` keyword, because nested SELECTs yield several overlapping
-///     windows over one query and a surviving window can mask a real omission.
+///     (`SELECT c.id, ...`) projections — keying on the bare form alone missed
+///     `get_accessible_channels`;
+///   * queries are identified by their `FROM channels` site, because nested
+///     SELECTs yield several overlapping windows over one query and a
+///     surviving window can mask a real omission;
+///   * select lists containing a nested `SELECT` are REJECTED outright rather
+///     than scanned — a scalar subquery that mentions `write_policy` would
+///     otherwise satisfy the check for an outer projection that omits it.
+///
+/// The file list is globbed from `src/store/`, not hardcoded: a channel-record
+/// SELECT added in a new store module must not escape the guard by living in a
+/// file nobody remembered to list.
 #[test]
 fn every_channel_record_select_projects_write_policy() {
+    let store_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store");
+    let mut sources: Vec<(String, String)> = std::fs::read_dir(&store_dir)
+        .expect("src/store must be readable")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()? != "rs" {
+                return None;
+            }
+            let label = path.file_name()?.to_string_lossy().into_owned();
+            Some((label, std::fs::read_to_string(&path).ok()?))
+        })
+        .collect();
+    sources.sort();
+    assert!(
+        sources.len() >= 20,
+        "expected the store module glob to find the store sources, found {}; \
+         the guard is not scanning what it claims",
+        sources.len()
+    );
+
     let mut checked = 0usize;
-    for (label, source) in [
-        ("store/channel.rs", include_str!("../src/store/channel.rs")),
-        (
-            "store/channel_members.rs",
-            include_str!("../src/store/channel_members.rs"),
-        ),
-    ] {
+    let mut sites: Vec<String> = Vec::new();
+    for (label, source) in &sources {
         // One entry per `FROM channels` occurrence => one entry per query.
         for (from_at, _) in source.match_indices("FROM channels") {
             let head = &source[..from_at];
-            // The select list is the text back to this query's own SELECT.
             let Some(sel_at) = head.rfind("SELECT ") else {
                 continue;
             };
@@ -676,28 +698,47 @@ fn every_channel_record_select_projects_write_policy() {
                 continue;
             }
             let line = source[..sel_at].matches('\n').count() + 1;
+
+            // A nested SELECT inside the select list means `rfind` may have
+            // latched onto the subquery, leaving the OUTER projection
+            // unexamined. Refuse to certify rather than guess.
+            assert!(
+                !select_list[7..].contains("SELECT "),
+                "{label}:{line}: channel-record select list contains a nested \
+                 SELECT; this guard cannot verify the outer projection. Hoist \
+                 the subquery out of the select list."
+            );
+
             checked += 1;
+            sites.push(format!("{label}:{line}"));
             assert!(
                 select_list.contains("write_policy::text AS write_policy"),
                 "{label}:{line}: channel-record SELECT does not project \
-                 write_policy; row_to_channel_record fails closed at runtime. \
-                 Add `write_policy::text AS write_policy` to the select list."
+                 write_policy; the row parser fails closed at runtime. Add \
+                 `write_policy::text AS write_policy` to the select list."
             );
         }
     }
 
     // Guards the guard: if the anchor drifts, the loop above would vacuously
-    // pass. 5 in channel.rs + 2 in channel_members.rs.
+    // pass. 5 in channel.rs + 2 in channel_members.rs + 3 in dm.rs.
     assert_eq!(
-        checked, 7,
-        "expected 7 channel-record SELECTs; the anchor has drifted and this \
-         guard is no longer checking what it claims"
+        checked, 10,
+        "expected 10 channel-record SELECTs, found {checked} at {sites:?}; \
+         the anchor has drifted and this guard no longer checks what it claims"
     );
 
-    // The parser must not reintroduce a permissive fallback.
-    let channel_src = include_str!("../src/store/channel.rs");
-    assert!(
-        !channel_src.contains("Err(_) => ChannelWritePolicy::default()"),
-        "row_to_channel_record must not default write_policy on a read error"
-    );
+    // No `ChannelRecord` constructor may invent a policy instead of reading it.
+    for (label, source) in &sources {
+        assert!(
+            !source.contains("let write_policy = crate::channel::ChannelWritePolicy::default()"),
+            "{label}: a ChannelRecord parser hardcodes the permissive write \
+             policy; parse the projected column instead"
+        );
+        assert!(
+            !source.contains("Err(_) => ChannelWritePolicy::default()"),
+            "{label}: a write-policy read error must not fall back to the \
+             permissive default"
+        );
+    }
 }

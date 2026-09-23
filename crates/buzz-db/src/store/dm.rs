@@ -76,7 +76,8 @@ pub async fn find_dm_by_participants(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at
+               purpose, purpose_set_by, purpose_set_at,
+               write_policy::text AS write_policy
         FROM channels
         WHERE community_id = $1
           AND participant_hash = $2
@@ -137,7 +138,8 @@ pub async fn create_dm(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at
+               purpose, purpose_set_by, purpose_set_at,
+               write_policy::text AS write_policy
         FROM channels
         WHERE community_id = $1
           AND participant_hash = $2
@@ -207,7 +209,8 @@ pub async fn create_dm(
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
-               purpose, purpose_set_by, purpose_set_at
+               purpose, purpose_set_by, purpose_set_at,
+               write_policy::text AS write_policy
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -490,12 +493,19 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
     let id: Uuid = row.try_get("id")?;
     let topic_required: bool = row.try_get("topic_required")?;
 
-    // REG-8: DM rows are read through DM-scoped queries that do not SELECT
-    // `write_policy`. A DM has exactly two human participants and no roster to
-    // restrict, so the permissive historic default is the correct value here —
-    // and `crate::channel::row_to_channel_record` remains the only place that
-    // parses a stored policy.
-    let write_policy = crate::channel::ChannelWritePolicy::default();
+    // REG-8 (fail closed): this parser previously hardcoded the permissive
+    // default because DM queries did not SELECT the column. That left a second
+    // permissive `ChannelRecord` constructor one routing change away from
+    // reaching a policy check — the same latent shape as the three fail-opens
+    // already fixed in this feature. The DM queries now project the column and
+    // this parses it exactly as `crate::channel::row_to_channel_record` does,
+    // so no constructor of `ChannelRecord` invents a policy.
+    let write_policy = match row.try_get::<String, _>("write_policy") {
+        Ok(raw) => raw
+            .parse::<crate::channel::ChannelWritePolicy>()
+            .map_err(DbError::InvalidData)?,
+        Err(err) => return Err(err.into()),
+    };
 
     Ok(ChannelRecord {
         id,
