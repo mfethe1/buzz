@@ -849,9 +849,16 @@ pub(crate) async fn check_channel_write_policy(
             .await
         {
             Ok(ch) => ch.write_policy,
-            // A missing row is not this gate's error to raise: the membership
-            // gate already ran and later steps report a missing channel.
-            Err(_) => ChannelWritePolicy::default(),
+            // REG-8 (fail closed): a read failure here is NOT "no policy".
+            // The caller prefetches this row with `.ok()`, so a pool timeout,
+            // a transient error, or an unrecognized stored policy
+            // (`DbError::InvalidData`) all arrive as `Err` — defaulting to the
+            // permissive policy would silently re-open an admins-only channel
+            // exactly when the database is degraded. A genuinely missing
+            // channel is still reported by the membership gate that ran
+            // before this one and by the later write steps, so denying here
+            // costs a clearer error on an already-failing request.
+            Err(e) => return Err(format!("error: database error: {e}")),
         },
     };
 
@@ -3445,6 +3452,42 @@ mod postgres_tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    /// REG-8 (fail closed): the write-policy gate must never downgrade to the
+    /// permissive default when the channel read FAILS. The caller prefetches
+    /// the row with `.ok()`, so a pool timeout, a transient database error, or
+    /// an unrecognized stored policy (`DbError::InvalidData`) all reach the
+    /// gate as `Err` with `channel == None`. Defaulting there would re-open an
+    /// admins-only channel precisely while the database is degraded — the
+    /// inverse of fail-closed, and the same defect class that twice shipped
+    /// past review in this feature.
+    ///
+    /// Exercised as a source guard rather than a live-database test because
+    /// this crate has no fault-injecting Postgres harness; the assertion is on
+    /// the error arm of the read, which is where the regression would land.
+    #[test]
+    fn write_policy_read_failure_denies_instead_of_defaulting() {
+        let src = include_str!("ingest.rs");
+        let gate_at = src
+            .find("pub(crate) async fn check_channel_write_policy")
+            .expect("write-policy gate must exist");
+        let gate_end = src[gate_at..]
+            .find("\n}\n")
+            .map(|off| gate_at + off)
+            .expect("gate body must terminate");
+        let gate = &src[gate_at..gate_end];
+
+        assert!(
+            !gate.contains("Err(_) => ChannelWritePolicy::default()"),
+            "check_channel_write_policy must not fall back to the permissive \
+             policy when the channel read fails; that silently re-opens every \
+             restricted channel during a database fault"
+        );
+        assert!(
+            gate.contains("Err(e) => return Err(format!(\"error: database error: {e}\"))"),
+            "a failed channel read in the write-policy gate must deny the write"
+        );
+    }
 
     /// REG-8 (#2497): the kind allowlist governed by the write policy is
     /// deliberately narrow. Admin/moderation/reaction/edit kinds must keep
