@@ -3875,6 +3875,115 @@ mod postgres_tests {
         }
     }
 
+    /// REG-8 (final unblock): runtime proof that the write-policy gate
+    /// DENIES. Every prior guard was lexical or read-fidelity; nothing
+    /// asserted a governed write is refused. Seeds a real `admins_only`
+    /// channel plus a `member`-role row in Postgres, then drives the
+    /// production gate `check_channel_write_policy` exactly as
+    /// `ingest_event_inner` calls it (no prefetched row, so the gate takes
+    /// its live DB read path), and asserts the member is refused. Also
+    /// asserts the same member is admitted once the policy returns to
+    /// `any_member`, proving the denial is the policy and not the fixture.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn write_policy_gate_denies_member_post_to_admins_only_channel() {
+        use buzz_core::channel::MemberRole;
+        use std::str::FromStr;
+
+        let url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect test DB");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+            db.migrate().await.expect("migrate test DB");
+        }
+        let state = crate::state::AppState::handler_test_state_with_pool(pool.clone()).await;
+
+        let host = format!("reg8-deny-{}.example", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        let member = nostr::Keys::generate();
+        let member_pk = member.public_key().to_bytes();
+        let channel_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)              VALUES ($1, $2, 'reg8-deny', 'stream', 'open', $3)",
+        )
+        .bind(channel_id)
+        .bind(community.as_uuid())
+        .bind(member_pk)
+        .execute(&pool)
+        .await
+        .expect("seed channel");
+
+        sqlx::query("UPDATE channels SET write_policy = 'admins_only' WHERE id = $1")
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .expect("restrict channel");
+
+        // The creator doubles as the (member-role) poster under test.
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)              VALUES ($1, $2, $3, 'member', $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(member_pk)
+        .execute(&pool)
+        .await
+        .expect("seed member role");
+
+        // Sanity: the fixture parses as the role we think we seeded.
+        assert_eq!(
+            MemberRole::from_str("member").expect("member parses"),
+            MemberRole::Member
+        );
+
+        let tenant = TenantContext::resolved(community, host.clone());
+        // The gate takes its live-DB path (channel = None), exactly the call
+        // shape ingest_event_inner uses when the prefetch missed.
+        let verdict =
+            check_channel_write_policy(&tenant, &state, channel_id, &member_pk, None).await;
+        assert!(
+            verdict.is_err(),
+            "member posting to admins_only must be denied, got {verdict:?}"
+        );
+
+        // Control: the SAME member and fixture, permissive policy — admitted.
+        // Proves the denial came from the stored policy, not the seed.
+        sqlx::query("UPDATE channels SET write_policy = 'any_member' WHERE id = $1")
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .expect("relax channel");
+        let verdict =
+            check_channel_write_policy(&tenant, &state, channel_id, &member_pk, None).await;
+        assert!(
+            verdict.is_ok(),
+            "member posting to any_member must be admitted, got {verdict:?}"
+        );
+
+        // Cleanup.
+        sqlx::query("DELETE FROM channel_members WHERE channel_id = $1")
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .expect("delete member fixture");
+        sqlx::query("DELETE FROM channels WHERE id = $1")
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .expect("delete channel fixture");
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(community.as_uuid())
+            .execute(&pool)
+            .await
+            .expect("delete community fixture");
+    }
+
     #[derive(Debug, Default)]
     struct VecTracer {
         steps: Mutex<Vec<TraceStep>>,

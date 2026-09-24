@@ -192,10 +192,9 @@ impl FromStr for MemberRole {
 /// [`Self::AnyMember`] is the default and reproduces the historic
 /// membership-binary behavior exactly, so a channel that never sets a policy
 /// behaves as it always has.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelWritePolicy {
     /// Any member may originate a message (historic behavior).
-    #[default]
     AnyMember,
     /// Only Owner/Admin may originate — announcement channels.
     AdminsOnly,
@@ -267,11 +266,16 @@ mod tests {
     use super::{ChannelWritePolicy, MemberRole};
     use std::str::FromStr;
 
-    /// The default MUST reproduce historic membership-binary behavior, or
-    /// every existing channel silently changes semantics on deploy.
+    /// The DB backfill default MUST reproduce historic membership-binary
+    /// behavior, or every existing channel silently changes semantics on
+    /// deploy. (The enum itself no longer implements Default — REG-8 — so
+    /// no code path can silently default a policy.)
     #[test]
-    fn default_policy_is_any_member() {
-        assert_eq!(ChannelWritePolicy::default(), ChannelWritePolicy::AnyMember);
+    fn db_backfill_default_is_any_member() {
+        assert_eq!(
+            ChannelWritePolicy::from_str("any_member").unwrap(),
+            ChannelWritePolicy::AnyMember
+        );
     }
 
     /// The full policy x role matrix. This is the authz contract; if a cell
