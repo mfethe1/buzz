@@ -9,6 +9,7 @@ import 'package:buzz/features/channels/pending_local_messages_provider.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 void main() {
   test('live window without deep links does not rescan flattened ids', () async {
@@ -1062,9 +1063,192 @@ void main() {
       ['older', 'head'],
     );
   });
+
+  group('identity scope guard', () {
+    // Same-relay NIP-29 identities share channel ids and this notifier is not
+    // autoDispose, so the cached state must be scoped to (baseUrl, pubkey).
+
+    test(
+      'identity switch does not serve the previous identity messages',
+      () async {
+        final relaySession = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [_event(id: 'alice-secret', createdAt: 10), _bounds()],
+          ],
+        );
+        final config = _MutableRelayConfigNotifier();
+        final container = _buildContainer(relaySession, config: config);
+        addTearDown(container.dispose);
+
+        container.read(channelMessagesProvider(_channelId));
+        await relaySession.subscribed;
+        await _pumpEventQueue();
+        expect(
+          container
+              .read(channelMessagesProvider(_channelId))
+              .value
+              ?.map((e) => e.id),
+          ['alice-secret'],
+          reason: 'first identity must load normally',
+        );
+
+        // Drop the connection, then switch nsec on the SAME relay. The
+        // not-connected branch returns cached data as authoritative AsyncData,
+        // which is exactly where the leak surfaces.
+        relaySession.setConnected(false);
+        config.switchIdentity(nsec: _bobNsec);
+        await _pumpEventQueue();
+
+        expect(
+          container.read(channelMessagesProvider(_channelId)).value,
+          isEmpty,
+          reason: "must not serve the previous identity's messages",
+        );
+        expect(
+          container
+              .read(channelMessagesProvider(_channelId).notifier)
+              .hasLoadedMessages,
+          isFalse,
+          reason: 'the new identity has loaded nothing yet',
+        );
+      },
+    );
+
+    test('relay switch with the same nsec also clears the cache', () async {
+      final relaySession = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [_event(id: 'origin-a', createdAt: 10), _bounds()],
+        ],
+      );
+      final config = _MutableRelayConfigNotifier();
+      final container = _buildContainer(relaySession, config: config);
+      addTearDown(container.dispose);
+
+      container.read(channelMessagesProvider(_channelId));
+      await relaySession.subscribed;
+      await _pumpEventQueue();
+      expect(
+        container.read(channelMessagesProvider(_channelId)).value,
+        isNotEmpty,
+      );
+
+      relaySession.setConnected(false);
+      config.switchIdentity(baseUrl: 'https://other.example');
+      await _pumpEventQueue();
+
+      expect(
+        container.read(channelMessagesProvider(_channelId)).value,
+        isEmpty,
+        reason: 'same pubkey on a different origin is a different scope',
+      );
+    });
+
+    test(
+      'reconnect with an unchanged identity preserves the stale cache',
+      () async {
+        // Negative test: the documented reconnect cache must survive. A guard
+        // that resets on every emission would regress cold-reopen UX.
+        final relaySession = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [_event(id: 'kept', createdAt: 10), _bounds()],
+          ],
+        );
+        final config = _MutableRelayConfigNotifier();
+        final container = _buildContainer(relaySession, config: config);
+        addTearDown(container.dispose);
+
+        container.read(channelMessagesProvider(_channelId));
+        await relaySession.subscribed;
+        await _pumpEventQueue();
+
+        relaySession.setConnected(false);
+        await _pumpEventQueue();
+        expect(
+          container
+              .read(channelMessagesProvider(_channelId))
+              .value
+              ?.map((e) => e.id),
+          ['kept'],
+          reason:
+              'unchanged identity must still show stale data, not a spinner',
+        );
+
+        // Re-emitting an identical config yields a NEW RelayConfig instance
+        // (the class declares no operator ==). Value-equal scope ⇒ no reset.
+        config.reemit();
+        await _pumpEventQueue();
+        expect(
+          container
+              .read(channelMessagesProvider(_channelId))
+              .value
+              ?.map((e) => e.id),
+          ['kept'],
+          reason:
+              'reference-inequality of RelayConfig must not clear the cache',
+        );
+      },
+    );
+
+    test(
+      'a null pubkey (no nsec) is its own scope, distinct from a signed-in one',
+      () async {
+        final relaySession = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [_event(id: 'signed-in', createdAt: 10), _bounds()],
+          ],
+        );
+        final config = _MutableRelayConfigNotifier();
+        final container = _buildContainer(relaySession, config: config);
+        addTearDown(container.dispose);
+
+        container.read(channelMessagesProvider(_channelId));
+        await relaySession.subscribed;
+        await _pumpEventQueue();
+        expect(
+          container.read(channelMessagesProvider(_channelId)).value,
+          isNotEmpty,
+        );
+
+        relaySession.setConnected(false);
+        config.switchIdentity(nsec: null);
+        await _pumpEventQueue();
+
+        expect(
+          container.read(channelMessagesProvider(_channelId)).value,
+          isEmpty,
+          reason: 'signing out must not leave the signed-in messages readable',
+        );
+      },
+    );
+  });
 }
 
 const _channelId = '11111111-1111-4111-8111-111111111111';
+
+final _aliceNsec = nostr.Keys.generate().nsec;
+final _bobNsec = nostr.Keys.generate().nsec;
+
+/// A [RelayConfigNotifier] whose identity can be switched at runtime, standing
+/// in for `activeCommunityProvider` changes without pulling in the community
+/// stack.
+class _MutableRelayConfigNotifier extends RelayConfigNotifier {
+  String _baseUrl = 'https://relay.example';
+  String? _nsec = _aliceNsec;
+
+  @override
+  RelayConfig build() => RelayConfig(baseUrl: _baseUrl, nsec: _nsec);
+
+  void switchIdentity({String? baseUrl, String? nsec = _unset}) {
+    if (baseUrl != null) _baseUrl = baseUrl;
+    if (!identical(nsec, _unset)) _nsec = nsec;
+    state = RelayConfig(baseUrl: _baseUrl, nsec: _nsec);
+  }
+
+  /// Emit a value-identical but reference-distinct config.
+  void reemit() => state = RelayConfig(baseUrl: _baseUrl, nsec: _nsec);
+
+  static const _unset = '\u0000__unset__';
+}
 
 class _IdReadTrackingEvent extends NostrEvent {
   final void Function() onIdRead;
@@ -1087,10 +1271,21 @@ class _IdReadTrackingEvent extends NostrEvent {
   }
 }
 
-ProviderContainer _buildContainer(_RecordingRelaySessionNotifier relaySession) {
-  return ProviderContainer(
-    overrides: [relaySessionProvider.overrideWith(() => relaySession)],
+ProviderContainer _buildContainer(
+  _RecordingRelaySessionNotifier relaySession, {
+  _MutableRelayConfigNotifier? config,
+}) {
+  final container = ProviderContainer(
+    overrides: [
+      relaySessionProvider.overrideWith(() => relaySession),
+      if (config != null) relayConfigProvider.overrideWith(() => config),
+    ],
   );
+  // Initialize the config notifier explicitly. Unfixed code never watches it,
+  // and an uninitialized notifier throws on `state=` — which would make the
+  // red test fail on a harness error instead of on the leak it asserts.
+  if (config != null) container.read(relayConfigProvider);
+  return container;
 }
 
 NostrEvent _event({

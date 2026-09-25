@@ -35,6 +35,18 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// UI can show stale data instead of a blank loading spinner.
   List<NostrEvent>? _lastKnownMessages;
 
+  /// Identity scope (`baseUrl\u0000pubkey`) the cached state above belongs to.
+  ///
+  /// Same-relay NIP-29 identities share channel ids and this notifier is not
+  /// `autoDispose`, so without this guard a same-device identity switch would
+  /// keep serving the PREVIOUS identity's messages as authoritative `AsyncData`.
+  /// Compared as a derived value string, not as the config object: `RelayConfig`
+  /// declares no `operator ==`, so the object compares by reference and every
+  /// emission would look like a change.
+  ///
+  /// Reference: unforcedagi/buzz@5669fdcbc1 (Apache-2.0).
+  String? _identityScope;
+
   /// Whether this channel has completed at least one message history load.
   ///
   /// This distinguishes a genuinely loaded empty channel from the synthetic
@@ -47,6 +59,22 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   @override
   AsyncValue<List<NostrEvent>> build() {
     final sessionState = ref.watch(relaySessionProvider);
+    // Rebuild on identity change. Deliberately a bare watch and not
+    // `.select((c) => c.baseUrl)`: an nsec-only switch on the same relay is the
+    // primary leak scenario and a baseUrl selector cannot observe it.
+    ref.watch(relayConfigProvider);
+    final scope =
+        '${ref.read(relayConfigProvider).baseUrl}'
+        '\u0000${ref.read(myPubkeyProvider)?.toLowerCase()}';
+    if (_identityScope != scope) {
+      _identityScope = scope;
+      _lastKnownMessages = null;
+      _deepLinkEvents.clear();
+      _retainedDeepLinkEventIds.clear();
+      _windowStore = const ChannelWindowStore.empty();
+      _reachedOldest = false;
+      _usingChannelWindow = false;
+    }
     ref.onDispose(() {
       _initVersion++;
       _clearSubscription();
