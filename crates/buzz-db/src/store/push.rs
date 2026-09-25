@@ -2484,6 +2484,21 @@ mod postgres_tests {
         assert_eq!(outbox_count(&pool, community).await, 0);
     }
 
+    /// Drop the matcher rows that `enqueue_one`'s source-event INSERT creates
+    /// via the allowlisted matcher trigger.
+    ///
+    /// A queued `push_match_queue` row deliberately PINS its outbox row against
+    /// the sweep (see `delivered_wake_is_retained_while_rematch_is_queued`), so
+    /// any case about retention/bounding must first represent a *completed*
+    /// rematch — otherwise it silently re-tests the pin instead.
+    async fn complete_rematch(pool: &PgPool, community: CommunityId) {
+        sqlx::query("DELETE FROM push_match_queue WHERE community_id=$1")
+            .bind(community.as_uuid())
+            .execute(pool)
+            .await
+            .expect("complete rematch");
+    }
+
     /// This community's outbox rows. Used instead of the global sweep's
     /// `rows_affected` so concurrent tenants cannot perturb an assertion.
     async fn outbox_count(pool: &PgPool, community: CommunityId) -> i64 {
@@ -2492,6 +2507,221 @@ mod postgres_tests {
             .fetch_one(pool)
             .await
             .expect("count outbox rows")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn sweep_drains_backlog_larger_than_batch_size_across_multiple_calls() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let author = [61; 32];
+        activate(&pool, community, &author, "install", &[62; 32], 1).await;
+
+        // 3 batches worth of delivered wakes, aged past any cutoff.
+        const TOTAL: i64 = 3 * WAKE_OUTBOX_SWEEP_BATCH_SIZE + 250;
+        for batch in 0..TOTAL {
+            let event_id: [u8; 32] = {
+                let mut e = [0_u8; 32];
+                e[..8].copy_from_slice(&batch.to_be_bytes());
+                e
+            };
+            let wake_id = enqueue_one(&pool, community, &author, &event_id, 1).await;
+            sqlx::query(
+                "UPDATE push_wake_outbox SET state='delivered', \
+                 created_at=now()-interval '2 days' WHERE community_id=$1 AND id=$2",
+            )
+            .bind(community.as_uuid())
+            .bind(wake_id)
+            .execute(&pool)
+            .await
+            .expect("age delivered wake");
+        }
+        assert_eq!(outbox_count(&pool, community).await, TOTAL);
+        complete_rematch(&pool, community).await;
+
+        let cutoff = Utc::now() - chrono::Duration::days(1);
+        // Bounded sweeps: each call deletes AT MOST the batch bound, so a
+        // single call must NOT drain the backlog (this is the assertion the
+        // unbounded DELETE would have failed).
+        let first = crate::push::prune_wake_outbox(&pool, cutoff, WAKE_OUTBOX_SWEEP_BATCH_SIZE)
+            .await
+            .expect("first bounded sweep");
+        assert_eq!(
+            first, WAKE_OUTBOX_SWEEP_BATCH_SIZE as u64,
+            "one sweep must not exceed the batch bound"
+        );
+
+        // Repeated ticks drain the remainder in bounded steps.
+        let mut total_deleted = first;
+        loop {
+            let deleted =
+                crate::push::prune_wake_outbox(&pool, cutoff, WAKE_OUTBOX_SWEEP_BATCH_SIZE)
+                    .await
+                    .expect("subsequent bounded sweep");
+            if deleted == 0 {
+                break;
+            }
+            total_deleted += deleted;
+        }
+        assert_eq!(total_deleted, TOTAL as u64);
+        assert_eq!(outbox_count(&pool, community).await, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn sweep_leaves_pending_rows_and_expired_pending_rows_within_retention() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let author = [63; 32];
+        activate(&pool, community, &author, "install", &[64; 32], 1).await;
+
+        // Old but still-pending (via sending: claimed, not terminal) and a
+        // fresh delivered row: neither is eligible at any cutoff choice below.
+        let claimed_id = enqueue_one(&pool, community, &author, &[65; 32], 1).await;
+        sqlx::query(
+            "UPDATE push_wake_outbox SET state='sending', created_at=now()-interval '2 days' \
+             WHERE community_id=$1 AND id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(claimed_id)
+        .execute(&pool)
+        .await
+        .expect("age claimed wake");
+        let fresh_id = enqueue_one(&pool, community, &author, &[66; 32], 1).await;
+        sqlx::query(
+            "UPDATE push_wake_outbox SET state='delivered' WHERE community_id=$1 AND id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(fresh_id)
+        .execute(&pool)
+        .await
+        .expect("keep fresh wake");
+        complete_rematch(&pool, community).await;
+
+        let cutoff = Utc::now() - chrono::Duration::days(1);
+        crate::push::prune_wake_outbox(&pool, cutoff, WAKE_OUTBOX_SWEEP_BATCH_SIZE)
+            .await
+            .expect("sweep with non-terminal rows present");
+        assert_eq!(
+            outbox_count(&pool, community).await,
+            2,
+            "non-terminal and fresh rows must survive the sweep"
+        );
+
+        // An EXPIRED row joins the victim set regardless of state: the sweep's
+        // victim predicate is `state IN (delivered,failed) OR expires_at <= now`
+        // (push.rs:1359-1360), so an aged-out `pending` row is reaped while the
+        // claimed `sending` row with a live expiry is not.
+        let expired_pending_id = enqueue_one(&pool, community, &author, &[67; 32], 1).await;
+        sqlx::query(
+            "UPDATE push_wake_outbox SET created_at=now()-interval '2 days', \
+             expires_at=extract(epoch from now())::bigint - 3600 \
+             WHERE community_id=$1 AND id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(expired_pending_id)
+        .execute(&pool)
+        .await
+        .expect("expire pending wake");
+        complete_rematch(&pool, community).await;
+        crate::push::prune_wake_outbox(&pool, cutoff, WAKE_OUTBOX_SWEEP_BATCH_SIZE)
+            .await
+            .expect("sweep with expired pending row");
+        assert_eq!(
+            outbox_count(&pool, community).await,
+            2,
+            "expired pending is reaped by the expiry arm; live claimed-sending is not"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn sweep_skips_fenced_community_without_failing_the_batch() {
+        let pool = setup_pool().await;
+        let fenced = make_community(&pool).await;
+        let live = make_community(&pool).await;
+        let author = [68; 32];
+        activate(&pool, fenced, &author, "install", &[69; 32], 1).await;
+        activate(&pool, live, &author, "install", &[70; 32], 1).await;
+
+        for (community, tag) in [(fenced, 71_u8), (live, 72_u8)] {
+            let wake_id = enqueue_one(&pool, community, &author, &[tag; 32], 1).await;
+            sqlx::query(
+                "UPDATE push_wake_outbox SET state='delivered', \
+                 created_at=now()-interval '2 days' WHERE community_id=$1 AND id=$2",
+            )
+            .bind(community.as_uuid())
+            .bind(wake_id)
+            .execute(&pool)
+            .await
+            .expect("age delivered wake");
+        }
+        complete_rematch(&pool, fenced).await;
+        complete_rematch(&pool, live).await;
+
+        // Fence one tenant the way the deletion executor does: the tombstone
+        // trigger admits the lifecycle flip only with the executor GUCs set.
+        // `SET LOCAL` cannot take a bind parameter, so use set_config() inside
+        // an explicit transaction exactly as quiesce_test_community() does.
+        let mut fence_tx = pool.begin().await.expect("begin fence fixture");
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+                    set_config('buzz.deletion_fence_generation', '1', true)",
+        )
+        .bind(fenced.to_string())
+        .execute(&mut *fence_tx)
+        .await
+        .expect("authorize fence");
+        sqlx::query(
+            "UPDATE communities SET deletion_state='fenced', deletion_fence_generation=1 \
+             WHERE id=$1",
+        )
+        .bind(fenced.as_uuid())
+        .execute(&mut *fence_tx)
+        .await
+        .expect("fence community");
+        fence_tx.commit().await.expect("commit fence");
+
+        let cutoff = Utc::now() - chrono::Duration::days(1);
+        crate::push::prune_wake_outbox(&pool, cutoff, WAKE_OUTBOX_SWEEP_BATCH_SIZE)
+            .await
+            .expect("fenced tenant must be skipped, not abort the batch");
+        assert_eq!(
+            outbox_count(&pool, fenced).await,
+            1,
+            "fenced community's rows must be skipped"
+        );
+        assert_eq!(
+            outbox_count(&pool, live).await,
+            0,
+            "unfenced community must drain normally in the same batch"
+        );
+
+        // Restore shared state: a lingering fence trips sibling tests' global
+        // `push_match_queue` cleanup via the write-fence trigger.
+        let mut unfence_tx = pool.begin().await.expect("begin unfence fixture");
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+                    set_config('buzz.deletion_fence_generation', '1', true)",
+        )
+        .bind(fenced.to_string())
+        .execute(&mut *unfence_tx)
+        .await
+        .expect("authorize unfence");
+        sqlx::query("DELETE FROM push_match_queue WHERE community_id=$1")
+            .bind(fenced.as_uuid())
+            .execute(&mut *unfence_tx)
+            .await
+            .expect("drain fenced queue");
+        sqlx::query(
+            "UPDATE communities SET deletion_state='active', deletion_fence_generation=0 \
+             WHERE id=$1",
+        )
+        .bind(fenced.as_uuid())
+        .execute(&mut *unfence_tx)
+        .await
+        .expect("unfence community for sibling tests");
+        unfence_tx.commit().await.expect("commit unfence");
     }
 
     #[tokio::test]
