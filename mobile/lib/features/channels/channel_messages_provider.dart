@@ -2,7 +2,10 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
+import '../../shared/theme/theme_provider.dart';
 import 'channel_event_order.dart';
+import 'channel_message_cache/channel_message_cache_storage.dart';
+import 'channels_provider.dart';
 import 'pending_local_messages_provider.dart';
 import 'channel_window.dart';
 import 'thread_replies_provider.dart';
@@ -11,6 +14,10 @@ const _channelLiveEventKinds = [
   ...EventKind.channelEventKinds,
   EventKind.channelThreadSummary,
 ];
+
+/// Cache-key pubkey component used before an account pubkey is derivable,
+/// matching the existing identity-scoped-prefs callers (`ComposeDraftsNotifier`).
+const _anonPubkey = 'anon';
 
 /// Provides the message list for a specific channel. Registers a live
 /// subscription first, then syncs history via the server-assembled channel
@@ -35,10 +42,17 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// UI can show stale data instead of a blank loading spinner.
   List<NostrEvent>? _lastKnownMessages;
 
+  /// Whether the durable snapshot has already been consulted for this
+  /// notifier instance. The cache is a cold-start seed, not a running mirror.
+  bool _cacheSeedAttempted = false;
+
   /// Whether this channel has completed at least one message history load.
   ///
   /// This distinguishes a genuinely loaded empty channel from the synthetic
   /// empty value returned while the relay is not yet connected.
+  ///
+  /// A cold-start cache seed sets [_lastKnownMessages] only when it has
+  /// messages to paint, so an empty cache never claims a load happened.
   bool get hasLoadedMessages => _lastKnownMessages != null;
 
   Map<String, ChannelWindowThreadSummary> get threadSummaries =>
@@ -51,6 +65,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _initVersion++;
       _clearSubscription();
     });
+
+    _seedFromCache();
 
     if (sessionState.status != SessionStatus.connected) {
       _initVersion++;
@@ -115,6 +131,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       ]);
       _lastKnownMessages = merged;
       state = AsyncData(merged);
+      _rememberInCache(merged);
     } catch (e, st) {
       if (!_isCurrentInit(initVersion)) return;
       final fallbackMessages = state.value ?? _lastKnownMessages;
@@ -392,6 +409,81 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   }
 
   bool _isCurrentInit(int initVersion) => initVersion == _initVersion;
+
+  /// Seeds [_lastKnownMessages] from the durable per-identity snapshot the
+  /// first time this notifier builds, so a cold start paints the last-known
+  /// messages instead of a connection skeleton.
+  ///
+  /// Deliberately one-shot per notifier instance: the snapshot is a cold-start
+  /// seed, not a running mirror, and re-reading it on a later reconnect could
+  /// resurrect messages the live timeline has since removed.
+  void _seedFromCache() {
+    if (_cacheSeedAttempted) return;
+    _cacheSeedAttempted = true;
+    if (_lastKnownMessages != null) return;
+
+    final cached = _cacheStorage()?.readChannel(
+      baseUrl: ref.read(relayConfigProvider).baseUrl,
+      storedOrigin: ref.read(relayConfigProvider).storedOrigin,
+      pubkey: ref.read(myPubkeyProvider) ?? _anonPubkey,
+      channelId: channelId,
+    );
+    // An empty cached list must not claim a load happened: leaving
+    // [_lastKnownMessages] null preserves the synthetic-empty distinction
+    // [hasLoadedMessages] exists to draw.
+    if (cached == null || cached.isEmpty) return;
+    final seeded = List<NostrEvent>.of(cached)
+      ..sort(compareChannelTimelineEventsChronologically);
+    _lastKnownMessages = List.unmodifiable(seeded);
+  }
+
+  /// Persists the newest messages for this channel after a successful history
+  /// load. This is the single writer: every other `_lastKnownMessages`
+  /// assignment is an in-memory overlay update, and having one serialized
+  /// writer avoids the last-write-wins interleaving a shared prefs key invites.
+  ///
+  /// DM channels are never written. The channel type is resolved here, while
+  /// connected, because the roster is not persisted and so is unavailable at
+  /// cold-start read time. Resolution failure (roster lag) skips the write:
+  /// a cache miss costs a spinner, a wrong write would persist DM plaintext.
+  void _rememberInCache(List<NostrEvent> messages) {
+    if (messages.isEmpty) return;
+    final storage = _cacheStorage();
+    if (storage == null) return;
+
+    final config = ref.read(relayConfigProvider);
+    storage.writeChannel(
+      baseUrl: config.baseUrl,
+      storedOrigin: config.storedOrigin,
+      pubkey: ref.read(myPubkeyProvider) ?? _anonPubkey,
+      channelId: channelId,
+      messages: messages,
+      eligibility: eligibilityForChannelType(_resolvedChannelType()),
+    );
+  }
+
+  /// The active channel's `channelType`, or null when the roster has not yet
+  /// produced this channel. Never throws: absence is a valid answer that the
+  /// caller fails closed on.
+  String? _resolvedChannelType() => ref
+      .read(channelsProvider)
+      .value
+      ?.where((candidate) => candidate.id == channelId)
+      .firstOrNull
+      ?.channelType;
+
+  ChannelMessageCacheStorage? _cacheStorage() {
+    try {
+      return ChannelMessageCacheStorage(ref.read(savedPrefsProvider));
+    } catch (error) {
+      // Preferences are overridden in tests and unavailable before the
+      // bootstrap override lands; the cache is strictly optional.
+      debugPrint(
+        '[ChannelMessagesNotifier] message cache unavailable for $channelId: $error',
+      );
+      return null;
+    }
+  }
 
   void _clearSubscription() {
     _unsubscribe?.call();
