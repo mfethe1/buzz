@@ -911,6 +911,13 @@ pub struct AppState {
 }
 
 impl AppState {
+    #[cfg(test)]
+    /// Crate-visible re-export so handler tests can build a state bound to a
+    /// caller-owned pool (REG-8 live-database deny test).
+    pub(crate) async fn handler_test_state_with_pool(pool: sqlx::PgPool) -> Arc<AppState> {
+        tests::test_state_with_database_pool(pool).await
+    }
+
     /// Constructs `AppState` from its component services.
     ///
     /// Returns `(state, audit_shutdown)`. The caller should call
