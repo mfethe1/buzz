@@ -59,12 +59,12 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   @override
   AsyncValue<List<NostrEvent>> build() {
     final sessionState = ref.watch(relaySessionProvider);
-    // Rebuild on identity change. Deliberately a bare watch and not
+    // Rebuild on identity change. Deliberately a whole-object watch and not
     // `.select((c) => c.baseUrl)`: an nsec-only switch on the same relay is the
     // primary leak scenario and a baseUrl selector cannot observe it.
-    ref.watch(relayConfigProvider);
+    final relayConfig = ref.watch(relayConfigProvider);
     final scope =
-        '${ref.read(relayConfigProvider).baseUrl}'
+        '${relayConfig.baseUrl}'
         '\u0000${ref.read(myPubkeyProvider)?.toLowerCase()}';
     if (_identityScope != scope) {
       _identityScope = scope;
