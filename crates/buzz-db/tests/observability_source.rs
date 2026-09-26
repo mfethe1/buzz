@@ -635,3 +635,191 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         }
     }
 }
+
+/// REG-8: the channel write policy is a security gate, so every SELECT whose
+/// row becomes a `ChannelRecord` must project `write_policy`. A query that
+/// omits it used to yield the permissive default, which silently re-opened
+/// every restricted channel; the parsers now error instead, and this guard
+/// catches the omission at build time rather than leaving it to a
+/// live-database run.
+///
+/// Three hardening lessons are encoded here, each from a guard that passed
+/// while broken:
+///   * the anchor matches BOTH bare (`SELECT id, ...`) and table-aliased
+///     (`SELECT c.id, ...`) projections — keying on the bare form alone missed
+///     `get_accessible_channels`;
+///   * queries are identified by their `FROM channels` site, because nested
+///     SELECTs yield several overlapping windows over one query and a
+///     surviving window can mask a real omission;
+///   * select lists containing a nested `SELECT` are REJECTED outright rather
+///     than scanned — a scalar subquery that mentions `write_policy` would
+///     otherwise satisfy the check for an outer projection that omits it.
+///
+/// The file list is globbed from `src/store/`, not hardcoded: a channel-record
+/// SELECT added in a new store module must not escape the guard by living in a
+/// file nobody remembered to list.
+#[test]
+fn every_channel_record_select_projects_write_policy() {
+    let store_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store");
+    let mut sources: Vec<(String, String)> = std::fs::read_dir(&store_dir)
+        .expect("src/store must be readable")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()? != "rs" {
+                return None;
+            }
+            let label = path.file_name()?.to_string_lossy().into_owned();
+            Some((label, std::fs::read_to_string(&path).ok()?))
+        })
+        .collect();
+    sources.sort();
+    assert!(
+        sources.len() >= 20,
+        "expected the store module glob to find the store sources, found {}; \
+         the guard is not scanning what it claims",
+        sources.len()
+    );
+
+    let mut checked = 0usize;
+    let mut sites: Vec<String> = Vec::new();
+    for (label, source) in &sources {
+        // One entry per `FROM channels` occurrence => one entry per query.
+        for (from_at, _) in source.match_indices("FROM channels") {
+            let head = &source[..from_at];
+            let Some(sel_at) = head.rfind("SELECT ") else {
+                continue;
+            };
+            let select_list = &source[sel_at..from_at];
+            // A channel-record projection always carries both enum casts; this
+            // filters out counts, id-only and unrelated projections.
+            if !(select_list.contains("channel_type::text")
+                && select_list.contains("visibility::text"))
+            {
+                continue;
+            }
+            let line = source[..sel_at].matches('\n').count() + 1;
+
+            // A nested SELECT inside the select list means `rfind` may have
+            // latched onto the subquery, leaving the OUTER projection
+            // unexamined. Refuse to certify rather than guess.
+            assert!(
+                !select_list[7..].contains("SELECT "),
+                "{label}:{line}: channel-record select list contains a nested \
+                 SELECT; this guard cannot verify the outer projection. Hoist \
+                 the subquery out of the select list."
+            );
+
+            checked += 1;
+            sites.push(format!("{label}:{line}"));
+            assert!(
+                select_list.contains("write_policy::text AS write_policy"),
+                "{label}:{line}: channel-record SELECT does not project \
+                 write_policy; the row parser fails closed at runtime. Add \
+                 `write_policy::text AS write_policy` to the select list."
+            );
+        }
+    }
+
+    // Guards the guard: if the anchor drifts, the loop above would vacuously
+    // pass. 5 in channel.rs + 2 in channel_members.rs + 3 in dm.rs.
+    assert_eq!(
+        checked, 10,
+        "expected 10 channel-record SELECTs, found {checked} at {sites:?}; \
+         the anchor has drifted and this guard no longer checks what it claims"
+    );
+
+    // Every `write_policy` binding in the store layer must fail CLOSED.
+    // Banning known-bad spellings only enumerates the ones someone already
+    // thought of: `.ok().and_then(..).unwrap_or_default()` reintroduces the
+    // exact fail-open while containing none of them. Assert the property
+    // positively instead — the binding propagates with `?` and never launders
+    // the error into a permissive value.
+    for (label, source) in &sources {
+        let mut at = 0usize;
+        let mut bindings = 0usize;
+        while let Some(off) = source[at..].find("let write_policy = ") {
+            let start = at + off;
+            let end = source[start..]
+                .find(";\n")
+                .map(|e| start + e)
+                .unwrap_or(source.len());
+            let stmt = &source[start..end];
+            at = end + 1;
+            bindings += 1;
+
+            assert!(
+                stmt.contains('?'),
+                "{label}: `write_policy` is bound without `?`, so a read or \
+                 parse failure cannot propagate. An unreadable policy must \
+                 deny writes, never yield the permissive default.\n{stmt}"
+            );
+            for laundering in [".unwrap_or_default()", ".unwrap_or(", ".ok()"] {
+                assert!(
+                    !stmt.contains(laundering),
+                    "{label}: `write_policy` binding uses `{laundering}`, which \
+                     turns an unreadable policy into a permissive one.\n{stmt}"
+                );
+            }
+        }
+        assert!(
+            bindings > 0 || !source.contains("ChannelRecord {"),
+            "{label}: builds a ChannelRecord without binding write_policy"
+        );
+    }
+}
+
+/// REG-8: the Postgres `channel_write_policy` enum and `ChannelWritePolicy`'s
+/// `FromStr` must stay in lockstep. Both parsers now fail CLOSED on an
+/// unrecognized value, which is correct for a security gate but means a new
+/// enum value added by a migration alone would hard-error every read of a
+/// channel using it — a fail-closed outage, the mirror image of the fail-open
+/// this feature exists to fix. The schema is the source of truth, so this
+/// derives the expected set from it rather than restating a literal list.
+#[test]
+fn write_policy_enum_matches_the_rust_parser() {
+    let schema = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/schema.sql"),
+    )
+    .expect("schema.sql must be readable");
+
+    let decl_at = schema
+        .find("CREATE TYPE channel_write_policy AS ENUM")
+        .expect("channel_write_policy enum must exist in the schema");
+    let open = schema[decl_at..].find('(').expect("enum body") + decl_at;
+    let close = schema[open..].find(')').expect("enum body end") + open;
+    let mut sql_values: Vec<String> = schema[open + 1..close]
+        .split(',')
+        .map(|v| v.trim().trim_matches('\'').to_string())
+        .filter(|v| !v.is_empty())
+        .collect();
+    sql_values.sort();
+    assert!(
+        !sql_values.is_empty(),
+        "failed to parse the enum body; this guard is not checking anything"
+    );
+
+    for value in &sql_values {
+        let parsed = value.parse::<buzz_core::channel::ChannelWritePolicy>();
+        assert!(
+            parsed.is_ok(),
+            "schema.sql declares channel_write_policy value {value:?} but \
+             ChannelWritePolicy::from_str rejects it; every read of a channel \
+             using that policy would hard-error. Add it to the Rust enum."
+        );
+        assert_eq!(
+            parsed.expect("checked ok").to_string(),
+            *value,
+            "round-trip mismatch for {value:?}: Display must emit the exact \
+             stored value or writes will not round-trip"
+        );
+    }
+
+    // And the reverse: no Rust variant may be unstorable.
+    for variant in buzz_core::channel::ChannelWritePolicy::ALL {
+        assert!(
+            sql_values.contains(&variant.to_string()),
+            "ChannelWritePolicy::{variant:?} has no matching value in the \
+             schema's channel_write_policy enum; it can never be stored"
+        );
+    }
+}
