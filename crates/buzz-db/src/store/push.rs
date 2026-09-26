@@ -1313,31 +1313,62 @@ pub async fn disable_endpoint_generation(
     Ok(result.rows_affected() == 1)
 }
 
-/// Delete terminal/expired outbox rows older than a retention cutoff.
+/// Upper bound on rows deleted by one [`prune_wake_outbox`] call.
+///
+/// The first sweep of a never-pruned table would otherwise be an unbounded
+/// DELETE holding row locks over the whole backlog; bounding it trades a slower
+/// drain (several ticks) for a transaction whose size is known in advance.
+pub const WAKE_OUTBOX_SWEEP_BATCH_SIZE: i64 = 1_000;
+
+/// Delete terminal/expired outbox rows older than a retention cutoff, across
+/// all tenants, up to [`WAKE_OUTBOX_SWEEP_BATCH_SIZE`] rows per call.
+///
+/// Global (not per-community) to match the shape of this module's sibling
+/// sweeps ([`reap_exhausted_matches`]) and `reap_expired_relay_invites`: the
+/// relay's leader-only tick has no all-tenant community iterator, and the store
+/// exposes only an owner-scoped community list.
+///
+/// `community_write_allowed` fences the sweep so a community being deleted —
+/// whose BEFORE-DELETE trigger RAISEs on foreign writes — cannot abort the
+/// whole batch. Community deletion already drops these rows wholesale.
+///
+/// Expired-but-still-`pending` rows are included deliberately: they remain
+/// inside the `push_wake_outbox_due` partial index and are therefore rescanned
+/// and discarded by *every* claim, so this sweep removes claim-path cost as
+/// well as heap bloat. Such rows are reachable whenever the delivery worker is
+/// down or backlogged past a wake's useful life, because only `fail_wake` moves
+/// a row out of `pending` and it needs attempts that nothing is making.
+///
+/// No `ORDER BY`: no index serves the predicate's age column (`created_at`),
+/// and the only total index is `PRIMARY KEY (community_id, id)` whose `id` is a
+/// random uuid — so PK order is affordable but carries no age or fairness
+/// semantics. Unordered batches drain the backlog in the same number of ticks.
 ///
 /// NIP-RS hard purge only targets kind 30078, which is not push-eligible and
 /// therefore cannot have a matcher row; any other absent source is handled by
 /// the matcher's fenced load-miss deletion.
-pub async fn prune_wake_outbox(
-    pool: &PgPool,
-    community: CommunityId,
-    before: DateTime<Utc>,
-) -> Result<u64> {
+pub async fn prune_wake_outbox(pool: &PgPool, before: DateTime<Utc>, limit: i64) -> Result<u64> {
     let mut connection =
         acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
             .await?;
     let result = sqlx::query(
-        "DELETE FROM push_wake_outbox o \
-         WHERE o.community_id = $1 AND o.created_at < $2 \
-           AND (o.state IN ('delivered', 'failed') \
-                OR o.expires_at <= EXTRACT(EPOCH FROM now())::bigint) \
-           AND NOT EXISTS ( \
-               SELECT 1 FROM push_match_queue q \
-               WHERE q.community_id = o.community_id AND q.event_id = o.event_id \
-           )",
+        "DELETE FROM push_wake_outbox d \
+         USING ( \
+             SELECT o.community_id, o.id FROM push_wake_outbox o \
+             WHERE o.created_at < $1 \
+               AND (o.state IN ('delivered', 'failed') \
+                    OR o.expires_at <= EXTRACT(EPOCH FROM now())::bigint) \
+               AND community_write_allowed(o.community_id) \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM push_match_queue q \
+                   WHERE q.community_id = o.community_id AND q.event_id = o.event_id \
+               ) \
+             LIMIT $2 \
+         ) victim \
+         WHERE d.community_id = victim.community_id AND d.id = victim.id",
     )
-    .bind(community.as_uuid())
     .bind(before)
+    .bind(limit)
     .execute(&mut *connection)
     .await?;
     Ok(result.rows_affected())
@@ -1408,6 +1439,22 @@ impl Db {
     #[datastore_span(name = "reap_exhausted_push_matches", system = "postgresql")]
     pub async fn reap_exhausted_push_matches(&self) -> Result<u64> {
         crate::push::reap_exhausted_matches(&self.pool).await
+    }
+
+    /// Delete terminal/expired wake-outbox rows older than `before` (periodic
+    /// retention sweep, all tenants, bounded per call).
+    ///
+    /// Without this wrapper `crate::push::prune_wake_outbox` is unreachable
+    /// from the relay, which is why the outbox has never been pruned in
+    /// production.
+    #[datastore_span(name = "prune_push_wake_outbox", system = "postgresql")]
+    pub async fn prune_push_wake_outbox(&self, before: DateTime<Utc>) -> Result<u64> {
+        crate::push::prune_wake_outbox(
+            &self.pool,
+            before,
+            crate::push::WAKE_OUTBOX_SWEEP_BATCH_SIZE,
+        )
+        .await
     }
 
     /// Idempotently enqueue a wake for a matched lease and event.
@@ -2412,9 +2459,18 @@ mod postgres_tests {
         .expect("mark old wake delivered");
 
         let cutoff = Utc::now() - chrono::Duration::days(1);
+        // The sweep is global, so its `rows_affected` includes other tests'
+        // tenants under a shared Postgres. Assert on this community's own row
+        // count instead — that is what these cases actually mean, and it is
+        // exact (never `>=`), so a regression still fails.
+        assert_eq!(outbox_count(&pool, community).await, 1);
+        prune_wake_outbox(&pool, cutoff, WAKE_OUTBOX_SWEEP_BATCH_SIZE)
+            .await
+            .unwrap();
         assert_eq!(
-            prune_wake_outbox(&pool, community, cutoff).await.unwrap(),
-            0
+            outbox_count(&pool, community).await,
+            1,
+            "queued rematch must pin the delivered wake"
         );
         sqlx::query("DELETE FROM push_match_queue WHERE community_id=$1 AND event_id=$2")
             .bind(community.as_uuid())
@@ -2422,10 +2478,20 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .expect("complete rematch");
-        assert_eq!(
-            prune_wake_outbox(&pool, community, cutoff).await.unwrap(),
-            1
-        );
+        prune_wake_outbox(&pool, cutoff, WAKE_OUTBOX_SWEEP_BATCH_SIZE)
+            .await
+            .unwrap();
+        assert_eq!(outbox_count(&pool, community).await, 0);
+    }
+
+    /// This community's outbox rows. Used instead of the global sweep's
+    /// `rows_affected` so concurrent tenants cannot perturb an assertion.
+    async fn outbox_count(pool: &PgPool, community: CommunityId) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM push_wake_outbox WHERE community_id=$1")
+            .bind(community.as_uuid())
+            .fetch_one(pool)
+            .await
+            .expect("count outbox rows")
     }
 
     #[tokio::test]
@@ -2475,9 +2541,13 @@ mod postgres_tests {
         .await
         .expect("mark old wake delivered");
         let cutoff = Utc::now() - chrono::Duration::days(1);
+        prune_wake_outbox(&pool, cutoff, WAKE_OUTBOX_SWEEP_BATCH_SIZE)
+            .await
+            .unwrap();
         assert_eq!(
-            prune_wake_outbox(&pool, community, cutoff).await.unwrap(),
-            0
+            outbox_count(&pool, community).await,
+            1,
+            "exhausted matcher job must still pin the delivered wake"
         );
         sqlx::query(
             "UPDATE push_match_queue SET attempts=$3, state='matching', lease_until=now()-interval '1 second' \
@@ -2512,9 +2582,12 @@ mod postgres_tests {
         .await
         .unwrap();
         assert_eq!(remaining, 0);
+        prune_wake_outbox(&pool, cutoff, WAKE_OUTBOX_SWEEP_BATCH_SIZE)
+            .await
+            .unwrap();
         assert_eq!(
-            prune_wake_outbox(&pool, community, cutoff).await.unwrap(),
-            1,
+            outbox_count(&pool, community).await,
+            0,
             "reaped poison job must release delivered-wake retention"
         );
     }
