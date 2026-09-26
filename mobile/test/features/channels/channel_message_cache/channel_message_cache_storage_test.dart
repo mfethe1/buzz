@@ -99,11 +99,9 @@ void main() {
   group('DM exclusion is enforced at write time', () {
     test('a dm channel writes nothing at all', () {
       expect(
-        write(
-          'dm-1',
-          [event('e1', content: 'secret')],
-          eligibility: ChannelCacheEligibility.dm,
-        ),
+        write('dm-1', [
+          event('e1', content: 'secret'),
+        ], eligibility: ChannelCacheEligibility.dm),
         isFalse,
       );
       expect(read('dm-1'), isNull);
@@ -112,11 +110,9 @@ void main() {
 
     test('an unresolved channel writes nothing at all', () {
       expect(
-        write(
-          'unknown-1',
-          [event('e1')],
-          eligibility: ChannelCacheEligibility.unresolved,
-        ),
+        write('unknown-1', [
+          event('e1'),
+        ], eligibility: ChannelCacheEligibility.unresolved),
         isFalse,
       );
       expect(read('unknown-1'), isNull);
@@ -126,11 +122,9 @@ void main() {
     test('no DM body reaches disk even as a substring', () {
       write('chan-1', [event('e1', content: 'public')]);
       expect(
-        write(
-          'dm-1',
-          [event('e2', content: 'SENSITIVE-DM-BODY')],
-          eligibility: ChannelCacheEligibility.dm,
-        ),
+        write('dm-1', [
+          event('e2', content: 'SENSITIVE-DM-BODY'),
+        ], eligibility: ChannelCacheEligibility.dm),
         isFalse,
       );
       final raw = prefs.getString(
@@ -144,11 +138,9 @@ void main() {
     test('a refused write leaves an existing entry untouched', () {
       write('chan-1', [event('e1', content: 'kept')]);
       expect(
-        write(
-          'chan-1',
-          [event('e9', content: 'should-not-land')],
-          eligibility: ChannelCacheEligibility.dm,
-        ),
+        write('chan-1', [
+          event('e9', content: 'should-not-land'),
+        ], eligibility: ChannelCacheEligibility.dm),
         isFalse,
       );
       expect(read('chan-1')!.map((e) => e.id), ['e1']);
@@ -157,10 +149,7 @@ void main() {
 
   group('round trip', () {
     test('writes then reads back messages in order', () {
-      write('chan-1', [
-        event('e1', createdAt: 10),
-        event('e2', createdAt: 20),
-      ]);
+      write('chan-1', [event('e1', createdAt: 10), event('e2', createdAt: 20)]);
       final got = read('chan-1')!;
       expect(got.map((e) => e.id), ['e1', 'e2']);
       expect(got.first.content, 'hi');
@@ -313,25 +302,28 @@ void main() {
       expect(read('chan-1'), isNull);
     });
 
-    test('a malformed event is skipped, the rest of the channel kept', () async {
-      await seedRaw(
-        jsonEncode({
-          'version': 1,
-          'channels': [
-            {
-              'channelId': 'chan-1',
-              'updatedAt': 1,
-              'messages': [
-                {'id': 'bad'}, // missing required fields
-                event('good').toJson(),
-                'not-a-map',
-              ],
-            },
-          ],
-        }),
-      );
-      expect(read('chan-1')!.map((e) => e.id), ['good']);
-    });
+    test(
+      'a malformed event is skipped, the rest of the channel kept',
+      () async {
+        await seedRaw(
+          jsonEncode({
+            'version': 1,
+            'channels': [
+              {
+                'channelId': 'chan-1',
+                'updatedAt': 1,
+                'messages': [
+                  {'id': 'bad'}, // missing required fields
+                  event('good').toJson(),
+                  'not-a-map',
+                ],
+              },
+            ],
+          }),
+        );
+        expect(read('chan-1')!.map((e) => e.id), ['good']);
+      },
+    );
 
     test('a malformed channel entry is skipped, siblings kept', () async {
       await seedRaw(
