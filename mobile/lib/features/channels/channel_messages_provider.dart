@@ -117,13 +117,22 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
             since: _currentUnixSeconds(),
             limit: 200,
           ),
-          _handleLiveEvent,
+          (event) {
+            // Events from a superseded init generation must never reach the
+            // state: between an identity switch and this subscription's own
+            // teardown, the relay can still deliver on the old channel.
+            if (!_isCurrentInit(initVersion)) return;
+            _handleLiveEvent(event);
+          },
         );
+        // Record the handle even when stale so the NEXT init's
+        // _clearSubscription() can tear this subscription down; a history
+        // await parked across an identity switch otherwise leaves it live.
+        _unsubscribe = unsubscribe;
         if (!_isCurrentInit(initVersion)) {
           unsubscribe();
           return;
         }
-        _unsubscribe = unsubscribe;
       } catch (error) {
         if (!_isCurrentInit(initVersion)) return;
         debugPrint(
@@ -131,7 +140,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         );
       }
 
-      final history = await _fetchNewestHistory(session);
+      final history = await _fetchNewestHistory(session, initVersion);
       if (!_isCurrentInit(initVersion)) return;
       _confirmLocalMessages(history.map((event) => event.id));
 
@@ -163,10 +172,18 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   Future<List<NostrEvent>> _fetchNewestHistory(
     RelaySessionNotifier session,
+    int initVersion,
   ) async {
     try {
       _initialWindowQueryInFlight = true;
       final page = await _fetchWindowPage(session, null);
+      // A page answered by a superseded generation must not touch shared
+      // state: `_windowStore` survives across inits (only `build()` resets
+      // it), so a late page would silently corrupt the current generation.
+      if (!_isCurrentInit(initVersion)) {
+        _initialWindowQueryInFlight = false;
+        return const <NostrEvent>[];
+      }
       _initialWindowQueryInFlight = false;
       _windowStore = replaceNewestChannelWindow(
         _windowStore,

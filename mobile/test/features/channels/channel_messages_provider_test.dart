@@ -1220,6 +1220,138 @@ void main() {
         );
       },
     );
+
+    test(
+      'a subscribe() that resolves after an identity switch is neither live nor leaked',
+      () async {
+        // The ONE live-subscription window `ref.onDispose` cannot cover.
+        // On an identity switch Riverpod disposes the previous generation and
+        // `onDispose` calls `_clearSubscription()` — but that can only clear an
+        // unsubscribe handle that ALREADY EXISTS. If identity A's `subscribe()`
+        // is still awaiting when the switch happens, its handle is created
+        // afterwards, so teardown has already run and cannot see it. Without
+        // the generation guard that listener stays registered for the life of
+        // the notifier and feeds A's events into B's state.
+        final gate = Completer<void>();
+        final relaySession = _RecordingRelaySessionNotifier(
+          queryResults: [
+            [_event(id: 'alice-secret', createdAt: 10), _bounds()],
+          ],
+        );
+        relaySession.subscribeGate = gate.future;
+        final config = _MutableRelayConfigNotifier();
+        final container = _buildContainer(relaySession, config: config);
+        addTearDown(container.dispose);
+
+        // A's init parks inside subscribe(), before the handle is returned.
+        container.read(channelMessagesProvider(_channelId));
+        await relaySession.subscribed;
+        await _pumpEventQueue();
+        expect(
+          relaySession.listenerCount,
+          0,
+          reason: "A's subscribe() must still be in flight",
+        );
+
+        // Switch identity while A's subscribe() is parked.
+        config.switchIdentity(nsec: _bobNsec);
+        await _pumpEventQueue();
+
+        // A's subscribe() now resolves, into B's reign.
+        gate.complete();
+        relaySession.subscribeGate = null;
+        await _pumpEventQueue();
+
+        // A's late delivery must not reach B's state.
+        relaySession.emit(_event(id: 'a-live', createdAt: 99));
+        await _pumpEventQueue();
+        expect(
+          (container.read(channelMessagesProvider(_channelId)).value ??
+                  const [])
+              .map((e) => e.id),
+          isNot(contains('a-live')),
+          reason: "identity A's late live event must not reach B's state",
+        );
+
+        // ...and it must be torn down, not merely muted: a listener that stays
+        // registered forever is a leak even when its events are discarded.
+        // `_unsubscribe` is assigned before the staleness check precisely so
+        // the next generation's `_clearSubscription()` can reach it.
+        container.read(channelMessagesProvider(_channelId).notifier);
+        config.switchIdentity(nsec: _carolNsec);
+        await _pumpEventQueue();
+        expect(
+          relaySession.listenerCount,
+          0,
+          reason: "A's stale subscription must be torn down, not left live",
+        );
+      },
+    );
+
+    test(
+      'a history response parked across an identity switch never lands in the new identity state',
+      () async {
+        // The other half of the generation guard: A's channel-window query
+        // ANSWERS after B has already taken over. The response belongs to A's
+        // init generation and must be discarded — both the returned rows and
+        // the `_windowStore` page it would install.
+        final parked = Completer<List<NostrEvent>>();
+        final relaySession = _RecordingRelaySessionNotifier(
+          queryResults: [
+            parked.future, // identity A's channel-window query
+          ],
+        );
+        final config = _MutableRelayConfigNotifier();
+        final container = _buildContainer(relaySession, config: config);
+        addTearDown(container.dispose);
+
+        container.read(channelMessagesProvider(_channelId));
+        await relaySession.subscribed;
+        await _pumpEventQueue();
+
+        // Switch identity while OFFLINE: B's init takes the not-connected
+        // branch, so the state resolves to empty AsyncData immediately.
+        relaySession.setConnected(false);
+        config.switchIdentity(nsec: _bobNsec);
+        await _pumpEventQueue();
+        expect(
+          container.read(channelMessagesProvider(_channelId)).value,
+          isEmpty,
+          reason: 'the switch itself must reset to the empty new-identity view',
+        );
+
+        // A's window query answers late, into B's reign. The page carries a
+        // thread summary so a stale store-write is directly observable via
+        // threadSummaries, not just via the visible rows.
+        parked.complete([
+          _event(id: 'a-late', createdAt: 10),
+          _event(id: 'r1', createdAt: 9),
+          _summary(rootId: 'r1', replyCount: 7),
+          _bounds(hasMore: true, cursorCreatedAt: 9, cursorId: 'a-late'),
+        ]);
+        await _pumpEventQueue();
+
+        // A's stale rows must not become visible state.
+        expect(
+          (container.read(channelMessagesProvider(_channelId)).value ??
+                  const [])
+              .map((e) => e.id),
+          isNot(contains('a-late')),
+          reason: "A's late history response belongs to a dead generation",
+        );
+
+        // And A's stale page must not be installed into the shared window
+        // store: the not-connected branch cleared `_windowStore`, so a stale
+        // write here would resurrect A's data inside B's session.
+        expect(
+          container
+              .read(channelMessagesProvider(_channelId).notifier)
+              .threadSummaries,
+          isEmpty,
+          reason: "A's stale page must not be installed into the window store",
+        );
+      },
+    );
   });
 }
 
@@ -1227,6 +1359,7 @@ const _channelId = '11111111-1111-4111-8111-111111111111';
 
 final _aliceNsec = nostr.Keys.generate().nsec;
 final _bobNsec = nostr.Keys.generate().nsec;
+final _carolNsec = nostr.Keys.generate().nsec;
 
 /// A [RelayConfigNotifier] whose identity can be switched at runtime, standing
 /// in for `activeCommunityProvider` changes without pulling in the community
@@ -1393,6 +1526,13 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final Completer<List<NostrEvent>> _history = Completer<List<NostrEvent>>();
   final Queue<Completer<List<NostrEvent>>> _targetHistories = Queue();
 
+  /// When set, `subscribe()` parks on this future before registering its
+  /// listener. Lets a test hold an init generation's subscribe() in flight
+  /// across an identity switch — the one window `ref.onDispose` cannot cover,
+  /// because the unsubscribe handle does not exist yet when the rebuild
+  /// disposes the previous generation.
+  Future<void>? subscribeGate;
+
   _RecordingRelaySessionNotifier({
     this.failSubscribe = false,
     List<Object> queryResults = const [],
@@ -1400,7 +1540,15 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   }) : _queryResults = Queue<Object>.of(queryResults),
        _historyResults = Queue<List<NostrEvent>>.of(historyResults);
 
+  /// Number of listeners currently registered — lets a test assert that a
+  /// stale subscription was actually torn down rather than merely muted.
+  int get listenerCount => _listeners.length;
+
   Future<void> get subscribed => _subscribed.future;
+
+  /// Resolves when a non-target history fetch completes (or has already
+  /// completed) — lets a test await the deterministic end of a load.
+  Future<List<NostrEvent>> get historyCompleted => _history.future;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -1456,6 +1604,10 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
     }
     if (failSubscribe) {
       throw Exception('subscribe failed');
+    }
+    final gate = subscribeGate;
+    if (gate != null) {
+      await gate;
     }
     _listeners.add(onEvent);
     return () {
