@@ -1197,6 +1197,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-jev"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [

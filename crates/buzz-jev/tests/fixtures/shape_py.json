@@ -1,0 +1,50 @@
+{
+  "source": "recorded live POST https://api.typesafe.ai/v1/systemone; Authorization header not recorded",
+  "recorded_at": "2026-09-27T04:39:58Z",
+  "latency_s": 0.25,
+  "request": {
+    "model": "jev-latest",
+    "state": {
+      "channel": "#eng-relay",
+      "message_text": "The staging relay has been OOMkilled three times since the 0053 migration landed. Can someone look at pod memory limits?"
+    },
+    "questions": {
+      "warrants_agent_action": {
+        "type": "noul",
+        "instructions": "Does this message describe concrete work that an AI agent on this team should pick up and act on?"
+      },
+      "route": {
+        "type": "choice",
+        "instructions": "Which specialty should handle this?",
+        "criteria": {
+          "infra": "deploys, pods, migrations, CI",
+          "security": "auth, secrets, audits",
+          "abstain": "no match"
+        }
+      }
+    }
+  },
+  "response": {
+    "model": "jev-1.13.0",
+    "answers": {
+      "warrants_agent_action": {
+        "type": "noul",
+        "noul": 0.69
+      },
+      "route": {
+        "type": "choice",
+        "choice": "infra",
+        "confidence": 1.0,
+        "probabilities": {
+          "abstain": 0.0,
+          "security": 0.0,
+          "infra": 1.0
+        }
+      }
+    },
+    "usage": {
+      "input_tokens": 407,
+      "output_tokens": 60
+    }
+  }
+}

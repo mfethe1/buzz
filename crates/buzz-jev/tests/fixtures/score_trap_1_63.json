@@ -1,0 +1,104 @@
+{
+  "source": "recorded live POST https://api.typesafe.ai/v1/systemone; Authorization header not recorded",
+  "recorded_at": "2026-09-27T04:41:40Z",
+  "latency_s": 0.22,
+  "request": {
+    "model": "jev-latest",
+    "state": {
+      "channel": "#eng-relay",
+      "channel_purpose": "engineering coordination for the buzz relay",
+      "author_is_agent": false,
+      "message_text": "The staging relay has been OOMkilled three times since the 0053 migration landed. Can someone look at the pod memory limits and the migration's index build?",
+      "thread_depth": 0,
+      "agent_roster": {
+        "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "Infra/COO: deploys, Railway/Cloudflare, Postgres migrations, CI pipelines, cron and healthchecks",
+        "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": "QA/Release: Playwright e2e, canary rollout, idempotency gates, release verification",
+        "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": "Product/Growth: landing pages, analytics, outreach, lead gen, product copy",
+        "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4": "Analyst: market/competitor research, options and trading analysis, data synthesis",
+        "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5": "Implementation: TypeScript/Rust feature code, TDD, refactors, state machines",
+        "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6": "Docs/Context: documentation, ADRs, wiki and vault maintenance, summarization",
+        "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a": "Security/Compliance: security review, auth and authz, secret hygiene, dependency audits"
+      }
+    },
+    "questions": {
+      "warrants_agent_action": {
+        "type": "noul",
+        "instructions": "Does this message describe concrete work that an AI agent on this team should pick up and act on? Social chatter, congratulations, questions aimed at a specific human, and status commentary that requests nothing are all no."
+      },
+      "actionable_specificity": {
+        "type": "score",
+        "instructions": "How specifically is the work described \u2014 could an agent start without asking a clarifying question first?",
+        "criteria": [
+          "Too vague to start: no identifiable artifact, system, or desired outcome",
+          "Partially specified: the area is identifiable but key details are missing",
+          "Well specified: a competent agent could begin immediately"
+        ]
+      },
+      "route_to_agent": {
+        "type": "choice",
+        "instructions": "Which agent on this roster should pick this up, judged by the capability descriptions? Choose abstain if no roster capability is a genuine match or if the message needs no agent.",
+        "criteria": {
+          "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "Infra/COO: deploys, Railway/Cloudflare, Postgres migrations, CI pipelines, cron and healthchecks",
+          "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": "QA/Release: Playwright e2e, canary rollout, idempotency gates, release verification",
+          "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": "Product/Growth: landing pages, analytics, outreach, lead gen, product copy",
+          "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4": "Analyst: market/competitor research, options and trading analysis, data synthesis",
+          "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5": "Implementation: TypeScript/Rust feature code, TDD, refactors, state machines",
+          "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6": "Docs/Context: documentation, ADRs, wiki and vault maintenance, summarization",
+          "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a": "Security/Compliance: security review, auth and authz, secret hygiene, dependency audits",
+          "abstain": "No roster capability genuinely matches, or no agent action is warranted"
+        }
+      },
+      "needs_human_first": {
+        "type": "noul",
+        "instructions": "Does this require a decision from a human (approval, priority call, missing context only a person has) before any agent should act?"
+      }
+    }
+  },
+  "response": {
+    "model": "jev-1.13.0",
+    "answers": {
+      "warrants_agent_action": {
+        "type": "noul",
+        "noul": 0.74
+      },
+      "actionable_specificity": {
+        "type": "score",
+        "score": 1.63,
+        "confidence": 0.44,
+        "legend": {
+          "0": "Too vague to start: no identifiable artifact, system, or desired outcome",
+          "1": "Partially specified: the area is identifiable but key details are missing",
+          "2": "Well specified: a competent agent could begin immediately"
+        },
+        "probabilities": {
+          "0": 0.0,
+          "1": 0.37,
+          "2": 0.63
+        }
+      },
+      "route_to_agent": {
+        "type": "choice",
+        "choice": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "confidence": 1.0,
+        "probabilities": {
+          "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5": 0.0,
+          "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 0.0,
+          "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1.0,
+          "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 0.0,
+          "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6": 0.0,
+          "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4": 0.0,
+          "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a": 0.0,
+          "abstain": 0.0
+        }
+      },
+      "needs_human_first": {
+        "type": "noul",
+        "noul": 0.23
+      }
+    },
+    "usage": {
+      "input_tokens": 1895,
+      "output_tokens": 640
+    }
+  }
+}

@@ -32,6 +32,7 @@ members = [
     "crates/buzz-backend-kubernetes",
     "crates/buzz-datastore-tracing",
     "crates/buzz-budget",
+    "crates/buzz-jev",
     "examples/countdown-bot",
 ]
 exclude = ["desktop/src-tauri"]
