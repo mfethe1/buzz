@@ -453,6 +453,11 @@ test-unit:
         # because nothing in CI runs `cargo test --workspace` — workspace
         # membership alone buys clippy/check, not a single executed test.
         cargo nextest run -p buzz-backend-kubernetes
+        # Jev systemone client (shadow mode). Its doctests carry the
+        # compile_fail proof that `Answer` has no `score`; nextest skips
+        # doctests, so they run separately.
+        cargo nextest run -p buzz-jev
+        cargo test -p buzz-jev --doc
         # buzz-agent model-capabilities corpus: the Rust half of the
         # cross-language drift guard. `model_capabilities.rs` embeds
         # scripts/model-capabilities.json + scripts/normative-corpus.json via
