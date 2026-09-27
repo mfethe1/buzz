@@ -810,6 +810,10 @@ pub(crate) fn originates_channel_content(kind: u32) -> bool {
         KIND_STREAM_MESSAGE
             | KIND_STREAM_MESSAGE_V2
             | KIND_STREAM_MESSAGE_SCHEDULED
+            // A diff/patch post is a top-level channel message of its own (it
+            // renders, counts as unread and triggers workflows), so leaving it
+            // out would let a mere member speak into a read-only channel.
+            | KIND_STREAM_MESSAGE_DIFF
             | KIND_FORUM_POST
             | KIND_FORUM_COMMENT
     )
@@ -3506,6 +3510,7 @@ mod postgres_tests {
             KIND_STREAM_MESSAGE,
             KIND_STREAM_MESSAGE_V2,
             KIND_STREAM_MESSAGE_SCHEDULED,
+            KIND_STREAM_MESSAGE_DIFF,
             KIND_FORUM_POST,
             KIND_FORUM_COMMENT,
         ] {
