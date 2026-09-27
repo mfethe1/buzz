@@ -46,6 +46,12 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// notifier instance. The cache is a cold-start seed, not a running mirror.
   bool _cacheSeedAttempted = false;
 
+  /// Ids painted from the durable snapshot that the relay has not yet
+  /// confirmed. They are dropped when the first history load lands so a
+  /// message deleted or redacted server-side cannot survive as a ghost: the
+  /// cache paints the first frame, it is never authority over it.
+  final Set<String> _unconfirmedCacheSeedIds = <String>{};
+
   /// Whether this channel has completed at least one message history load.
   ///
   /// This distinguishes a genuinely loaded empty channel from the synthetic
@@ -124,9 +130,19 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _confirmLocalMessages(history.map((event) => event.id));
 
       final existing = state.value ?? const <NostrEvent>[];
-      final existingIds = existing.map((event) => event.id).toSet();
+      // Cache-seeded ids are deliberately excluded: anything the relay still
+      // knows about comes back in `history`, and anything it does not must
+      // disappear. Live events received while this load was in flight are not
+      // in the seed set, so they are preserved.
+      final retained = _unconfirmedCacheSeedIds.isEmpty
+          ? existing
+          : existing
+                .where((event) => !_unconfirmedCacheSeedIds.contains(event.id))
+                .toList();
+      _unconfirmedCacheSeedIds.clear();
+      final existingIds = retained.map((event) => event.id).toSet();
       final merged = _withDeepLinkEvents([
-        ...existing,
+        ...retained,
         ...history.where((event) => existingIds.add(event.id)),
       ]);
       _lastKnownMessages = merged;
@@ -434,6 +450,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     if (cached == null || cached.isEmpty) return;
     final seeded = List<NostrEvent>.of(cached)
       ..sort(compareChannelTimelineEventsChronologically);
+    _unconfirmedCacheSeedIds
+      ..clear()
+      ..addAll(seeded.map((event) => event.id));
     _lastKnownMessages = List.unmodifiable(seeded);
   }
 
