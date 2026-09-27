@@ -246,6 +246,21 @@ BEGIN
     END IF;
 END $$;
 
+-- Same gap on Jev routing policy (0054): 'auto' must name a human owner.
+ALTER TABLE channel_routing_policy DROP CONSTRAINT IF EXISTS chk_channel_routing_policy_auto_owner;
+ALTER TABLE channel_routing_policy
+    ADD CONSTRAINT chk_channel_routing_policy_auto_owner
+    CHECK (mode <> 'auto' OR owner_pubkey IS NOT NULL);
+
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM pg_constraint
+        WHERE conname IN ('chk_channel_routing_policy_auto_owner',
+                          'chk_jev_decisions_reason')) <> 2 THEN
+        RAISE EXCEPTION 'jev tables must keep their multi-column CHECKs after pgschema apply';
+    END IF;
+END $$;
+
 DO $$
 BEGIN
     IF NOT EXISTS (
