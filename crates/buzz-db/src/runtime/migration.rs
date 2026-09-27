@@ -711,8 +711,10 @@ mod postgres_tests {
         // upstream-owned relay_admin_action_lease), 0049 structured task
         // history, and 0052_agent_capability_grants (AGENT-HOMES-001 PR-4,
         // renumbered from 0048 because the fork already took that slot).
+        // 0053_channel_write_policy (REG-8 / upstream #2497; renumbered from
+        // 0034, which is upstream-owned replica heartbeat vacuum truncate).
         // All stay additive for existing deployments.
-        assert_eq!(migrations.len(), 51);
+        assert_eq!(migrations.len(), 52);
         assert_eq!(migrations[44].version, 45);
         assert_eq!(migrations[45].version, 46);
         assert_eq!(migrations[46].version, 47);
@@ -733,6 +735,11 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("CREATE TABLE agent_capability_grants"));
+        // Per-channel write policy: authored as 0034 on the REG-8 branch,
+        // renumbered to 0053 because upstream owns 0034 (replica heartbeat
+        // vacuum truncate) and trunk has already shipped through 0052.
+        assert_eq!(migrations[51].version, 53);
+        assert!(migrations[51].sql.as_str().contains("write_policy"));
         let task_changes = migrations[48].sql.as_str();
 
         // Slot 46 is CHECKSUM-FROZEN to the fork's task system.
