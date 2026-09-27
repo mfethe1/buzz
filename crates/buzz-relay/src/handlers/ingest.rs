@@ -3880,6 +3880,238 @@ mod postgres_tests {
         }
     }
 
+    /// REG-8 (final unblock): runtime proof that the write-policy gate
+    /// DENIES. Every prior guard was lexical or read-fidelity; nothing
+    /// asserted a governed write is refused. Seeds a real `admins_only`
+    /// channel plus a `member`-role row in Postgres, then drives the
+    /// production gate `check_channel_write_policy` exactly as
+    /// `ingest_event_inner` calls it (no prefetched row, so the gate takes
+    /// its live DB read path), and asserts the member is refused. Also
+    /// asserts the same member is admitted once the policy returns to
+    /// `any_member`, proving the denial is the policy and not the fixture.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn write_policy_gate_denies_member_post_to_admins_only_channel() {
+        use buzz_core::channel::MemberRole;
+        use std::str::FromStr;
+
+        let url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect test DB");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+            db.migrate().await.expect("migrate test DB");
+        }
+        let state = crate::state::AppState::handler_test_state_with_pool(pool.clone()).await;
+
+        let host = format!("reg8-deny-{}.example", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        let member = nostr::Keys::generate();
+        let member_pk = member.public_key().to_bytes();
+        let channel_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)              VALUES ($1, $2, 'reg8-deny', 'stream', 'open', $3)",
+        )
+        .bind(channel_id)
+        .bind(community.as_uuid())
+        .bind(member_pk)
+        .execute(&pool)
+        .await
+        .expect("seed channel");
+
+        sqlx::query("UPDATE channels SET write_policy = 'admins_only' WHERE id = $1")
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .expect("restrict channel");
+
+        // The creator doubles as the (member-role) poster under test.
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)              VALUES ($1, $2, $3, 'member', $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(member_pk)
+        .execute(&pool)
+        .await
+        .expect("seed member role");
+
+        // Sanity: the fixture parses as the role we think we seeded.
+        assert_eq!(
+            MemberRole::from_str("member").expect("member parses"),
+            MemberRole::Member
+        );
+
+        let tenant = TenantContext::resolved(community, host.clone());
+        // The gate takes its live-DB path (channel = None), exactly the call
+        // shape ingest_event_inner uses when the prefetch missed.
+        let verdict =
+            check_channel_write_policy(&tenant, &state, channel_id, &member_pk, None).await;
+        assert!(
+            verdict.is_err(),
+            "member posting to admins_only must be denied, got {verdict:?}"
+        );
+
+        // Control: the SAME member and fixture, permissive policy — admitted.
+        // Proves the denial came from the stored policy, not the seed.
+        sqlx::query("UPDATE channels SET write_policy = 'any_member' WHERE id = $1")
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .expect("relax channel");
+        let verdict =
+            check_channel_write_policy(&tenant, &state, channel_id, &member_pk, None).await;
+        assert!(
+            verdict.is_ok(),
+            "member posting to any_member must be admitted, got {verdict:?}"
+        );
+
+        // Cleanup.
+        sqlx::query("DELETE FROM channel_members WHERE channel_id = $1")
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .expect("delete member fixture");
+        sqlx::query("DELETE FROM channels WHERE id = $1")
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .expect("delete channel fixture");
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(community.as_uuid())
+            .execute(&pool)
+            .await
+            .expect("delete community fixture");
+    }
+
+    /// REG-8 (round-7 unblock): runtime proof the gate is WIRED IN. The
+    /// round-6 test proved the gate denies when called; opus round 7
+    /// demonstrated that deleting the production call site ships green —
+    /// nothing pins `ingest_event_inner` to its gate. This test publishes
+    /// a governed kind (KIND_STREAM_MESSAGE) as a `member` through the
+    /// FULL production ingest path (`ingest_event_inner`) against a real
+    /// `admins_only` channel and asserts `Rejected` naming the write
+    /// policy. Mutation-verified: disabling the call site fails this test.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ingest_event_rejects_member_post_to_admins_only_channel() {
+        use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF};
+        use nostr::{EventBuilder, Kind, Tag, TagKind};
+
+        let url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect test DB");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+            db.migrate().await.expect("migrate test DB");
+        }
+        let state = AppState::handler_test_state_with_pool(pool.clone()).await;
+
+        let host = format!("reg8-wire-{}.example", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        let member = nostr::Keys::generate();
+        let member_pk = member.public_key().to_bytes();
+        let channel_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by, write_policy)              VALUES ($1, $2, 'reg8-wire', 'stream', 'open', $3, 'admins_only')",
+        )
+        .bind(channel_id)
+        .bind(community.as_uuid())
+        .bind(member_pk)
+        .execute(&pool)
+        .await
+        .expect("seed channel");
+
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)              VALUES ($1, $2, $3, 'member', $3) ON CONFLICT DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind(channel_id)
+        .bind(member_pk)
+        .execute(&pool)
+        .await
+        .expect("seed member role");
+
+        // Governed kinds, channel-scoped via h tag, signed by the member.
+        // The diff post (40008) is here because review found it had been left
+        // unclassified; it must be stopped by the same wired-in gate. Its
+        // repo/commit tags satisfy validate_diff_event, so only the policy can
+        // supply the asserted rejection.
+        let builders = [
+            EventBuilder::new(
+                Kind::Custom(KIND_STREAM_MESSAGE as u16),
+                "reg8 wire-in test",
+            )
+            .tags([Tag::custom(TagKind::custom("h"), [channel_id.to_string()])]),
+            EventBuilder::new(
+                Kind::Custom(KIND_STREAM_MESSAGE_DIFF as u16),
+                "diff --git a/reg8 b/reg8",
+            )
+            .tags([
+                Tag::custom(TagKind::custom("h"), [channel_id.to_string()]),
+                Tag::custom(TagKind::custom("repo"), ["https://example.com/reg8.git"]),
+                Tag::custom(TagKind::custom("commit"), ["0123456789abcdef"]),
+            ]),
+        ];
+
+        let tenant = TenantContext::resolved(community, host.clone());
+        let auth = IngestAuth::Http {
+            pubkey: member.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        struct NoTracer;
+        impl buzz_conformance::Tracer for NoTracer {
+            fn record(&self, _step: buzz_conformance::TraceStep) {}
+        }
+        let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(NoTracer);
+
+        for builder in builders {
+            let event = builder.sign_with_keys(&member).expect("sign event");
+            let kind = event.kind.as_u16();
+            let result = ingest_event_inner(&state, &tracer, &tenant, event, auth.clone()).await;
+            match result {
+                Err(IngestError::Rejected(msg)) => assert!(
+                    msg.contains("channel write policy"),
+                    "kind {kind}: rejection must name the write policy, got: {msg}"
+                ),
+                Ok(_) => panic!(
+                    "kind {kind}: member post to admins_only must be rejected via the wired-in gate"
+                ),
+                Err(other) => panic!(
+                    "kind {kind}: expected Rejected naming the write policy, got another error: {other:?}"
+                ),
+            }
+        }
+
+        // Cleanup.
+        sqlx::query("DELETE FROM channel_members WHERE channel_id = $1")
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .expect("delete member fixture");
+        sqlx::query("DELETE FROM channels WHERE id = $1")
+            .bind(channel_id)
+            .execute(&pool)
+            .await
+            .expect("delete channel fixture");
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(community.as_uuid())
+            .execute(&pool)
+            .await
+            .expect("delete community fixture");
+    }
+
     #[derive(Debug, Default)]
     struct VecTracer {
         steps: Mutex<Vec<TraceStep>>,
