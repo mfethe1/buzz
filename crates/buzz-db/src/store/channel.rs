@@ -16,7 +16,7 @@ use buzz_datastore_tracing::datastore_span;
 // Re-export the canonical enum definitions from buzz-core.
 // These live in core (zero I/O deps) so the SDK can share them
 // without pulling in sqlx/tokio.
-pub use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
+pub use buzz_core::channel::{ChannelType, ChannelVisibility, ChannelWritePolicy, MemberRole};
 
 // Keep the established channel module paths compatible while membership SQL
 // and invariants live in their dedicated store module.
@@ -61,6 +61,10 @@ pub struct ChannelRecord {
     pub channel_type: String,
     /// Visibility string (`"open"` or `"private"`).
     pub visibility: String,
+    /// Who may originate a message in this channel (REG-8 / upstream #2497).
+    /// Defaults to [`ChannelWritePolicy::AnyMember`], the historic
+    /// membership-binary behavior.
+    pub write_policy: ChannelWritePolicy,
     /// Optional channel description.
     pub description: Option<String>,
     /// Optional canvas (rich document) content.
@@ -170,7 +174,7 @@ pub async fn create_channel(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, write_policy::text AS write_policy
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -270,7 +274,7 @@ pub async fn create_channel_with_id(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, write_policy::text AS write_policy
         FROM channels WHERE community_id = $1 AND id = $2
         "#,
     )
@@ -314,7 +318,7 @@ async fn get_channel_with_operation(
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
                purpose, purpose_set_by, purpose_set_at,
-               ttl_seconds, ttl_deadline
+               ttl_seconds, ttl_deadline, write_policy::text AS write_policy
         FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL
         "#,
     )
@@ -396,7 +400,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline
+                   ttl_seconds, ttl_deadline, write_policy::text AS write_policy
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL AND visibility::text = $2
             ORDER BY created_at DESC
@@ -416,7 +420,7 @@ async fn list_channels_with_operation(
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
                    purpose, purpose_set_by, purpose_set_at,
-                   ttl_seconds, ttl_deadline
+                   ttl_seconds, ttl_deadline, write_policy::text AS write_policy
             FROM channels
             WHERE community_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -457,11 +461,24 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
     let ttl_seconds: Option<i32> = row.try_get("ttl_seconds").unwrap_or(None);
     let ttl_deadline: Option<DateTime<Utc>> = row.try_get("ttl_deadline").unwrap_or(None);
 
+    // REG-8 (fail closed): `write_policy` decides who may write, so it must
+    // never fall back to the permissive default. An absent column propagates
+    // the sqlx error — a future SELECT that forgets the column then breaks
+    // loudly instead of silently re-opening every restricted channel — and an
+    // unrecognized stored value is surfaced as `DbError::InvalidData`.
+    let write_policy = match row.try_get::<String, _>("write_policy") {
+        Ok(raw) => raw
+            .parse::<ChannelWritePolicy>()
+            .map_err(DbError::InvalidData)?,
+        Err(err) => return Err(err.into()),
+    };
+
     Ok(ChannelRecord {
         id,
         name: row.try_get("name")?,
         channel_type: row.try_get("channel_type")?,
         visibility: row.try_get("visibility")?,
+        write_policy,
         description: row.try_get("description")?,
         canvas: row.try_get("canvas")?,
         created_by: row.try_get("created_by")?,
@@ -1271,5 +1288,124 @@ mod postgres_tests {
             }),
             "reaper should carry the archived row's community id and host"
         );
+    }
+}
+
+/// REG-8: the write policy must survive a real database round-trip.
+///
+/// Every other guard in this feature is lexical — they read source text and
+/// cannot prove the column is actually stored, projected and parsed. That gap
+/// is not hypothetical: the original defect shipped a policy that was parsed
+/// but never projected, and the entire suite stayed green because nothing ever
+/// put a restrictive policy in a row and read it back.
+#[cfg(test)]
+mod write_policy_postgres_tests {
+    use super::*;
+    use buzz_core::channel::ChannelWritePolicy;
+
+    const TEST_DB_URL: &str = "postgres://buzz:buzz@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+
+    async fn setup_pool() -> PgPool {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+        PgPool::connect(&database_url)
+            .await
+            .expect("connect to test DB")
+    }
+
+    async fn insert_community(pool: &PgPool) -> CommunityId {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(format!("reg8-{}.example", id.simple()))
+            .execute(pool)
+            .await
+            .expect("insert community");
+        CommunityId::from_uuid(id)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn stored_write_policy_round_trips_through_every_read_path() {
+        let pool = setup_pool().await;
+        let community_id = insert_community(&pool).await;
+        let creator = [9_u8; 32];
+
+        let restricted = create_channel(
+            &pool,
+            community_id,
+            "reg8-restricted",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &creator,
+            None,
+        )
+        .await
+        .expect("create restricted channel");
+
+        // A channel is born permissive; the policy is set explicitly.
+        assert_eq!(restricted.write_policy, ChannelWritePolicy::AnyMember);
+
+        sqlx::query(
+            "UPDATE channels SET write_policy = 'admins_only' WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_id.as_uuid())
+        .bind(restricted.id)
+        .execute(&pool)
+        .await
+        .expect("store admins_only");
+
+        // The read path the ingest gate actually uses.
+        let reread = get_channel_with_operation(
+            &pool,
+            community_id,
+            restricted.id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("re-read the restricted channel");
+        assert_eq!(
+            reread.write_policy,
+            ChannelWritePolicy::AdminsOnly,
+            "a stored admins_only policy read back as {:?}; the gate would admit \
+             every member of a restricted channel",
+            reread.write_policy
+        );
+
+        // A second channel proves the value is per-row, not a constant.
+        let open = create_channel(
+            &pool,
+            community_id,
+            "reg8-open",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &creator,
+            None,
+        )
+        .await
+        .expect("create open channel");
+        let open_reread = get_channel_with_operation(
+            &pool,
+            community_id,
+            open.id,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await
+        .expect("re-read the open channel");
+        assert_eq!(open_reread.write_policy, ChannelWritePolicy::AnyMember);
+
+        sqlx::query("DELETE FROM channels WHERE community_id = $1")
+            .bind(community_id.as_uuid())
+            .execute(&pool)
+            .await
+            .expect("delete channel fixtures");
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(community_id.as_uuid())
+            .execute(&pool)
+            .await
+            .expect("delete community fixture");
     }
 }
