@@ -4000,7 +4000,7 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn ingest_event_rejects_member_post_to_admins_only_channel() {
-        use buzz_core::kind::KIND_STREAM_MESSAGE;
+        use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF};
         use nostr::{EventBuilder, Kind, Tag, TagKind};
 
         let url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -4042,14 +4042,27 @@ mod postgres_tests {
         .await
         .expect("seed member role");
 
-        // A governed kind, channel-scoped via h tag, signed by the member.
-        let event = EventBuilder::new(
-            Kind::Custom(KIND_STREAM_MESSAGE as u16),
-            "reg8 wire-in test",
-        )
-        .tags([Tag::custom(TagKind::custom("h"), [channel_id.to_string()])])
-        .sign_with_keys(&member)
-        .expect("sign event");
+        // Governed kinds, channel-scoped via h tag, signed by the member.
+        // The diff post (40008) is here because review found it had been left
+        // unclassified; it must be stopped by the same wired-in gate. Its
+        // repo/commit tags satisfy validate_diff_event, so only the policy can
+        // supply the asserted rejection.
+        let builders = [
+            EventBuilder::new(
+                Kind::Custom(KIND_STREAM_MESSAGE as u16),
+                "reg8 wire-in test",
+            )
+            .tags([Tag::custom(TagKind::custom("h"), [channel_id.to_string()])]),
+            EventBuilder::new(
+                Kind::Custom(KIND_STREAM_MESSAGE_DIFF as u16),
+                "diff --git a/reg8 b/reg8",
+            )
+            .tags([
+                Tag::custom(TagKind::custom("h"), [channel_id.to_string()]),
+                Tag::custom(TagKind::custom("repo"), ["https://example.com/reg8.git"]),
+                Tag::custom(TagKind::custom("commit"), ["0123456789abcdef"]),
+            ]),
+        ];
 
         let tenant = TenantContext::resolved(community, host.clone());
         let auth = IngestAuth::Http {
@@ -4063,15 +4076,21 @@ mod postgres_tests {
         }
         let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(NoTracer);
 
-        let result = ingest_event_inner(&state, &tracer, &tenant, event, auth).await;
-        match result {
-            Err(IngestError::Rejected(msg)) => assert!(
-                msg.contains("channel write policy"),
-                "rejection must name the write policy, got: {msg}"
-            ),
-            Ok(_) => panic!("member post to admins_only must be rejected via the wired-in gate"),
-            Err(other) => {
-                panic!("expected Rejected naming the write policy, got another error: {other:?}")
+        for builder in builders {
+            let event = builder.sign_with_keys(&member).expect("sign event");
+            let kind = event.kind.as_u16();
+            let result = ingest_event_inner(&state, &tracer, &tenant, event, auth.clone()).await;
+            match result {
+                Err(IngestError::Rejected(msg)) => assert!(
+                    msg.contains("channel write policy"),
+                    "kind {kind}: rejection must name the write policy, got: {msg}"
+                ),
+                Ok(_) => panic!(
+                    "kind {kind}: member post to admins_only must be rejected via the wired-in gate"
+                ),
+                Err(other) => panic!(
+                    "kind {kind}: expected Rejected naming the write policy, got another error: {other:?}"
+                ),
             }
         }
 
