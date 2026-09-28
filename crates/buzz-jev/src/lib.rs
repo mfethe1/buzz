@@ -19,7 +19,7 @@ mod wire;
 
 use std::time::Duration;
 
-pub use wire::{Answer, Judgment, NoulCriteria, Question, Request, Usage};
+pub use wire::{argmax, argmax_index, Answer, Judgment, NoulCriteria, Question, Request, Usage};
 
 /// Production endpoint.
 pub const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
