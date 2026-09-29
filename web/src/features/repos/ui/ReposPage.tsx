@@ -63,6 +63,9 @@ function CommunityEmptyState() {
           community in the Buzz desktop app to start pushing code.
         </p>
         <ConnectButton className="mt-6" />
+        <a className="mt-5 text-sm underline" href="/workflows">
+          Open workflows
+        </a>
       </div>
     </div>
   );
@@ -149,6 +152,9 @@ export function ReposPage() {
     <div className="flex w-full flex-1 gap-8 bg-[#F3F3F3] px-4 py-8 dark:bg-[#171717]">
       {/* Main content */}
       <div className="min-w-0 flex-1">
+        <a className="mb-4 inline-block text-sm underline" href="/workflows">
+          Channel workflows
+        </a>
         {/* Mobile-only connect button */}
         <div className="mb-4 lg:hidden">
           <ConnectButton className="w-full" />
