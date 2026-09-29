@@ -28,10 +28,12 @@ export async function makeNip98AuthHeader(
   const tags = [
     ["u", url],
     ["method", method],
+    // The relay rejects replayed NIP-98 events; two GETs in one second must
+    // still produce distinct signed event ids (e.g. a rapid runs refresh).
+    ["nonce", crypto.randomUUID()],
   ];
   if (options?.body !== undefined) {
     tags.push(["payload", await sha256Hex(options.body)]);
-    tags.push(["nonce", crypto.randomUUID()]);
   }
   const event = await signNostrEvent(
     {
