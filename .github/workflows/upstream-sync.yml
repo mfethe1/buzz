@@ -1,0 +1,94 @@
+name: Upstream Sync
+
+# Keeps mfethe1/buzz tracking block/buzz:
+#   - main (mirror branch): fast-forward to block/buzz main. Fails loudly if not FF.
+#   - product/main (our work branch): never auto-merged. Divergence is measured and
+#     reported in the job summary so a human/agent decides when to integrate.
+on:
+  schedule:
+    - cron: "23 9 * * *" # daily 09:23 UTC (~5:23 AM EDT)
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Fast-forward main to block/buzz
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/block/buzz.git
+          git fetch upstream main
+          UP=$(git rev-parse upstream/main)
+          if git merge-base --is-ancestor "$UP" origin/main; then
+            echo "main already contains upstream HEAD; nothing to do"
+            exit 0
+          fi
+          if ! git merge-base --is-ancestor origin/main "$UP"; then
+            echo "::error::upstream history diverged from mirror main (not fast-forwardable). Manual rebase required."
+            exit 1
+          fi
+          git merge --ff-only "$UP"
+          git push origin main
+          echo "### Mirror main fast-forwarded to $UP" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Measure product/main divergence (report only, no auto-merge)
+        id: measure
+        run: |
+          set -euo pipefail
+          git fetch origin product/main
+          PM=$(git rev-parse origin/product/main)
+          UP=$(git rev-parse upstream/main)
+          git checkout -B measure origin/product/main
+          BASE=$(git merge-base "$PM" "$UP")
+          AHEAD=$(git rev-list --count "$UP..$PM")
+          BEHIND=$(git rev-list --count "$PM..$UP")
+          {
+            echo "### product/main divergence vs block/buzz"
+            echo "- our commits ahead: $AHEAD"
+            echo "- upstream commits behind: $BEHIND"
+            echo "- merge-base: ${BASE:0:8}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$BEHIND" -gt 0 ]; then
+            echo "### Action needed" >> "$GITHUB_STEP_SUMMARY"
+            echo "product/main is $BEHIND commits behind upstream. Run the integration merge (owner: fleet Hermes agent)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # Trial-merge to detect conflicts early — never pushed
+          if ! git merge --no-commit --no-ff "$UP" 2>merge.err; then
+            echo "### CONFLICTS DETECTED" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            sed -n '1,40p' merge.err >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            git merge --abort || true
+          else
+            git merge --abort || true
+            echo "### Merge preview: clean (no conflicts)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Fail the job when product/main integration is pending
+        run: |
+          # Red job = visible signal on GitHub + badge; keeps 'behind' impossible to miss
+          set -euo pipefail
+          git fetch origin product/main
+          git remote add upstream https://github.com/block/buzz.git || true
+          git fetch upstream main
+          PM=$(git rev-parse origin/product/main)
+          UP=$(git rev-parse upstream/main)
+          BEHIND=$(git rev-list --count "$PM..$UP")
+          if [ "$BEHIND" -gt 0 ]; then
+            echo "product/main is $BEHIND commits behind upstream — integration merge pending"
+            exit 1
+          fi
+          echo "product/main is current with upstream"
