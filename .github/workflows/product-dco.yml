@@ -51,7 +51,13 @@ jobs:
             const { verify } = require('./trusted-dco/.github/scripts/product-dco.js');
             const { writeFileSync } = require('node:fs');
             const { join } = require('node:path');
-            const receipt = await verify({ github, context: { ...context, evaluatorSha: process.env.DCO_EVALUATOR_SHA } });
+            // Spreading `context` DROPS @actions/github's prototype getters
+            // (`repo`, `issue`), so the evaluator threw before verifying any
+            // sign-off and every PR failed closed. Derive, never copy.
+            const fenced = Object.create(context, {
+              evaluatorSha: { value: process.env.DCO_EVALUATOR_SHA, enumerable: true },
+            });
+            const receipt = await verify({ github, context: fenced });
             writeFileSync(join(process.env.RUNNER_TEMP, 'product-dco.json'), JSON.stringify(receipt, null, 2));
             if (!receipt.qualified) core.setFailed('One or more commits lacks its author sign-off');
       - name: Retain exact-change DCO evidence
