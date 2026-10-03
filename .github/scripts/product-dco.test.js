@@ -13,8 +13,13 @@ const author = { name: "Test Author", email: "author@example.com" };
 const signed = "Example change\n\nSigned-off-by: Test Author <author@example.com>\n";
 
 function harness(count = 1) {
-  const context = {
-    repo: { owner: "mfethe1", repo: "buzz" },
+  // Faithful to @actions/github: `repo` is a PROTOTYPE GETTER, not an own
+  // property, so object spread drops it. A plain `repo:` literal here made the
+  // workflow-script test pass against a shape the runner never produces.
+  class Context {
+    get repo() { return { owner: "mfethe1", repo: "buzz" }; }
+  }
+  const context = Object.assign(new Context(), {
     sha: BASE,
     evaluatorSha: BASE,
     eventName: "pull_request_target",
@@ -27,7 +32,7 @@ function harness(count = 1) {
         head: { sha: HEAD },
       },
     },
-  };
+  });
   const initial = structuredClone(context.payload.pull_request);
   const latest = structuredClone(initial);
   const commits = Array.from({ length: count }, (_, index) => ({
