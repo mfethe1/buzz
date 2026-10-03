@@ -123,13 +123,23 @@ for (const allArchived of [false, true]) {
     );
     // Persona navigation still excludes archived representatives.
     await page.getByTestId("auxiliary-panel-close").click();
-    await page.getByTestId(`persona-agent-row-${PERSONA}`).click();
+    // Distinct names split a persona into cards for its surviving identities.
+    await page
+      .getByTestId(
+        allArchived
+          ? `persona-agent-row-${PERSONA}`
+          : `persona-agent-row-${PERSONA}::sibling b`,
+      )
+      .click();
     if (allArchived) {
       await expect(page.getByTestId("user-profile-start-agent")).toBeVisible();
       await expect(
         page.getByTestId("user-profile-agent-primary-action"),
       ).toHaveCount(0);
     } else {
+      await expect(page.getByTestId("user-profile-name-row")).toContainText(
+        "Sibling B",
+      );
       await expect(
         page.getByTestId("user-profile-agent-primary-action"),
       ).toHaveAttribute("aria-label", "Stop");
