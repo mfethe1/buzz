@@ -1,5 +1,9 @@
 mod connection_observability;
 pub mod migration;
+/// Test-only inventory checks over the on-disk `migrations/` directory. Gated so
+/// no production startup path gains code from this feature.
+#[cfg(test)]
+mod migration_inventory;
 pub(crate) mod observability;
 pub mod replica_fence;
 
