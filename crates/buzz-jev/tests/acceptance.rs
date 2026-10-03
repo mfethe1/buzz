@@ -2,8 +2,9 @@
 //! (`tests/fixtures/*.json`, recorded without the Authorization header).
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
-use buzz_jev::{argmax_index, Answer, JevError, Judgment, Request};
+use buzz_jev::{argmax_index, Answer, Client, JevError, Judgment, Request, TIMEOUT};
 use serde_json::Value;
 
 const SCORE_TRAP: &str = include_str!("fixtures/score_trap_1_63.json");
@@ -148,4 +149,72 @@ fn missing_answer_fails_the_request_check() {
         judgment.check_against(&request),
         Err(JevError::ShapeAnomaly { question, .. }) if question == "route"
     ));
+}
+
+#[test]
+fn blank_key_is_a_loud_error() {
+    assert!(matches!(
+        Client::new(buzz_jev::ENDPOINT, "  "),
+        Err(JevError::MissingKey)
+    ));
+}
+
+// (3) A real local listener that accepts and then never responds.
+#[tokio::test]
+async fn silent_server_times_out_within_2_1_s() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+
+    let client = Client::new(format!("http://{addr}/v1/systemone"), "test-key").expect("client");
+    let request: Request =
+        serde_json::from_value(fixture(SHAPE_PY)["request"].clone()).expect("request");
+
+    let started = Instant::now();
+    let result = client.judge(&request).await;
+    let elapsed = started.elapsed();
+
+    assert!(matches!(result, Err(JevError::Timeout)), "got {result:?}");
+    assert!(elapsed >= TIMEOUT, "fired early: {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_millis(2100),
+        "too slow: {elapsed:?}"
+    );
+}
+
+// (4) Live smoke: JEV_LIVE=1 sends the shape.py request to production.
+#[tokio::test]
+async fn live_shape_py_smoke() {
+    if std::env::var("JEV_LIVE").as_deref() != Ok("1") {
+        eprintln!("skipped: set JEV_LIVE=1 and JEV_API_KEY to run");
+        return;
+    }
+    let client = Client::from_env().expect("JEV_LIVE=1 requires JEV_API_KEY");
+    let request: Request =
+        serde_json::from_value(fixture(SHAPE_PY)["request"].clone()).expect("request");
+    let judgment = client.judge(&request).await.expect("live call");
+
+    assert!(
+        judgment.model.starts_with("jev-"),
+        "model {}",
+        judgment.model
+    );
+    assert!(matches!(
+        judgment.answers["warrants_agent_action"],
+        Answer::Noul { .. }
+    ));
+    match &judgment.answers["route"] {
+        Answer::Choice { option, .. } => {
+            assert!(["infra", "security", "abstain"].contains(&option.as_str()));
+        }
+        other => panic!("route is not a choice: {other:?}"),
+    }
+    assert!(judgment.usage.input_tokens > 0 && judgment.usage.output_tokens > 0);
 }

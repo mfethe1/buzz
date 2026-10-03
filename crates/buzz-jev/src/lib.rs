@@ -17,7 +17,11 @@
 
 mod wire;
 
+use std::fmt;
 use std::time::Duration;
+
+use reqwest::header::{HeaderValue, AUTHORIZATION};
+use reqwest::StatusCode;
 
 pub use wire::{argmax, argmax_index, Answer, Judgment, NoulCriteria, Question, Request, Usage};
 
@@ -27,6 +31,8 @@ pub const ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 pub const API_KEY_ENV: &str = "JEV_API_KEY";
 /// Hard deadline for one call: connect, request, and full response body.
 pub const TIMEOUT: Duration = Duration::from_secs(2);
+/// Longest error-body excerpt kept in [`JevError::Rejected`].
+const BODY_EXCERPT: usize = 512;
 
 /// Everything that can go wrong asking Jev.
 #[derive(Debug, thiserror::Error)]
@@ -68,4 +74,91 @@ pub enum JevError {
         /// What was wrong.
         detail: String,
     },
+}
+
+/// Systemone client. Cheap to clone; reuses connections.
+#[derive(Clone)]
+pub struct Client {
+    http: reqwest::Client,
+    endpoint: String,
+    auth: HeaderValue,
+}
+
+impl fmt::Debug for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Client")
+            .field("endpoint", &self.endpoint)
+            .field("auth", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Client {
+    /// Production client keyed from [`API_KEY_ENV`].
+    pub fn from_env() -> Result<Self, JevError> {
+        Self::new(ENDPOINT, &std::env::var(API_KEY_ENV).unwrap_or_default())
+    }
+
+    /// Client for an explicit endpoint and key. A blank key is rejected.
+    pub fn new(endpoint: impl Into<String>, api_key: &str) -> Result<Self, JevError> {
+        let api_key = api_key.trim();
+        if api_key.is_empty() {
+            return Err(JevError::MissingKey);
+        }
+        let mut auth = HeaderValue::from_str(&format!("Bearer {api_key}"))
+            .map_err(|_| JevError::MissingKey)?;
+        auth.set_sensitive(true);
+        let http = reqwest::Client::builder()
+            .build()
+            .map_err(JevError::Transport)?;
+        Ok(Self {
+            http,
+            endpoint: endpoint.into(),
+            auth,
+        })
+    }
+
+    /// Ask the questions in `request` and return the validated judgment.
+    ///
+    /// Fails with [`JevError::Timeout`] if the whole exchange, body included,
+    /// takes longer than [`TIMEOUT`].
+    pub async fn judge(&self, request: &Request) -> Result<Judgment, JevError> {
+        let exchange = async {
+            let response = self
+                .http
+                .post(&self.endpoint)
+                .header(AUTHORIZATION, self.auth.clone())
+                .json(request)
+                .send()
+                .await
+                .map_err(JevError::Transport)?;
+            let status = response.status();
+            let body = response.bytes().await.map_err(JevError::Transport)?;
+            Ok::<_, JevError>((status, body))
+        };
+        let (status, body) = tokio::time::timeout(TIMEOUT, exchange)
+            .await
+            .map_err(|_| JevError::Timeout)??;
+        check_status(status, &body)?;
+        let judgment = Judgment::from_slice(&body)?;
+        judgment.check_against(request)?;
+        Ok(judgment)
+    }
+}
+
+fn check_status(status: StatusCode, body: &[u8]) -> Result<(), JevError> {
+    let code = status.as_u16();
+    match code {
+        _ if status.is_success() => Ok(()),
+        401 | 403 => Err(JevError::Unauthorized(code)),
+        429 => Err(JevError::RateLimited),
+        400..=499 => {
+            let text = String::from_utf8_lossy(body);
+            Err(JevError::Rejected {
+                status: code,
+                body: text.chars().take(BODY_EXCERPT).collect(),
+            })
+        }
+        _ => Err(JevError::Server(code)),
+    }
 }
