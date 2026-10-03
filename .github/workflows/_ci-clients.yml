@@ -62,7 +62,12 @@ jobs:
   mobile:
     name: Mobile
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 30m was not enough for a COLD run: a Hermit cache miss spends ~13m
+    # priming the Flutter SDK before any test runs, leaving ~4m for the
+    # Android APK assembly, which then dies at the timeout and surfaces as a
+    # bare "The operation was canceled" with no failing test. Measured on
+    # PR #103 job 110633213559: 30m16s wall, prime 23:32:15->23:45:26.
+    timeout-minutes: 50
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.mobile)
     permissions:
       contents: read
