@@ -884,14 +884,27 @@ mobile-install:
 
 # Format all Dart code
 mobile-fmt:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Hermit-pinned dart, not whatever is on PATH: CI formats with the pinned SDK,
+    # and dart's formatter output differs between SDK versions. A bare `dart format`
+    # resolving to a newer system SDK writes bytes that CI's
+    # `--set-exit-if-changed` then rejects, so the file ping-pongs forever.
+    export PATH="{{justfile_directory()}}/bin:$PATH"
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format .
 
 # Fix mobile formatting and run analysis
 mobile-fix:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format . && flutter analyze
 
 # Run mobile lint and format checks
 mobile-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format --output=none --set-exit-if-changed . && flutter analyze
 
 # Run mobile tests
