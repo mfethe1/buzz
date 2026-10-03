@@ -56,16 +56,21 @@ pub const CONTROL_PLANE_TABLES: &[&str] = &[
 /// blocks deletion until this manifest is intentionally updated.
 pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "agent_capability_grants",
+    "agent_routing_profiles",
     "api_tokens",
     "archived_identities",
     "audit_log",
     "channel_members",
+    "channel_routing_policy",
     "channels",
     "community_bans",
     "delivery_log",
     "event_mentions",
     "events",
     "git_repo_names",
+    "jev_classify_queue",
+    "jev_decision_feedback",
+    "jev_decisions",
     "join_policy_acceptances",
     "moderation_actions",
     "moderation_reports",
@@ -90,6 +95,11 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
 
 /// Foreign-key-safe child-before-parent order for the PostgreSQL purge.
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
+    "jev_decision_feedback",
+    "jev_decisions",
+    "jev_classify_queue",
+    "channel_routing_policy",
+    "agent_routing_profiles",
     "agent_capability_grants",
     "workflow_approvals",
     "scheduled_workflow_fires",

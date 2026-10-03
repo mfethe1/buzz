@@ -714,7 +714,9 @@ mod postgres_tests {
         // 0053_channel_write_policy (REG-8 / upstream #2497; renumbered from
         // 0034, which is upstream-owned replica heartbeat vacuum truncate).
         // All stay additive for existing deployments.
-        assert_eq!(migrations.len(), 52);
+        // 0054_jev_decisions (JEV-J1): Jev routing decisions, labels,
+        // classify queue, channel routing policy and agent routing profiles.
+        assert_eq!(migrations.len(), 53);
         assert_eq!(migrations[44].version, 45);
         assert_eq!(migrations[45].version, 46);
         assert_eq!(migrations[46].version, 47);
@@ -740,6 +742,11 @@ mod postgres_tests {
         // vacuum truncate) and trunk has already shipped through 0052.
         assert_eq!(migrations[51].version, 53);
         assert!(migrations[51].sql.as_str().contains("write_policy"));
+        assert_eq!(migrations[52].version, 54);
+        assert!(migrations[52]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE jev_decisions"));
         let task_changes = migrations[48].sql.as_str();
 
         // Slot 46 is CHECKSUM-FROZEN to the fork's task system.
@@ -1974,7 +1981,16 @@ mod postgres_tests {
         // here so the comparison below stays an exact equality: a new scoped
         // table that forgets its fence line still fails this test, and a fence
         // line for a table nobody registered here fails it too.
-        for post_0029_scoped_table in ["tasks", "task_events", "agent_capability_grants"] {
+        for post_0029_scoped_table in [
+            "tasks",
+            "task_events",
+            "agent_capability_grants",
+            "jev_decisions",
+            "jev_decision_feedback",
+            "jev_classify_queue",
+            "channel_routing_policy",
+            "agent_routing_profiles",
+        ] {
             expected_fences.insert(post_0029_scoped_table.to_owned());
         }
         assert_eq!(
