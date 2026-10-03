@@ -189,44 +189,52 @@ test("trusted workflow pins base evaluator and publishes its own exact-head cont
   assert.match(ci, /QUALIFICATION_EVALUATOR_SHA:.*pull_request\.base\.sha.*github\.event\.before/);
 });
 
-test("actual trusted workflow never imports candidate verifier and fails its unsigned head", async () => {
-  const data = harness();
-  data.commits[0].commit.message = "Unsigned candidate change";
-  const files = new Map();
-  const updates = [];
-  const outputs = new Map();
-  const failures = [];
-  const core = { setOutput: (key, value) => outputs.set(key, value), setFailed: (message) => failures.push(message) };
-  data.github.rest.checks = {
-    create: async (request) => {
-      assert.equal(request.name, "Product DCO");
-      assert.equal(request.head_sha, HEAD);
-      assert.equal(request.status, "in_progress");
-      return { data: { id: 42 } };
-    },
-    update: async (request) => updates.push(request),
-  };
-  const runtime = { env: { RUNNER_TEMP: "/runner-temp", DCO_EVALUATOR_SHA: BASE,
-    DCO_CHECK_ID: "42", DCO_JOB_STATUS: "success" } };
-  const importTrusted = (name) => {
-    if (name === "./trusted-dco/.github/scripts/product-dco.js") return { verify };
-    if (name === "node:path") return path;
-    if (name === "node:fs") return {
-      writeFileSync: (name, content) => files.set(name, content),
-      readFileSync: (name) => { if (!files.has(name)) throw Error("missing receipt"); return files.get(name); },
+for (const isSigned of [true, false]) {
+  test(`actual trusted workflow never imports candidate verifier and ${isSigned ? "accepts its signed" : "rejects its unsigned"} head`, async () => {
+    const data = harness();
+    if (!isSigned) data.commits[0].commit.message = "Unsigned candidate change";
+    // The workflow must overlay its trusted base without mutating the runner Context.
+    data.context.evaluatorSha = TESTED;
+    const files = new Map();
+    const updates = [];
+    const outputs = new Map();
+    const failures = [];
+    const core = { setOutput: (key, value) => outputs.set(key, value), setFailed: (message) => failures.push(message) };
+    data.github.rest.checks = {
+      create: async (request) => {
+        assert.equal(request.name, "Product DCO");
+        assert.equal(request.head_sha, HEAD);
+        assert.equal(request.status, "in_progress");
+        return { data: { id: 42 } };
+      },
+      update: async (request) => updates.push(request),
     };
-    throw Error(`Candidate or unexpected module import: ${name}`);
-  };
-  for (const name of ["Start check on the exact candidate head", "Verify every commit's author sign-off",
-    "Publish final result after refreshing PR identity"]) {
-    await workflowScript(name)(data.github, data.context, core, importTrusted, runtime);
-  }
-  assert.equal(outputs.get("check_id"), 42);
-  assert.equal(updates.length, 1);
-  assert.equal(updates[0].conclusion, "failure");
-  assert.equal(updates[0].check_run_id, 42);
-  assert.ok(failures.length);
-});
+    const runtime = { env: { RUNNER_TEMP: "/runner-temp", DCO_EVALUATOR_SHA: BASE,
+      DCO_CHECK_ID: "42", DCO_JOB_STATUS: "success" } };
+    const importTrusted = (name) => {
+      if (name === "./trusted-dco/.github/scripts/product-dco.js") return { verify };
+      if (name === "node:path") return path;
+      if (name === "node:fs") return {
+        writeFileSync: (name, content) => files.set(name, content),
+        readFileSync: (name) => { if (!files.has(name)) throw Error("missing receipt"); return files.get(name); },
+      };
+      throw Error(`Candidate or unexpected module import: ${name}`);
+    };
+    for (const name of ["Start check on the exact candidate head", "Verify every commit's author sign-off",
+      "Publish final result after refreshing PR identity"]) {
+      await workflowScript(name)(data.github, data.context, core, importTrusted, runtime);
+    }
+    assert.equal(outputs.get("check_id"), 42);
+    assert.equal(updates.length, 1);
+    assert.equal(updates[0].conclusion, isSigned ? "success" : "failure");
+    assert.equal(updates[0].check_run_id, 42);
+    assert.equal(failures.length > 0, !isSigned);
+    const receipt = JSON.parse(files.get("/runner-temp/product-dco.json"));
+    assert.equal(receipt.evaluator_sha, BASE);
+    assert.equal(receipt.qualified, isSigned);
+    assert.equal(data.context.evaluatorSha, TESTED);
+  });
+}
 
 test("actual publisher rejects stale tuple, absent receipt, wrong evaluator, and failed evidence upload", async () => {
   for (const scenario of ["success", "new-base", "new-head", "missing", "wrong-evaluator", "failed-job"]) {

@@ -305,9 +305,11 @@ void main() {
               ?.map((e) => e.id),
           ['m1', 'live'],
         );
-        expect(harness.cached(_channelId)?.map((e) => e.id), [
-          'm1',
-        ], reason: 'the live event is an in-memory overlay, not a cache write');
+        expect(
+          harness.cached(_channelId)?.map((e) => e.id),
+          ['m1'],
+          reason: 'the live event is an in-memory overlay, not a cache write',
+        );
       },
     );
 
